@@ -1,0 +1,25 @@
+{
+  "environment": "development",
+  "debug": false,
+  "log_level": "INFO",
+  "brand": "onw",
+
+  "host": "0.0.0.0",
+  "port": 8000,
+  "websocket_port": 8765,
+
+  "alert_source": "nwws",
+  "use_api_fallback": true,
+
+  "filter_states": ["OH", "IN", "MI", "KY", "WV", "PA"],
+  "filter_offices": [],
+  "filter_ugc_codes": [],
+
+  "default_alert_lifetime_minutes": 60,
+  "alert_cleanup_interval_seconds": 60,
+
+  "cache_zone_geometries": true,
+  "zone_cache_ttl_hours": 24,
+
+  "persist_alerts": true
+}
