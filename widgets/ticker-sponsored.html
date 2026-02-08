@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sponsored Alert Ticker - Weather Dashboard V2</title>
+    <link rel="stylesheet" href="ticker-sponsored.css">
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background: transparent;
+        }
+    </style>
+</head>
+<body>
+    <!-- Connection Status Indicator -->
+    <div id="connection-status" class="connection-status"></div>
+
+    <!-- Main Ticker Container -->
+    <div id="ticker-container" class="ticker-container no-alerts">
+        <!-- Sponsor Container -->
+        <div id="sponsor-container" class="sponsor-container">
+            <div class="sponsor-text">Weather Ticker<br><small>Powered by Rural First</small></div>
+        </div>
+
+        <!-- Alert Type Badge -->
+        <div id="ticker-badge" class="ticker-badge">WX</div>
+
+        <!-- Alert Content -->
+        <div id="ticker-content" class="ticker-content" style="display: none;">
+            <div id="ticker-title" class="ticker-title">Loading...</div>
+            <div id="ticker-subtitle" class="ticker-subtitle"></div>
+            <div class="ticker-location-wrapper">
+                <span id="ticker-location" class="ticker-location">Connecting to server...</span>
+            </div>
+        </div>
+
+        <!-- Expiration Time -->
+        <div id="ticker-expires" class="ticker-expires" style="display: none;">
+            <div class="ticker-expires-label">Expires</div>
+            <div id="ticker-expires-time" class="ticker-expires-time">--</div>
+        </div>
+
+        <!-- No Alerts Message -->
+        <div id="ticker-no-alerts" class="ticker-no-alerts">
+            <span>No Active Alerts</span>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="widget-common.js"></script>
+    <script src="ticker-sponsored.js"></script>
+
+    <script>
+        // Show expires section when alerts are displayed
+        const observer = new MutationObserver((mutations) => {
+            const container = document.getElementById('ticker-container');
+            const expiresEl = document.getElementById('ticker-expires');
+            const hasAlerts = !container.classList.contains('no-alerts');
+            expiresEl.style.display = hasAlerts ? 'block' : 'none';
+        });
+
+        observer.observe(document.getElementById('ticker-container'), {
+            attributes: true,
+            attributeFilter: ['class']
+        });
+    </script>
+</body>
+</html>
+
+<!--
+URL Parameters:
+  - theme: classic, atmospheric, storm-chaser, meteorologist, winter
+  - states: comma-separated state codes (e.g., OH,WA,OR)
+  - speed: alert rotation speed in milliseconds (default: 10000)
+  - sponsor_speed: sponsor rotation speed in milliseconds (default: 15000)
+  - sponsors: URL-encoded JSON array of sponsor objects
+
+Sponsor Object Format:
+  {
+    "type": "image" | "text",
+    "name": "Sponsor Name",
+    "logo": "https://example.com/logo.png",  // for type: "image"
+    "content": "Display Text",                // for type: "text"
+    "subtext": "Secondary text"               // optional
+  }
+
+Examples:
+  ticker-sponsored.html
+  ticker-sponsored.html?theme=storm-chaser
+  ticker-sponsored.html?states=OH,WA,OR
+  ticker-sponsored.html?theme=winter&speed=15000&sponsor_speed=20000
+
+  With custom sponsors (URL encoded):
+  ticker-sponsored.html?sponsors=%5B%7B%22type%22%3A%22text%22%2C%22content%22%3A%22ACME%20Weather%22%7D%5D
+-->

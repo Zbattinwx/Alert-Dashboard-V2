@@ -1,0 +1,572 @@
+/* Alert Dashboard V2 - Ticker Widget Styles */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    overflow: hidden;
+    background: transparent;
+}
+
+/* Main ticker container */
+.ticker-container {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+    border-top: 3px solid #e94560;
+    transition: border-color 0.3s ease, background 0.3s ease;
+    overflow: hidden;
+}
+
+/* Alert type badge */
+.ticker-badge {
+    flex-shrink: 0;
+    width: 100px;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #e94560;
+    font-weight: bold;
+    font-size: 18px;
+    color: white;
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+    transition: background 0.3s ease;
+}
+
+/* Alert content area */
+.ticker-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 0 20px;
+    overflow: hidden;
+    min-width: 0;
+}
+
+/* Event name / title */
+.ticker-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #ffffff;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+}
+
+/* Key details subtitle */
+.ticker-subtitle {
+    font-size: 13px;
+    color: #ffcc00;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    font-weight: 500;
+}
+
+.ticker-subtitle:empty {
+    display: none;
+}
+
+/* Location text with scroll animation */
+.ticker-location {
+    font-size: 14px;
+    color: #b0b0b0;
+    white-space: nowrap;
+    display: inline-block;
+}
+
+.ticker-location.scrolling {
+    animation: scrollText linear infinite;
+}
+
+@keyframes scrollText {
+    0% {
+        transform: translateX(0);
+    }
+    100% {
+        transform: translateX(-100%);
+    }
+}
+
+/* Expiration time */
+.ticker-expires {
+    flex-shrink: 0;
+    padding: 0 20px;
+    text-align: right;
+    color: #ffffff;
+}
+
+.ticker-expires-label {
+    font-size: 12px;
+    color: #888;
+    text-transform: uppercase;
+}
+
+.ticker-expires-time {
+    font-size: 18px;
+    font-weight: bold;
+}
+
+/* No alerts state */
+.ticker-container.no-alerts {
+    background: linear-gradient(270deg, #1a1a2e, #16213e, #0f3460, #16213e);
+    background-size: 400% 400%;
+    animation: gradientShift 10s ease infinite;
+    border-color: #4a4a6a;
+}
+
+.ticker-container.no-alerts .ticker-badge {
+    background: #4a4a6a;
+}
+
+.ticker-no-alerts {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #888;
+    font-size: 16px;
+}
+
+@keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+
+/* Alert Type Colors */
+.ticker-container.TO,
+.ticker-container.TOR {
+    border-color: #FF0000;
+}
+.ticker-container.TO .ticker-badge,
+.ticker-container.TOR .ticker-badge {
+    background: #FF0000;
+}
+
+.ticker-container.SV,
+.ticker-container.SVR,
+.ticker-container.SVS {
+    border-color: #FFA500;
+}
+.ticker-container.SV .ticker-badge,
+.ticker-container.SVR .ticker-badge,
+.ticker-container.SVS .ticker-badge {
+    background: #FFA500;
+}
+
+.ticker-container.TOA {
+    border-color: #FFFF00;
+}
+.ticker-container.TOA .ticker-badge {
+    background: #FFFF00;
+    color: #000;
+}
+
+.ticker-container.SVA {
+    border-color: #DB7093;
+}
+.ticker-container.SVA .ticker-badge {
+    background: #DB7093;
+}
+
+.ticker-container.FF,
+.ticker-container.FFW,
+.ticker-container.FFS {
+    border-color: #8B0000;
+}
+.ticker-container.FF .ticker-badge,
+.ticker-container.FFW .ticker-badge,
+.ticker-container.FFS .ticker-badge {
+    background: #8B0000;
+}
+
+.ticker-container.FFA {
+    border-color: #2E8B57;
+}
+.ticker-container.FFA .ticker-badge {
+    background: #2E8B57;
+}
+
+.ticker-container.FL,
+.ticker-container.FLW,
+.ticker-container.FLS {
+    border-color: #00FF00;
+}
+.ticker-container.FL .ticker-badge,
+.ticker-container.FLW .ticker-badge,
+.ticker-container.FLS .ticker-badge {
+    background: #00FF00;
+    color: #000;
+}
+
+.ticker-container.FLA {
+    border-color: #2E8B57;
+}
+.ticker-container.FLA .ticker-badge {
+    background: #2E8B57;
+}
+
+.ticker-container.WS,
+.ticker-container.WSW {
+    border-color: #FF69B4;
+}
+.ticker-container.WS .ticker-badge,
+.ticker-container.WSW .ticker-badge {
+    background: #FF69B4;
+}
+
+.ticker-container.WSA {
+    border-color: #4682B4;
+}
+.ticker-container.WSA .ticker-badge {
+    background: #4682B4;
+}
+
+.ticker-container.BZ,
+.ticker-container.BZW {
+    border-color: #FF4500;
+}
+.ticker-container.BZ .ticker-badge,
+.ticker-container.BZW .ticker-badge {
+    background: #FF4500;
+}
+
+.ticker-container.IS,
+.ticker-container.ISW {
+    border-color: #8B008B;
+}
+.ticker-container.IS .ticker-badge,
+.ticker-container.ISW .ticker-badge {
+    background: #8B008B;
+}
+
+.ticker-container.LE,
+.ticker-container.LEW {
+    border-color: #00CED1;
+}
+.ticker-container.LE .ticker-badge,
+.ticker-container.LEW .ticker-badge {
+    background: #00CED1;
+    color: #000;
+}
+
+.ticker-container.WW,
+.ticker-container.WWA {
+    border-color: #7B68EE;
+}
+.ticker-container.WW .ticker-badge,
+.ticker-container.WWA .ticker-badge {
+    background: #7B68EE;
+}
+
+.ticker-container.WC,
+.ticker-container.WCW {
+    border-color: #B0C4DE;
+}
+.ticker-container.WC .ticker-badge,
+.ticker-container.WCW .ticker-badge {
+    background: #B0C4DE;
+    color: #000;
+}
+
+.ticker-container.HW,
+.ticker-container.HWW {
+    border-color: #DAA520;
+}
+.ticker-container.HW .ticker-badge,
+.ticker-container.HWW .ticker-badge {
+    background: #DAA520;
+}
+
+.ticker-container.SPS {
+    border-color: #FFE4B5;
+}
+.ticker-container.SPS .ticker-badge {
+    background: #FFE4B5;
+    color: #000;
+}
+
+.ticker-container.SQ,
+.ticker-container.SQW {
+    border-color: #C71585;
+}
+.ticker-container.SQ .ticker-badge,
+.ticker-container.SQW .ticker-badge {
+    background: #C71585;
+}
+
+.ticker-container.CW {
+    border-color: #AFEEEE;
+}
+.ticker-container.CW .ticker-badge {
+    background: #AFEEEE;
+    color: #000;
+}
+
+.ticker-container.WI {
+    border-color: #D2B48C;
+}
+.ticker-container.WI .ticker-badge {
+    background: #D2B48C;
+    color: #000;
+}
+
+.ticker-container.EW {
+    border-color: #FF8C00;
+}
+.ticker-container.EW .ticker-badge {
+    background: #FF8C00;
+    color: #000;
+}
+
+.ticker-container.EH {
+    border-color: #C71585;
+}
+.ticker-container.EH .ticker-badge {
+    background: #C71585;
+}
+
+.ticker-container.EHA {
+    border-color: #800000;
+}
+.ticker-container.EHA .ticker-badge {
+    background: #800000;
+}
+
+.ticker-container.HT {
+    border-color: #FF7F50;
+}
+.ticker-container.HT .ticker-badge {
+    background: #FF7F50;
+    color: #000;
+}
+
+.ticker-container.FW {
+    border-color: #FF1493;
+}
+.ticker-container.FW .ticker-badge {
+    background: #FF1493;
+}
+
+.ticker-container.FWA {
+    border-color: #FFDEAD;
+}
+.ticker-container.FWA .ticker-badge {
+    background: #FFDEAD;
+    color: #000;
+}
+
+.ticker-container.FG {
+    border-color: #708090;
+}
+.ticker-container.FG .ticker-badge {
+    background: #708090;
+}
+
+.ticker-container.SM {
+    border-color: #F0E68C;
+}
+.ticker-container.SM .ticker-badge {
+    background: #F0E68C;
+    color: #000;
+}
+
+.ticker-container.ZF {
+    border-color: #008080;
+}
+.ticker-container.ZF .ticker-badge {
+    background: #008080;
+}
+
+.ticker-container.DS {
+    border-color: #FFE4C4;
+}
+.ticker-container.DS .ticker-badge {
+    background: #FFE4C4;
+    color: #000;
+}
+
+.ticker-container.FZ {
+    border-color: #483D8B;
+}
+.ticker-container.FZ .ticker-badge {
+    background: #483D8B;
+}
+
+.ticker-container.FZA {
+    border-color: #00CED1;
+}
+.ticker-container.FZA .ticker-badge {
+    background: #00CED1;
+    color: #000;
+}
+
+.ticker-container.FR {
+    border-color: #6495ED;
+}
+.ticker-container.FR .ticker-badge {
+    background: #6495ED;
+    color: #000;
+}
+
+.ticker-container.HZ {
+    border-color: #9400D3;
+}
+.ticker-container.HZ .ticker-badge {
+    background: #9400D3;
+}
+
+.ticker-container.EC {
+    border-color: #0000FF;
+}
+.ticker-container.EC .ticker-badge {
+    background: #0000FF;
+}
+
+.ticker-container.ZR {
+    border-color: #DA70D6;
+}
+.ticker-container.ZR .ticker-badge {
+    background: #DA70D6;
+    color: #000;
+}
+
+.ticker-container.AS {
+    border-color: #808080;
+}
+.ticker-container.AS .ticker-badge {
+    background: #808080;
+}
+
+.ticker-container.TR {
+    border-color: #B22222;
+}
+.ticker-container.TR .ticker-badge {
+    background: #B22222;
+}
+
+.ticker-container.HU {
+    border-color: #DC143C;
+}
+.ticker-container.HU .ticker-badge {
+    background: #DC143C;
+}
+
+.ticker-container.SS {
+    border-color: #B524F7;
+}
+.ticker-container.SS .ticker-badge {
+    background: #B524F7;
+}
+
+.ticker-container.CF {
+    border-color: #228B22;
+}
+.ticker-container.CF .ticker-badge {
+    background: #228B22;
+}
+
+.ticker-container.SU {
+    border-color: #228B22;
+}
+.ticker-container.SU .ticker-badge {
+    background: #228B22;
+}
+
+.ticker-container.TS {
+    border-color: #FD6347;
+}
+.ticker-container.TS .ticker-badge {
+    background: #FD6347;
+}
+
+/* Theme: Atmospheric */
+.theme-atmospheric .ticker-container {
+    background: linear-gradient(180deg, #0c0c1e 0%, #1a1a3e 100%);
+}
+
+.theme-atmospheric .ticker-container.no-alerts {
+    background: linear-gradient(270deg, #0c0c1e, #1a1a3e, #2a2a5e, #1a1a3e);
+    background-size: 400% 400%;
+    animation: gradientShift 10s ease infinite;
+}
+
+/* Theme: Storm Chaser */
+.theme-storm-chaser .ticker-container {
+    background: linear-gradient(180deg, #1a1a1a 0%, #2d2d2d 100%);
+    border-top-width: 4px;
+}
+
+.theme-storm-chaser .ticker-title {
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+/* Theme: Meteorologist */
+.theme-meteorologist .ticker-container {
+    background: linear-gradient(180deg, #0d253f 0%, #1a3a5c 100%);
+}
+
+.theme-meteorologist .ticker-badge {
+    border-radius: 0 8px 8px 0;
+}
+
+/* Theme: Winter */
+.theme-winter .ticker-container {
+    background: linear-gradient(180deg, #1e3a5f 0%, #2c5282 100%);
+    border-color: #90cdf4;
+}
+
+.theme-winter .ticker-container.no-alerts {
+    background: linear-gradient(270deg, #1e3a5f, #2c5282, #3182ce, #2c5282);
+    background-size: 400% 400%;
+    animation: gradientShift 10s ease infinite;
+    border-color: #63b3ed;
+}
+
+.theme-winter .ticker-no-alerts {
+    color: #a0aec0;
+}
+
+/* Fade transition for alert changes */
+.ticker-content.fade-out {
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.ticker-content.fade-in {
+    opacity: 1;
+    transition: opacity 0.3s ease;
+}
+
+/* Connection status indicator */
+.connection-status {
+    position: fixed;
+    top: 5px;
+    right: 5px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #888;
+    z-index: 1000;
+}
+
+.connection-status.connected {
+    background: #00ff00;
+}
+
+.connection-status.disconnected {
+    background: #ff0000;
+}

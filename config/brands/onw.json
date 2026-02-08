@@ -1,0 +1,46 @@
+{
+  "name": "Ohio News & Weather",
+  "short_name": "ONW",
+  "tagline": "Your Local Severe Weather Source",
+  "logo": "onw_logo.png",
+  "logo_dark": null,
+  "favicon": "onw_favicon.ico",
+  "og_image": "onw_og.png",
+  "colors": {
+    "primary": "#1565c0",
+    "secondary": "#00897b",
+    "accent": "#ff6f00",
+    "background": "#1e1e1e",
+    "surface": "#2d2d2d",
+    "text": "#ffffff",
+    "text_secondary": "#b0b0b0",
+    "success": "#26a269",
+    "warning": "#e5a50a",
+    "error": "#c01c28",
+    "tornado_warning": "#FF0000",
+    "severe_thunderstorm": "#FFA500",
+    "flash_flood": "#8B0000",
+    "winter_storm": "#FF69B4"
+  },
+  "fonts": {
+    "heading": "Roboto Condensed",
+    "body": "Roboto",
+    "monospace": "JetBrains Mono",
+    "heading_weight": "700",
+    "body_weight": "400"
+  },
+  "ticker": {
+    "show_logo": true,
+    "logo_position": "left",
+    "sponsor_logo": "canopy_sponsor.png",
+    "scroll_speed_ms": 10000,
+    "background_color": null,
+    "text_color": null
+  },
+  "website_url": "https://ohionewsandweather.com",
+  "social_twitter": "@ohionewswx",
+  "social_facebook": null,
+  "social_youtube": null,
+  "copyright_text": "Ohio News & Weather",
+  "powered_by_text": "Powered by Alert Dashboard V2"
+}

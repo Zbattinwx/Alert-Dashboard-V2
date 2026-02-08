@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alert Ticker - Weather Dashboard V2</title>
+    <link rel="stylesheet" href="ticker.css">
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background: transparent;
+        }
+    </style>
+</head>
+<body>
+    <!-- Connection Status Indicator -->
+    <div id="connection-status" class="connection-status"></div>
+
+    <!-- Main Ticker Container -->
+    <div id="ticker-container" class="ticker-container no-alerts">
+        <!-- Alert Type Badge -->
+        <div id="ticker-badge" class="ticker-badge">WX</div>
+
+        <!-- Alert Content -->
+        <div id="ticker-content" class="ticker-content" style="display: none;">
+            <div id="ticker-title" class="ticker-title">Loading...</div>
+            <div id="ticker-subtitle" class="ticker-subtitle"></div>
+            <div class="ticker-location-wrapper">
+                <span id="ticker-location" class="ticker-location">Connecting to server...</span>
+            </div>
+        </div>
+
+        <!-- Expiration Time -->
+        <div id="ticker-expires" class="ticker-expires" style="display: none;">
+            <div class="ticker-expires-label">Expires</div>
+            <div id="ticker-expires-time" class="ticker-expires-time">--</div>
+        </div>
+
+        <!-- No Alerts Message -->
+        <div id="ticker-no-alerts" class="ticker-no-alerts">
+            <span>No Active Alerts</span>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="widget-common.js"></script>
+    <script src="ticker.js"></script>
+
+    <script>
+        // Show expires section when alerts are displayed
+        const observer = new MutationObserver((mutations) => {
+            const container = document.getElementById('ticker-container');
+            const expiresEl = document.getElementById('ticker-expires');
+            const hasAlerts = !container.classList.contains('no-alerts');
+            expiresEl.style.display = hasAlerts ? 'block' : 'none';
+        });
+
+        observer.observe(document.getElementById('ticker-container'), {
+            attributes: true,
+            attributeFilter: ['class']
+        });
+    </script>
+</body>
+</html>
+
+<!--
+URL Parameters:
+  - theme: classic, atmospheric, storm-chaser, meteorologist, winter
+  - states: comma-separated state codes (e.g., OH,WA,OR)
+  - speed: rotation speed in milliseconds (default: 10000)
+
+Examples:
+  ticker.html
+  ticker.html?theme=storm-chaser
+  ticker.html?states=OH,WA,OR
+  ticker.html?theme=winter&speed=15000
+-->
