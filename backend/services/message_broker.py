@@ -41,6 +41,11 @@ class MessageType(str, Enum):
     UNSUBSCRIBE = "unsubscribe"
     GET_ALERTS = "get_alerts"
     GET_STATUS = "get_status"
+    CHASER_POSITION_UPDATE = "chaser_position_update"
+
+    # Chaser tracking (Server -> Client)
+    CHASER_POSITION = "chaser_position"
+    CHASER_DISCONNECT = "chaser_disconnect"
 
 
 @dataclass

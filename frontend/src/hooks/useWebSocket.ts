@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type { Alert, WSMessage, AlertBulkData, AlertRemoveData } from '../types/alert';
+import type { ChaserPosition } from '../types/chaser';
 
 interface UseWebSocketOptions {
   url: string;
@@ -8,6 +9,8 @@ interface UseWebSocketOptions {
   onAlertRemove?: (data: AlertRemoveData) => void;
   onBulkAlerts?: (alerts: Alert[]) => void;
   onStatusChange?: (connected: boolean) => void;
+  onChaserPosition?: (data: ChaserPosition) => void;
+  onChaserDisconnect?: (data: { client_id: string }) => void;
   reconnectInterval?: number;
 }
 
@@ -26,6 +29,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onAlertRemove,
     onBulkAlerts,
     onStatusChange,
+    onChaserPosition,
+    onChaserDisconnect,
     reconnectInterval = 5000,
   } = options;
 
@@ -136,6 +141,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // Heartbeat response
         break;
 
+      case 'chaser_position':
+        onChaserPosition?.(message.data as ChaserPosition);
+        break;
+
+      case 'chaser_disconnect':
+        onChaserDisconnect?.(message.data as { client_id: string });
+        break;
+
       case 'error':
         console.error('WebSocket error message:', message.data);
         break;
@@ -143,7 +156,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       default:
         console.log('Unknown message type:', message.type);
     }
-  }, [onAlert, onAlertUpdate, onAlertRemove, onBulkAlerts]);
+  }, [onAlert, onAlertUpdate, onAlertRemove, onBulkAlerts, onChaserPosition, onChaserDisconnect]);
 
   const sendMessage = useCallback((type: string, data?: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

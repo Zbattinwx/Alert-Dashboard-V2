@@ -241,11 +241,28 @@ function alertMatchesStateFilter(alert, filterStates) {
 }
 
 /**
+ * Get base path prefix (e.g. "/v2" when served at /v2/widgets/)
+ */
+function getBasePath() {
+    const path = window.location.pathname;
+    const widgetIdx = path.indexOf('/widgets/');
+    if (widgetIdx > 0) return path.substring(0, widgetIdx);
+    return '';
+}
+
+/**
  * Get WebSocket URL for V2 backend
  */
 function getWebSocketUrl() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${protocol}//${window.location.host}/ws`;
+    return `${protocol}//${window.location.host}${getBasePath()}/ws`;
+}
+
+/**
+ * Get API URL with base path prefix
+ */
+function getApiUrl(path) {
+    return `${getBasePath()}${path}`;
 }
 
 /**
@@ -271,7 +288,9 @@ if (typeof module !== 'undefined' && module.exports) {
         formatLocation,
         getStateFromUGC,
         alertMatchesStateFilter,
+        getBasePath,
         getWebSocketUrl,
+        getApiUrl,
         getUrlParams
     };
 }

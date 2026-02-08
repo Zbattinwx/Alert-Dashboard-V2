@@ -136,7 +136,7 @@ class SponsoredAlertTicker {
 
         // Try to load from API
         try {
-            const response = await fetch('/api/widgets/sponsors');
+            const response = await fetch(getApiUrl('/api/widgets/sponsors'));
             if (response.ok) {
                 const data = await response.json();
                 this.config.sponsors = data.sponsors || [];
@@ -207,8 +207,7 @@ class SponsoredAlertTicker {
     }
 
     connect() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        const wsUrl = getWebSocketUrl();
 
         console.log('Connecting to WebSocket:', wsUrl);
 

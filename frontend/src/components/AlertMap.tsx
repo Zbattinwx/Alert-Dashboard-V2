@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { MapContainer, TileLayer, Polygon, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polygon, Popup, Marker, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import type { Alert } from '../types/alert';
 import { getAlertStyle, PHENOMENON_NAMES } from '../types/alert';
+import type { ChaserPosition } from '../types/chaser';
+import { apiUrl } from '../utils/api';
 import 'leaflet/dist/leaflet.css';
 
 // Fix for default marker icons in Leaflet with webpack/vite
@@ -17,7 +19,42 @@ interface AlertMapProps {
   alerts: Alert[];
   onAlertClick?: (alert: Alert) => void;
   selectedAlert?: Alert | null;
+  chasers?: ChaserPosition[];
 }
+
+// Create a custom icon for chaser markers
+const createChaserIcon = (name: string, heading: number | null) => {
+  const rotation = heading !== null ? heading : 0;
+  return L.divIcon({
+    className: 'chaser-marker-icon',
+    html: `
+      <div style="position:relative;width:32px;height:32px;">
+        <div style="
+          width:14px;height:14px;
+          background:#00CED1;
+          border:2px solid white;
+          border-radius:50%;
+          position:absolute;
+          top:50%;left:50%;
+          transform:translate(-50%,-50%);
+          box-shadow:0 0 8px rgba(0,206,209,0.6);
+        "></div>
+        ${heading !== null ? `<div style="
+          position:absolute;top:0;left:50%;
+          transform:translateX(-50%) rotate(${rotation}deg);
+          transform-origin:center 16px;
+          width:0;height:0;
+          border-left:4px solid transparent;
+          border-right:4px solid transparent;
+          border-bottom:8px solid #00CED1;
+        "></div>` : ''}
+        <div class="chaser-marker-label">${name}</div>
+      </div>
+    `,
+    iconSize: [32, 32],
+    iconAnchor: [16, 16],
+  });
+};
 
 // Zone data from API
 interface ZoneData {
@@ -128,6 +165,7 @@ export const AlertMap: React.FC<AlertMapProps> = ({
   alerts,
   onAlertClick,
   selectedAlert,
+  chasers = [],
 }) => {
   const [mapReady, setMapReady] = useState(false);
   const [zoneData, setZoneData] = useState<MapZonesResponse | null>(null);
@@ -141,7 +179,7 @@ export const AlertMap: React.FC<AlertMapProps> = ({
   // Fetch zone data from API
   const fetchZoneData = useCallback(async () => {
     try {
-      const response = await fetch('/api/map/zones');
+      const response = await fetch(apiUrl('/api/map/zones'));
       if (response.ok) {
         const data = await response.json();
         setZoneData(data);
@@ -392,6 +430,29 @@ export const AlertMap: React.FC<AlertMapProps> = ({
             </Polygon>
           ));
         })}
+
+        {/* Chaser markers */}
+        {chasers.map(chaser => (
+          <Marker
+            key={`chaser-${chaser.client_id}`}
+            position={[chaser.lat, chaser.lon]}
+            icon={createChaserIcon(chaser.name, chaser.heading)}
+          >
+            <Popup>
+              <div style={{ minWidth: '140px' }}>
+                <h4 style={{ margin: '0 0 4px 0', color: '#00CED1' }}>{chaser.name}</h4>
+                {chaser.speed !== null && (
+                  <p style={{ margin: '0 0 2px 0', fontSize: '0.8rem' }}>
+                    <strong>Speed:</strong> {Math.round(chaser.speed)} mph
+                  </p>
+                )}
+                <p style={{ margin: '0', fontSize: '0.75rem', color: '#888' }}>
+                  Last update: {new Date(chaser.last_update).toLocaleTimeString()}
+                </p>
+              </div>
+            </Popup>
+          </Marker>
+        ))}
       </MapContainer>
 
       {/* Filter controls */}

@@ -2,15 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import type { Alert } from '../types/alert';
 import { getAlertStyle } from '../types/alert';
 import { useWebSocket } from '../hooks/useWebSocket';
-
-// Get WebSocket URL
-const getWebSocketUrl = () => {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  if (import.meta.env.DEV) {
-    return `${protocol}//${window.location.hostname}:8000/ws`;
-  }
-  return `${protocol}//${window.location.host}/ws`;
-};
+import { wsUrl } from '../utils/api';
 
 interface OBSAlertProps {
   alert: Alert;
@@ -133,7 +125,7 @@ export const OBSOverlay: React.FC = () => {
 
   // Connect to WebSocket
   useWebSocket({
-    url: getWebSocketUrl(),
+    url: wsUrl(),
     onAlert: handleNewAlert,
   });
 

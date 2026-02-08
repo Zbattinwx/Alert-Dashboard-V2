@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { ALERT_COLORS, getAlertStyle } from '../types/alert';
+import { apiUrl } from '../utils/api';
 
 interface PhenomenonItem {
   code: string;
@@ -35,7 +36,7 @@ export const SettingsSection: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('/api/settings/phenomena');
+      const response = await fetch(apiUrl('/api/settings/phenomena'));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data: PhenomenaResponse = await response.json();
       setCategories(data.categories);
@@ -89,7 +90,7 @@ export const SettingsSection: React.FC = () => {
     setError(null);
     setSuccessMsg(null);
     try {
-      const response = await fetch('/api/settings/phenomena', {
+      const response = await fetch(apiUrl('/api/settings/phenomena'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_phenomena: Array.from(activePhenomena) }),
@@ -116,7 +117,7 @@ export const SettingsSection: React.FC = () => {
     setError(null);
     setSuccessMsg(null);
     try {
-      const response = await fetch('/api/settings/phenomena/reset', { method: 'POST' });
+      const response = await fetch(apiUrl('/api/settings/phenomena/reset'), { method: 'POST' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       setSuccessMsg(data.message);

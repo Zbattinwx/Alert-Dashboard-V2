@@ -3688,3 +3688,427 @@ body {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* =========================================================================
+   Chase Mode - Mobile-optimized storm chaser interface
+   ========================================================================= */
+
+/* Name entry screen */
+.chase-name-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: var(--bg-primary);
+  padding: 20px;
+}
+
+.chase-name-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 40px 32px;
+  text-align: center;
+  max-width: 360px;
+  width: 100%;
+}
+
+.chase-name-card h2 {
+  font-size: 1.5rem;
+  margin-bottom: 8px;
+  background: var(--tbf-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.chase-name-card p {
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+  font-size: 0.9rem;
+}
+
+.chase-name-input {
+  width: 100%;
+  padding: 12px 16px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 1rem;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.chase-name-input:focus {
+  border-color: var(--accent-cyan);
+}
+
+.chase-name-submit {
+  width: 100%;
+  margin-top: 16px;
+  padding: 12px 24px;
+  background: var(--tbf-gradient);
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--transition-fast);
+}
+
+.chase-name-submit:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.chase-name-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* GPS spinner */
+.chase-gps-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border-color);
+  border-top-color: var(--accent-cyan);
+  border-radius: 50%;
+  margin: 20px auto 0;
+  animation: chase-spin 1s linear infinite;
+}
+
+@keyframes chase-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Main chase layout */
+.chase-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+/* Warning banner */
+.chase-warning-banner {
+  background: linear-gradient(90deg, #cc0000, #ff3333, #cc0000);
+  color: white;
+  text-align: center;
+  padding: 10px 16px;
+  font-weight: 700;
+  font-size: 0.9rem;
+  letter-spacing: 0.5px;
+  animation: chase-warning-flash 1.5s ease-in-out infinite;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.chase-warning-banner i {
+  margin-right: 8px;
+}
+
+.chase-warning-names {
+  font-weight: 400;
+  font-size: 0.8rem;
+  opacity: 0.9;
+}
+
+@keyframes chase-warning-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Status bar */
+.chase-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.chase-status-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chase-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-red);
+}
+
+.chase-status-dot.connected {
+  background: var(--accent-green);
+  box-shadow: 0 0 6px var(--accent-green);
+}
+
+.chase-name-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.chase-status-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.chase-speed {
+  font-weight: 600;
+  color: var(--accent-cyan);
+}
+
+.chase-accuracy {
+  font-size: 0.75rem;
+}
+
+/* Map container */
+.chase-map-container {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.chase-map-container .leaflet-container {
+  height: 100%;
+  width: 100%;
+}
+
+/* Follow GPS button */
+.chase-follow-btn {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  z-index: 1000;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.chase-follow-btn.active {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+  box-shadow: 0 0 12px rgba(0, 206, 209, 0.3);
+}
+
+.chase-follow-btn:hover {
+  background: var(--bg-tertiary);
+}
+
+/* Info panel (bottom scrollable section) */
+.chase-info-panel {
+  max-height: 45vh;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+/* SPC Risk card */
+.chase-spc-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-left: 4px solid;
+  background: var(--bg-card);
+  margin: 8px 12px 0;
+  border-radius: var(--radius-md);
+}
+
+.chase-spc-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.chase-spc-level {
+  font-size: 1.2rem;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+/* Alerts header */
+.chase-alerts-header {
+  padding: 10px 16px 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.3px;
+}
+
+/* No alerts message */
+.chase-no-alerts {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+/* Alerts list */
+.chase-alerts-list {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Individual alert item */
+.chase-alert-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-left: 4px solid;
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  transition: background var(--transition-fast);
+}
+
+.chase-alert-item.inside {
+  background: rgba(255, 68, 68, 0.08);
+  border-color: rgba(255, 68, 68, 0.3);
+  animation: chase-inside-pulse 2s ease-in-out infinite;
+}
+
+@keyframes chase-inside-pulse {
+  0%, 100% { background: rgba(255, 68, 68, 0.08); }
+  50% { background: rgba(255, 68, 68, 0.15); }
+}
+
+.chase-alert-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chase-alert-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.chase-alert-name {
+  flex: 1;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chase-alert-dist {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.chase-alert-details {
+  margin-top: 4px;
+}
+
+.chase-alert-loc {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Threat tags */
+.chase-alert-threats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.chase-threat {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.chase-threat.tornado {
+  background: rgba(255, 0, 0, 0.2);
+  color: #ff4444;
+  font-weight: 700;
+}
+
+.chase-threat.motion {
+  background: rgba(0, 206, 209, 0.1);
+  color: var(--accent-cyan);
+}
+
+/* Chaser markers on dashboard map */
+.chaser-marker-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: white;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.chaser-marker-label {
+  position: absolute;
+  top: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: rgba(0, 0, 0, 0.75);
+  color: #00CED1;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+/* Mobile responsiveness for chase mode */
+@media (max-width: 480px) {
+  .chase-info-panel {
+    max-height: 50vh;
+  }
+
+  .chase-alert-top {
+    flex-wrap: wrap;
+  }
+
+  .chase-alert-name {
+    min-width: 0;
+  }
+}

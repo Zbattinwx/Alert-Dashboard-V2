@@ -9,6 +9,7 @@ import type {
   StateImagesResponse,
 } from '../types/spc';
 import { RISK_COLORS, RISK_NAMES, RISK_ORDER, PROB_COLORS, PROB_NAMES, getContrastColor } from '../types/spc';
+import { apiUrl } from '../utils/api';
 import 'leaflet/dist/leaflet.css';
 
 interface DiscussionResponse {
@@ -98,7 +99,7 @@ export const SPCSection: React.FC = () => {
   // Fetch Day 1 data with probabilities
   const fetchDay1Data = useCallback(async (refresh = false) => {
     try {
-      const response = await fetch(`/api/spc/day1?include_probabilities=true&refresh=${refresh}`);
+      const response = await fetch(apiUrl(`/api/spc/day1?include_probabilities=true&refresh=${refresh}`));
       if (!response.ok) throw new Error('Failed to fetch SPC data');
       const data: Day1Response = await response.json();
       setDay1Data(data);
@@ -125,10 +126,10 @@ export const SPCSection: React.FC = () => {
     try {
       // Fetch all Day 2 outlooks in parallel
       const [catRes, tornRes, windRes, hailRes] = await Promise.all([
-        fetch(`/api/spc/outlook/day2_categorical?refresh=${refresh}`),
-        fetch(`/api/spc/outlook/day2_tornado?refresh=${refresh}`),
-        fetch(`/api/spc/outlook/day2_wind?refresh=${refresh}`),
-        fetch(`/api/spc/outlook/day2_hail?refresh=${refresh}`),
+        fetch(apiUrl(`/api/spc/outlook/day2_categorical?refresh=${refresh}`)),
+        fetch(apiUrl(`/api/spc/outlook/day2_tornado?refresh=${refresh}`)),
+        fetch(apiUrl(`/api/spc/outlook/day2_wind?refresh=${refresh}`)),
+        fetch(apiUrl(`/api/spc/outlook/day2_hail?refresh=${refresh}`)),
       ]);
 
       const catData = catRes.ok ? await catRes.json() : null;
@@ -167,7 +168,7 @@ export const SPCSection: React.FC = () => {
   // Fetch outlook for Day 3 (categorical only)
   const fetchDay3Outlook = useCallback(async (refresh = false) => {
     try {
-      const response = await fetch(`/api/spc/outlook/day3_categorical?refresh=${refresh}`);
+      const response = await fetch(apiUrl(`/api/spc/outlook/day3_categorical?refresh=${refresh}`));
       if (!response.ok) throw new Error('Failed to fetch Day 3 outlook');
       const data = await response.json();
       setCurrentOutlook(data.outlook);
@@ -179,7 +180,7 @@ export const SPCSection: React.FC = () => {
   // Fetch mesoscale discussions
   const fetchMesoscaleDiscussions = useCallback(async (refresh = false) => {
     try {
-      const response = await fetch(`/api/spc/mesoscale-discussions?refresh=${refresh}`);
+      const response = await fetch(apiUrl(`/api/spc/mesoscale-discussions?refresh=${refresh}`));
       if (!response.ok) throw new Error('Failed to fetch mesoscale discussions');
       const data: MesoscaleDiscussionsResponse = await response.json();
       setMesoscaleDiscussions(data.discussions);
@@ -191,7 +192,7 @@ export const SPCSection: React.FC = () => {
   // Fetch state images
   const fetchStateImages = useCallback(async (day: number) => {
     try {
-      const response = await fetch(`/api/spc/state-images?day=${day}`);
+      const response = await fetch(apiUrl(`/api/spc/state-images?day=${day}`));
       if (!response.ok) throw new Error('Failed to fetch state images');
       const data: StateImagesResponse = await response.json();
       setStateImages(data);
@@ -203,7 +204,7 @@ export const SPCSection: React.FC = () => {
   // Fetch discussion text
   const fetchDiscussion = useCallback(async (day: number, refresh = false) => {
     try {
-      const response = await fetch(`/api/spc/discussion?day=${day}&refresh=${refresh}`);
+      const response = await fetch(apiUrl(`/api/spc/discussion?day=${day}&refresh=${refresh}`));
       if (!response.ok) throw new Error('Failed to fetch discussion');
       const data: DiscussionResponse = await response.json();
       setDiscussionText(data.text);

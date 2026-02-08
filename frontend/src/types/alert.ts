@@ -106,7 +106,9 @@ export type WSMessageType =
   | 'system_status'
   | 'connection_ack'
   | 'error'
-  | 'pong';
+  | 'pong'
+  | 'chaser_position'
+  | 'chaser_disconnect';
 
 export interface WSMessage {
   type: WSMessageType;

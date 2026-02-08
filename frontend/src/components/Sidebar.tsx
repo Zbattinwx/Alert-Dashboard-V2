@@ -36,7 +36,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="sidebar">
       <div className="sidebar-header" style={{ flexDirection: 'column', gap: '8px' }}>
         <img
-          src="/tbf_logo.png"
+          src={`${import.meta.env.BASE_URL}tbf_logo.png`}
           alt="The Battin Front"
           style={{
             maxWidth: '160px',

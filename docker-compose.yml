@@ -1,0 +1,62 @@
+# =============================================================================
+# Alert Dashboard V2 - Docker Compose
+#
+# Services:
+#   v2:    The dashboard backend + frontend (port 3074 internal)
+#   caddy: Reverse proxy with auto-SSL
+#          atmosphericx.ddns.net/v2/* -> V2 (this container)
+#          atmosphericx.ddns.net/*    -> V1 desktop (192.168.0.33:8000)
+#
+# Usage:
+#   docker compose up -d              # Start everything
+#   docker compose up -d --build      # Rebuild and start
+#   docker compose logs -f v2         # Follow V2 logs
+#   docker compose down               # Stop everything
+#
+# Prerequisites:
+#   - Port forward 80 + 443 on router to this Raspberry Pi
+#   - Copy .env to same directory as docker-compose.yml
+# =============================================================================
+
+services:
+  v2:
+    build: .
+    container_name: alert-dashboard-v2
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3074
+      - DEBUG=false
+    volumes:
+      - v2-data:/app/data
+      - v2-logs:/app/logs
+      - ./backend:/app/backend:ro
+      - ./widgets:/app/widgets:ro
+    expose:
+      - "3074"
+    networks:
+      - proxy
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - proxy
+
+volumes:
+  v2-data:
+  v2-logs:
+  caddy-data:
+  caddy-config:
+
+networks:
+  proxy:

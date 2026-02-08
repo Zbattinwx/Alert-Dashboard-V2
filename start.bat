@@ -40,9 +40,31 @@ if %errorlevel%==0 (
     echo [INFO] LLM is disabled in .env - skipping Ollama.
 )
 
+:: Check if Caddy reverse proxy should be started
+findstr /i "CADDY_ENABLED=true" .env >nul 2>&1
+if %errorlevel%==0 (
+    if exist caddy.exe (
+        echo [INFO] Starting Caddy reverse proxy...
+        start /min "Caddy" caddy.exe run --config Caddyfile
+        timeout /t 2 /nobreak >nul
+        echo [INFO] Caddy started - HTTPS available at https://atmosphericx.ddns.net
+    ) else (
+        echo [WARN] CADDY_ENABLED=true but caddy.exe not found.
+        echo [WARN] Run setup_caddy.bat to download and configure Caddy.
+    )
+) else (
+    echo [INFO] Caddy is disabled in .env - local access only.
+)
+
 echo.
-echo [INFO] Starting Alert Dashboard backend on port 8000...
-echo [INFO] Dashboard will be available at http://localhost:8000
+echo [INFO] Starting Alert Dashboard backend on port 3074...
+echo [INFO] Dashboard will be available at http://localhost:3074
+findstr /i "CADDY_ENABLED=true" .env >nul 2>&1
+if %errorlevel%==0 (
+    echo [INFO] Remote access: https://atmosphericx.ddns.net
+    echo [INFO] Chase Mode:    https://atmosphericx.ddns.net/chase
+)
+echo [INFO] Docker: docker compose up -d  (for Raspberry Pi deployment)
 echo [INFO] Press Ctrl+C to stop.
 echo.
 

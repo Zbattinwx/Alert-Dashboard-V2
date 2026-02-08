@@ -202,6 +202,17 @@ class Settings(BaseSettings):
         description="LLM request timeout in seconds"
     )
 
+    # Remote Access
+    caddy_enabled: bool = Field(default=False, description="Enable Caddy reverse proxy")
+    domain: str = Field(default="localhost", description="Domain name for remote access")
+
+    # Spotter Network Integration
+    spotter_network_enabled: bool = Field(default=False, description="Enable Spotter Network position polling")
+    spotter_network_username: Optional[str] = Field(default=None, description="Spotter Network username")
+    spotter_network_password: Optional[str] = Field(default=None, description="Spotter Network password")
+    spotter_network_marker_id: Optional[int] = Field(default=None, description="Spotter Network marker ID")
+    spotter_network_poll_interval: int = Field(default=30, description="Spotter Network poll interval in seconds")
+
     # Google Chat Notifications
     google_chat_enabled: bool = Field(
         default=False,

@@ -22,7 +22,7 @@ class AlertTicker {
 
         // DOM elements
         this.container = null;
-        this.badge = null;
+        this.logoImg = null;
         this.content = null;
         this.titleEl = null;
         this.subtitleEl = null;
@@ -66,8 +66,13 @@ class AlertTicker {
     setup() {
         // Get DOM elements
         this.container = document.getElementById('ticker-container');
-        this.badge = document.getElementById('ticker-badge');
+        this.logoImg = document.getElementById('ticker-logo-img');
         this.content = document.getElementById('ticker-content');
+
+        // Set logo src using base path
+        if (this.logoImg) {
+            this.logoImg.src = getBasePath() + '/tbf_logo.png';
+        }
         this.titleEl = document.getElementById('ticker-title');
         this.subtitleEl = document.getElementById('ticker-subtitle');
         this.locationEl = document.getElementById('ticker-location');
@@ -105,8 +110,7 @@ class AlertTicker {
     }
 
     connect() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        const wsUrl = getWebSocketUrl();
 
         console.log('Connecting to WebSocket:', wsUrl);
 
@@ -306,9 +310,6 @@ class AlertTicker {
         this.content.classList.add('fade-out');
 
         setTimeout(() => {
-            // Update badge
-            this.badge.textContent = info.shortName;
-
             // Update title
             this.titleEl.textContent = info.name;
 
@@ -348,8 +349,6 @@ class AlertTicker {
         if (this.noAlertsEl) {
             this.noAlertsEl.style.display = 'flex';
         }
-
-        this.badge.textContent = 'WX';
     }
 
     setupLocationScroll() {

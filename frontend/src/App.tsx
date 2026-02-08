@@ -13,20 +13,12 @@ import { AssistantPanel } from './components/AssistantPanel';
 import { NewAlertNotification } from './components/NewAlertNotification';
 import { SettingsSection } from './components/SettingsSection';
 import { OBSOverlay } from './components/OBSOverlay';
+import { ChaseMode } from './components/ChaseMode';
 import { useWebSocket } from './hooks/useWebSocket';
 import type { Alert } from './types/alert';
+import type { ChaserPosition } from './types/chaser';
+import { apiUrl, wsUrl } from './utils/api';
 import './styles/main.css';
-
-// Determine WebSocket URL based on environment
-const getWebSocketUrl = () => {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // In development, Vite proxies /ws to the backend
-  // In production, we connect directly
-  if (import.meta.env.DEV) {
-    return `${protocol}//${window.location.host}/ws`;
-  }
-  return `${protocol}//${window.location.host}/ws`;
-};
 
 // Main Dashboard Component
 const Dashboard: React.FC = () => {
@@ -36,6 +28,7 @@ const Dashboard: React.FC = () => {
   const [mapDetailOpen, setMapDetailOpen] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [newAlertToShow, setNewAlertToShow] = useState<Alert | null>(null);
+  const [chasers, setChasers] = useState<ChaserPosition[]>([]);
 
   const handleNewAlert = useCallback((alert: Alert) => {
     console.log('New alert received:', alert.event_name);
@@ -47,11 +40,39 @@ const Dashboard: React.FC = () => {
     setLastChecked(new Date());
   }, []);
 
+  const handleChaserPosition = useCallback((data: ChaserPosition) => {
+    setChasers(prev => {
+      const idx = prev.findIndex(c => c.client_id === data.client_id);
+      if (idx >= 0) {
+        const updated = [...prev];
+        updated[idx] = data;
+        return updated;
+      }
+      return [...prev, data];
+    });
+  }, []);
+
+  const handleChaserDisconnect = useCallback((data: { client_id: string }) => {
+    setChasers(prev => prev.filter(c => c.client_id !== data.client_id));
+  }, []);
+
   const { connected, alerts } = useWebSocket({
-    url: getWebSocketUrl(),
+    url: wsUrl(),
     onAlert: handleNewAlert,
     onBulkAlerts: handleBulkAlerts,
+    onChaserPosition: handleChaserPosition,
+    onChaserDisconnect: handleChaserDisconnect,
   });
+
+  // Fetch existing chasers on mount
+  React.useEffect(() => {
+    fetch(apiUrl('/api/chasers'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.chasers) setChasers(data.chasers);
+      })
+      .catch(() => {});
+  }, []);
 
   const formatLastChecked = () => {
     if (!lastChecked) return 'Never';
@@ -110,6 +131,7 @@ const Dashboard: React.FC = () => {
                   alerts={alerts}
                   onAlertClick={handleMapAlertClick}
                   selectedAlert={selectedMapAlert}
+                  chasers={chasers}
                 />
               </div>
             )}
@@ -199,6 +221,7 @@ const App: React.FC = () => {
   return (
     <Routes>
       <Route path="/" element={<Dashboard />} />
+      <Route path="/chase" element={<ChaseMode />} />
       <Route path="/obs" element={<OBSOverlay />} />
     </Routes>
   );

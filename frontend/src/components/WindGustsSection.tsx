@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { apiUrl } from '../utils/api';
 
 interface WindGust {
   station: string;
@@ -79,7 +80,7 @@ export const WindGustsSection: React.FC = () => {
         refresh: refresh.toString(),
       });
 
-      const response = await fetch(`/api/wind-gusts/by-state?${params}`);
+      const response = await fetch(apiUrl(`/api/wind-gusts/by-state?${params}`));
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }

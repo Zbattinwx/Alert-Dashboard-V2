@@ -8,6 +8,7 @@ import type {
   ColdSensorsResponse,
   CamerasInAlertsResponse,
 } from '../types/odot';
+import { apiUrl } from '../utils/api';
 import 'leaflet/dist/leaflet.css';
 
 // Create custom icons
@@ -127,9 +128,9 @@ export const ODOTSection: React.FC = () => {
 
     try {
       const [camerasRes, coldRes, alertCamsRes] = await Promise.all([
-        fetch(`/api/odot/cameras?refresh=${refresh}`),
-        fetch(`/api/odot/cold-sensors?refresh=${refresh}`),
-        fetch(`/api/odot/cameras-in-alerts?refresh=${refresh}`),
+        fetch(apiUrl(`/api/odot/cameras?refresh=${refresh}`)),
+        fetch(apiUrl(`/api/odot/cold-sensors?refresh=${refresh}`)),
+        fetch(apiUrl(`/api/odot/cameras-in-alerts?refresh=${refresh}`)),
       ]);
 
       if (!camerasRes.ok || !coldRes.ok || !alertCamsRes.ok) {

@@ -42,6 +42,9 @@ try:
         DEFAULT_GUST_STATES,
         get_llm_service, start_llm_service, stop_llm_service, build_full_context,
         get_google_chat_service, start_google_chat_service, stop_google_chat_service,
+        get_spotter_network_service, start_spotter_network_service, stop_spotter_network_service,
+        get_chase_log_service,
+        get_radar_service,
     )
 except ImportError:
     # Direct execution: python backend/main.py
@@ -65,9 +68,15 @@ except ImportError:
         DEFAULT_GUST_STATES,
         get_llm_service, start_llm_service, stop_llm_service, build_full_context,
         get_google_chat_service, start_google_chat_service, stop_google_chat_service,
+        get_spotter_network_service, start_spotter_network_service, stop_spotter_network_service,
+        get_chase_log_service,
+        get_radar_service,
     )
 
 logger = logging.getLogger(__name__)
+
+# In-memory chaser position tracking
+_chaser_positions: dict[str, dict] = {}
 
 
 # =============================================================================
@@ -125,6 +134,9 @@ async def startup_services():
 
     # 3. Wire up Alert Manager callbacks to Message Broker
     wire_alert_callbacks()
+
+    # 3b. Register chaser tracking handler
+    register_chaser_handler()
 
     # 4. Fetch initial alerts from NWS API
     await fetch_initial_alerts()
@@ -195,6 +207,16 @@ async def startup_services():
     else:
         logger.info("Google Chat notifications disabled or not configured")
 
+    # 13. Start Spotter Network Service (optional)
+    if settings.spotter_network_enabled:
+        sn_started = await start_spotter_network_service()
+        if sn_started:
+            logger.info("Spotter Network service started")
+        else:
+            logger.warning("Spotter Network service failed to start")
+    else:
+        logger.info("Spotter Network integration disabled")
+
     logger.info("All services started successfully")
 
 
@@ -203,6 +225,7 @@ async def shutdown_services():
     logger.info("Shutting down services...")
 
     # Stop in reverse order
+    await stop_spotter_network_service()
     await stop_google_chat_service()
     await stop_llm_service()
     await stop_wind_gusts_service()
@@ -250,6 +273,98 @@ def wire_alert_callbacks():
     alert_manager.on_alert_removed(sync_removed)
 
     logger.info("Alert callbacks wired to message broker")
+
+
+def register_chaser_handler():
+    """Register WebSocket handler for chaser position updates."""
+    broker = get_message_broker()
+
+    async def handle_chaser_position(connection, data: dict):
+        """Handle incoming chaser GPS position."""
+        client_id = connection.client_id
+        position = {
+            "client_id": client_id,
+            "name": data.get("name", "Chaser"),
+            "lat": data.get("lat"),
+            "lon": data.get("lon"),
+            "heading": data.get("heading"),
+            "speed": data.get("speed"),
+            "accuracy": data.get("accuracy"),
+            "last_update": datetime.now(timezone.utc).isoformat(),
+        }
+        _chaser_positions[client_id] = position
+        # Broadcast to all connected clients
+        await broker._broadcast(MessageType.CHASER_POSITION, position)
+
+        # Log to chase log
+        lat = data.get("lat")
+        lon = data.get("lon")
+        if lat is not None and lon is not None:
+            chase_log = get_chase_log_service()
+            if not chase_log.active_session:
+                chase_log.start_session(data.get("name", "Chaser"))
+            chase_log.log_waypoint(
+                lat=lat,
+                lon=lon,
+                speed=data.get("speed"),
+                heading=data.get("heading"),
+            )
+
+            # Server-side polygon detection + radar snapshot trigger
+            asyncio.create_task(_check_polygon_and_capture(
+                lat, lon, data.get("name", "Chaser"), chase_log
+            ))
+
+    broker.register_handler(MessageType.CHASER_POSITION_UPDATE, handle_chaser_position)
+    logger.info("Chaser position handler registered")
+
+
+async def _check_polygon_and_capture(
+    lat: float, lon: float, chaser_name: str, chase_log
+):
+    """Check if chaser is inside any warning polygon and capture radar if so."""
+    try:
+        from shapely.geometry import Point, Polygon as ShapelyPolygon
+
+        point = Point(lon, lat)  # Shapely uses (x, y) = (lon, lat)
+        alert_manager = get_alert_manager()
+        alerts = alert_manager.get_active_alerts()
+
+        for alert in alerts:
+            if not alert.polygon or len(alert.polygon) < 3:
+                continue
+            try:
+                # Alert polygons are [[lat, lon], ...] — convert to [(lon, lat), ...]
+                ring = [(coord[1], coord[0]) for coord in alert.polygon]
+                poly = ShapelyPolygon(ring)
+                if poly.contains(point):
+                    # Chaser is inside this warning polygon — capture radar
+                    radar = get_radar_service()
+                    filename = await radar.capture_radar_snapshot(
+                        lat, lon, label=chaser_name
+                    )
+                    if filename:
+                        chase_log.log_event("radar_snapshot", {
+                            "file": filename,
+                            "alert": f"{alert.phenomenon} {alert.significance}",
+                            "event": alert.event_type or alert.headline,
+                        })
+                        chase_log.log_event("entered_polygon", {
+                            "alert": alert.headline or f"{alert.event_type}",
+                            "id": alert.id,
+                        })
+                        logger.info(
+                            f"Radar snapshot triggered: {chaser_name} inside "
+                            f"{alert.event_type or alert.headline}"
+                        )
+                    break  # One capture per position update is enough
+            except Exception as e:
+                logger.debug(f"Polygon check error for alert {alert.id}: {e}")
+                continue
+    except ImportError:
+        logger.warning("Shapely not installed - polygon detection disabled")
+    except Exception as e:
+        logger.error(f"Polygon detection error: {e}")
 
 
 async def fetch_initial_alerts():
@@ -2079,7 +2194,61 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error for {client_id}: {e}")
     finally:
+        # Clean up chaser position if this was a chase mode client
+        if client_id in _chaser_positions:
+            del _chaser_positions[client_id]
+            await broker._broadcast(MessageType.CHASER_DISCONNECT, {
+                "client_id": client_id
+            })
+            # End chase log session if no more active chasers from WebSocket
+            ws_chasers = [k for k in _chaser_positions if not k.startswith("spotter_network_")]
+            if not ws_chasers:
+                chase_log = get_chase_log_service()
+                if chase_log.active_session:
+                    chase_log.end_session()
+            logger.info(f"Chaser disconnected: {client_id}")
         await broker.disconnect(client_id)
+
+
+# =============================================================================
+# Chaser Tracking API
+# =============================================================================
+
+@app.get("/api/chasers")
+async def get_chasers():
+    """Get all active chaser positions."""
+    return {"chasers": list(_chaser_positions.values())}
+
+
+# =============================================================================
+# Chase Log API
+# =============================================================================
+
+@app.get("/api/chase-logs")
+async def list_chase_logs():
+    """List all chase log sessions."""
+    service = get_chase_log_service()
+    return {"sessions": service.list_sessions()}
+
+
+@app.get("/api/chase-logs/{date}")
+async def get_chase_log(date: str):
+    """Get a specific chase log by date (YYYY-MM-DD)."""
+    service = get_chase_log_service()
+    session = service.get_session(date)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"No chase log for {date}")
+    return session
+
+
+@app.get("/api/chase-logs/{date}/geojson")
+async def get_chase_log_geojson(date: str):
+    """Export a chase log as GeoJSON LineString."""
+    service = get_chase_log_service()
+    geojson = service.get_session_geojson(date)
+    if not geojson:
+        raise HTTPException(status_code=404, detail=f"No chase log for {date}")
+    return geojson
 
 
 # =============================================================================
@@ -2090,6 +2259,16 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/obs/{path:path}")
 async def serve_obs_overlay(path: str = ""):
     """Serve the frontend for OBS overlay route."""
+    index_file = FRONTEND_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    raise HTTPException(status_code=404, detail="Frontend not built")
+
+
+@app.get("/chase")
+@app.get("/chase/{path:path}")
+async def serve_chase_mode(path: str = ""):
+    """Serve the frontend for Chase Mode route."""
     index_file = FRONTEND_DIR / "index.html"
     if index_file.exists():
         return FileResponse(index_file)

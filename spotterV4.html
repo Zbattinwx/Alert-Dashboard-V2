@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>Spotter Lower Third</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 0;
+        padding: 0;
+        background: transparent; /* Keep body transparent */
+        color: #fff;
+        overflow: hidden; /* Prevent scrollbars if content slightly overflows */
+      }
+
+      /* Container for the lower third - ensures it's at the bottom and text-aligns its content (the info-row) */
+      #spotter-info {
+        width: 100%;
+        position: absolute;
+        bottom: 20px; /* Adjust as needed */
+        left: 0;
+        text-align: center; /* This will center the .info-row if it's display: inline-block or inline-flex */
+      }
+
+      /* Row layout - this is the bar that will get the background color and centered */
+      .info-row {
+        display: inline-flex; /* Allows the row to size to its content and be centered by parent's text-align */
+        align-items: center; /* Vertically aligns items in the row */
+        justify-content: center; /* Horizontally centers items within the row if there's extra space */
+        background: rgba(0, 0, 0, 0.5); /* Default semi-transparent background */
+        padding: 10px 20px;
+        border-radius: 8px; /* Slightly more rounded corners */
+        box-shadow: 0 2px 5px rgba(0,0,0,0.3); /* Optional: adds a subtle shadow for better separation */
+        transition: background-color 0.5s ease; /* Smooth transition for background color changes */
+        max-width: 95%; /* Ensure it doesn't exceed screen width, allowing for padding */
+        box-sizing: border-box; /* Ensures padding is included in max-width calculation */
+      }
+
+      .info-item {
+        margin: 0 15px; /* Adjust spacing between items */
+        font-size: 30px; /* Slightly adjusted font size */
+        display: flex;
+        align-items: center;
+        text-shadow: 1px 1px 2px rgba(0,0,0,0.7); /* Optional: improves text readability */
+      }
+
+      .icon {
+        margin-right: 8px;
+        width: 24px; /* Original size */
+        height: 24px; /* Original size */
+        /* SVG icon color is set by its 'fill' attribute. We can change it via JS if needed, or ensure it contrasts. */
+      }
+
+      .direction-label, .alert-label {
+        margin-right: 5px; /* Adjust as needed */
+        font-weight: bold; /* Make labels bold */
+      }
+
+      .location-text, .direction-text, .alert-text {
+        /* Allow text to wrap if it gets too long within an item */
+        white-space: normal; /* Was implicitly normal, but good to be aware */
+        word-wrap: break-word; /* Breaks long words if necessary */
+      }
+
+      /* Specific styling for the alert text to allow it to take more space if needed */
+      .info-item.alert-item {
+        flex-shrink: 1; /* Allow this item to shrink if needed */
+        min-width: 0; /* Important for flex items that need to shrink and wrap text */
+      }
+      .alert-text {
+         font-weight: bold; /* Make alert text bold */
+      }
+
+    </style>
+  </head>
+  <body>
+    <div id="spotter-info">Loading data...</div>
+    
+    <script>
+
+      const alertColorMapping = {
+  "Tornado Warning": "rgba(255, 0, 0, 0.9)", // Red
+  "Severe Thunderstorm Warning": "rgba(255, 165, 0, 0.9)", // Orange
+  "Tornado Watch": "rgba(255, 255, 0, 0.9)", // Pink
+  "Severe Thunderstorm Watch": "rgba(219, 112, 147, 0.9)", // Gold/Dark Yellow
+  "None": "rgba(50, 50, 50, 0.7)", // Semi-transparent dark grey for no alerts
+  "Default": "rgba(70, 70, 70, 0.7)" // Fallback for other/unknown alerts
+};
+      // Log in to the API using your username and password.
+      async function login() {
+        const loginUrl = 'https://www.spotternetwork.org/login';
+        const username = 'zbatt21';  // Replace with your username
+        const password = 'redsfanforlife21';  // Replace with your password
+        
+        const response = await fetch(loginUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Login failed: ${errorText}`);
+        }
+        
+        const data = await response.json();
+        if (!data.success) {
+          throw new Error('Login unsuccessful: ' + (data.errors ? data.errors.join(', ') : 'Unknown error'));
+        }
+        console.log('Logged in successfully, Application ID:', data.id);
+        return data.id;  // This is your APPLICATION-ID.
+      }
+      
+      // Fetch the positions for specific markers (here, marker 74645)
+      async function fetchSpotterPositions(applicationId) {
+        const positionsUrl = 'https://www.spotternetwork.org/positions';
+        const requestBody = {
+          id: applicationId,
+          markers: [74645]  // Request positions for marker 74645
+        };
+        
+        const response = await fetch(positionsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody)
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Fetching positions failed: ${errorText}`);
+        }
+        
+        const data = await response.json();
+        return data.positions;
+      }
+      
+      // Reverse geocode using OpenStreetMap's Nominatim API.
+      async function reverseGeocode(lat, lon) {
+  const geoUrl = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`;
+  let geoData;
+
+  try {
+    // It's good practice to add a User-Agent for public APIs like Nominatim
+    const response = await fetch(geoUrl, { 
+      headers: { 'User-Agent': 'YourStormChaserOverlay/1.0 (yourname@example.com or link)' } 
+    }); 
+
+    if (!response.ok) {
+      console.error(`Reverse geocoding API request failed: ${response.status} ${await response.text()}`);
+      return 'Location API Error'; // Return a user-friendly error string
+    }
+    geoData = await response.json();
+  } catch (e) {
+    console.error("Network error or JSON parsing error in reverseGeocode:", e);
+    return 'Location Fetch Error'; // Return a user-friendly error string
+  }
+
+  if (!geoData || !geoData.address) {
+    console.warn("Nominatim response missing address object for:", lat, lon);
+    return 'Location Data Unavailable'; // Return a user-friendly error string
+  }
+  const address = geoData.address;
+
+  // Try preferred formats, ensuring primary component and state exist for combined strings
+  if (address.city && address.state) {
+    return `${address.city}, ${address.state}`;
+  }
+  if (address.town && address.state) {
+    return `${address.town}, ${address.state}`;
+  }
+  if (address.village && address.state) {
+    return `${address.village}, ${address.state}`;
+  }
+  if (address.hamlet && address.state) {
+    return `${address.hamlet}, ${address.state}`;
+  }
+  if (address.locality && address.state) {
+    return `${address.locality}, ${address.state}`;
+  }
+
+   // Fallback to county and state
+  if (address.county && address.state) {
+    return `${address.county}, ${address.state}`;
+  }
+  
+  // For your current API response {road, county, state}, none of the above will match.
+  // Now check for road + state, as per your original OR chain
+  if (address.road && address.state) {
+    // This will result in "Pemberville Road, Ohio" for your current example data.
+    // This might be preferable to just "County, State" if you want more specificity.
+    return `${address.road}, ${address.state}`;
+  }
+
+ 
+
+  // Even further fallbacks: if only one useful piece of information is found
+  // (This part makes it more robust than just 'Unknown town')
+  if (address.city) return address.city;
+  if (address.town) return address.town;
+  if (address.village) return address.village;
+  if (address.hamlet) return address.hamlet;
+  if (address.locality) return address.locality;
+  // Generally, you might not want to return just a road name or just a county if state is missing
+  // unless it's your absolute last resort.
+  if (address.state) return address.state; // If nothing else, just the state.
+  
+  console.warn("Could not determine a suitable location name. Address data:", JSON.stringify(address));
+  return 'Unknown Location'; // Final fallback
+}
+      
+      // Convert degree heading to a cardinal direction (using 8 main directions).
+      function getCardinalDirection(angle) {
+        const directions = ['North', 'Northeast', 'East', 'Southeast', 'South', 'Southwest', 'West', 'Northwest'];
+        angle = parseFloat(angle) % 360;
+        if (angle < 0) angle += 360;
+        const index = Math.floor((angle + 22.5) / 45) % 8;
+        return directions[index];
+      }
+      
+      // Fetch active alerts from the NWS API for a given point, filtering and prioritizing allowed alerts.
+async function fetchNWSAlerts(lat, lon) {
+  const nwsUrl = `https://api.weather.gov/alerts/active?point=${lat},${lon}`;
+  try {
+    const response = await fetch(nwsUrl, {
+      headers: { 'Accept': 'application/geo+json' }
+    });
+    if (!response.ok) {
+      console.error('Failed to fetch alerts from NWS API:', response.status, await response.text());
+      return null; // Indicate failure to fetch or parse
+    }
+    const data = await response.json();
+    if (!data.features || data.features.length === 0) {
+      return null; // No active alerts found at the point
+    }
+
+    // Define your allowed alerts in order of priority
+    // These are the canonical names your system will use
+    const allowedAlerts = [
+      "Tornado Warning",
+      "Severe Thunderstorm Warning",       // NWS "Severe Thunderstorm Warning" will map to this
+      "Tornado Watch",
+      "Severe Thunderstorm Watch"
+    ];
+
+    let highestPriorityAlertDetails = null;
+    let highestPriorityLevel = allowedAlerts.length; // Lower index means higher priority
+
+    for (const feature of data.features) {
+      if (!feature.properties || !feature.properties.event) {
+        continue; // Skip if essential properties are missing
+      }
+      const apiEventName = feature.properties.event;
+      const lowerApiEventName = apiEventName.toLowerCase();
+
+      for (let i = 0; i < allowedAlerts.length; i++) {
+        const canonicalAlertName = allowedAlerts[i];
+        const lowerCanonicalName = canonicalAlertName.toLowerCase();
+
+        // Check if the NWS event string includes our canonical keyword
+        // This handles cases like "Severe Thunderstorm Warning" matching "Thunderstorm Warning"
+        if (lowerApiEventName.includes(lowerCanonicalName)) {
+          if (i < highestPriorityLevel) { // If this alert is higher priority than previously found
+            highestPriorityLevel = i;
+            highestPriorityAlertDetails = {
+              name: canonicalAlertName, // Use our canonical name
+              expires: feature.properties.expires || feature.properties.ends, // Get expiry time
+              originalEvent: apiEventName // Store original NWS event name if needed
+            };
+          }
+          break; // Matched this feature against an allowed keyword, move to next NWS feature
+        }
+      }
+    }
+    return highestPriorityAlertDetails; // This will be an object or null
+
+  } catch (error) {
+    console.error('Error in fetchNWSAlerts:', error);
+    return null; // Return null on any exception during fetch/parse
+  }
+}
+      
+      // Main function: log in, fetch positions, reverse geocode, get alerts, and update the lower third.
+      async function displaySpotterLocation() {
+  try {
+    const applicationId = await login();
+    const positions = await fetchSpotterPositions(applicationId);
+    if (!positions || positions.length === 0) {
+      throw new Error('No positions returned for marker 74645');
+    }
+    const spotter = positions[0];
+    const lat = spotter.lat;
+    const lon = spotter.lon;
+    const heading = spotter.dir;
+    const cardinal = getCardinalDirection(heading);
+    // const currentSpeed = spotter.spd; // If you want to add speed later
+
+    const nearestTown = await reverseGeocode(lat, lon);
+    const nwsAlertDetails = await fetchNWSAlerts(lat, lon); // This now returns an object or null
+
+    let alertNameToDisplay = 'None';
+    let expiresInText = "";
+    let currentAlertColor = alertColorMapping["None"]; // Default to "None" color
+
+    if (nwsAlertDetails && nwsAlertDetails.name) {
+      alertNameToDisplay = nwsAlertDetails.name;
+      currentAlertColor = alertColorMapping[alertNameToDisplay] || alertColorMapping["Default"];
+
+      if (nwsAlertDetails.expires) {
+        const expiresDate = new Date(nwsAlertDetails.expires);
+        const now = new Date();
+        const diffMillis = expiresDate - now;
+
+        if (diffMillis > 0) {
+          const totalMinutes = Math.floor(diffMillis / 60000);
+          const hours = Math.floor(totalMinutes / 60);
+          const minutes = totalMinutes % 60;
+          
+          let expiresInFormattedText = "";
+          if (hours > 0) {
+            expiresInFormattedText += `${hours}h `;
+          }
+          expiresInFormattedText += `${minutes}m`;
+          
+          expiresInText = ` (Expires in ${expiresInFormattedText.trim()})`;
+        } else {
+          expiresInText = " (Expired)";
+        }
+      } else {
+        expiresInText = ""; // No expiry info available in alert
+      }
+    } else {
+      // No alert, or nwsAlertDetails is null or malformed
+      currentAlertColor = alertColorMapping["None"];
+    }
+
+    // SVG Pin (ensure fill is #FFFFFF for white, or adjust as needed for contrast)
+    const pinSVG = `
+      <svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+        <path fill="#FFFFFF" d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 6.5 12 6.5s2.5 1.12 2.5 2.5S13.38 11.5 12 11.5z"/>
+      </svg>
+    `;
+
+    const spotterInfoDiv = document.getElementById('spotter-info');
+    spotterInfoDiv.innerHTML = `
+      <div class="info-row" style="background-color: ${currentAlertColor};">
+        <div class="info-item">
+          ${pinSVG}
+          <span class="location-text">${nearestTown}</span>
+        </div>
+        <div class="info-item">
+          <span class="direction-label">Direction:</span>
+          <span class="direction-text">${cardinal}</span>
+        </div>
+        <div class="info-item alert-item">
+          <span class="alert-label">Alert:</span>
+          <span class="alert-text">${alertNameToDisplay}${expiresInText}</span>
+        </div>
+      </div>
+    `;
+  } catch (error) {
+    console.error('Error in displaySpotterLocation:', error);
+    const spotterInfoDiv = document.getElementById('spotter-info');
+    const errorBackgroundColor = alertColorMapping["Default"] || "rgba(70,70,70,0.7)"; // Fallback error color
+    spotterInfoDiv.innerHTML = `
+      <div class="info-row" style="background-color: ${errorBackgroundColor};">
+        <div class="info-item">Error: ${error.message}</div>
+      </div>
+    `;
+  }
+}
+      
+      // Initial display update.
+      displaySpotterLocation();
+      
+      // Refresh the display every 2 minutes (60,000 milliseconds).
+      setInterval(displaySpotterLocation, 60000);
+    </script>
+  </body>
+</html>

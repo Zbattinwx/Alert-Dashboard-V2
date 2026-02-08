@@ -91,6 +91,20 @@ from .google_chat_service import (
     stop_google_chat_service,
     send_alert_to_google_chat,
 )
+from .spotter_network_service import (
+    SpotterNetworkService,
+    get_spotter_network_service,
+    start_spotter_network_service,
+    stop_spotter_network_service,
+)
+from .chase_log_service import (
+    ChaseLogService,
+    get_chase_log_service,
+)
+from .radar_service import (
+    RadarService,
+    get_radar_service,
+)
 
 __all__ = [
     # Alert Manager
@@ -162,4 +176,15 @@ __all__ = [
     "start_google_chat_service",
     "stop_google_chat_service",
     "send_alert_to_google_chat",
+    # Spotter Network Service
+    "SpotterNetworkService",
+    "get_spotter_network_service",
+    "start_spotter_network_service",
+    "stop_spotter_network_service",
+    # Chase Log Service
+    "ChaseLogService",
+    "get_chase_log_service",
+    # Radar Service
+    "RadarService",
+    "get_radar_service",
 ]

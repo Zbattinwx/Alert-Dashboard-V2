@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
+import { apiUrl } from '../utils/api';
 
 interface AssistantStatus {
   enabled: boolean;
@@ -61,7 +62,7 @@ export function useAssistant(options: UseAssistantOptions = {}): UseAssistantRet
   // Check assistant status
   const checkStatus = useCallback(async () => {
     try {
-      const response = await fetch('/api/assistant/status');
+      const response = await fetch(apiUrl('/api/assistant/status'));
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
@@ -93,7 +94,7 @@ export function useAssistant(options: UseAssistantOptions = {}): UseAssistantRet
     setMessages(prev => [...prev, userMessage]);
 
     try {
-      const response = await fetch('/api/assistant/chat', {
+      const response = await fetch(apiUrl('/api/assistant/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message }),
@@ -136,7 +137,7 @@ export function useAssistant(options: UseAssistantOptions = {}): UseAssistantRet
   // Clear chat history
   const clearHistory = useCallback(async () => {
     try {
-      await fetch('/api/assistant/history', { method: 'DELETE' });
+      await fetch(apiUrl('/api/assistant/history'), { method: 'DELETE' });
       setMessages([]);
       setError(null);
     } catch (err) {
@@ -169,7 +170,7 @@ export function useAssistant(options: UseAssistantOptions = {}): UseAssistantRet
     setMessages(prev => [...prev, userMessage]);
 
     try {
-      const response = await fetch(`/api/assistant/insight?insight_type=${type}`);
+      const response = await fetch(apiUrl(`/api/assistant/insight?insight_type=${type}`));
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -209,7 +210,7 @@ export function useAssistant(options: UseAssistantOptions = {}): UseAssistantRet
   useEffect(() => {
     const loadHistory = async () => {
       try {
-        const response = await fetch('/api/assistant/history');
+        const response = await fetch(apiUrl('/api/assistant/history'));
         if (response.ok) {
           const data = await response.json();
           if (data.history && Array.isArray(data.history)) {

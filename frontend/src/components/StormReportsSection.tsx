@@ -3,6 +3,7 @@ import { MapContainer, TileLayer, CircleMarker, Popup, useMap, useMapEvents } fr
 import L from 'leaflet';
 import type { StormReport, LSRResponse, ViewerReportSubmission } from '../types/lsr';
 import { LSR_TYPE_COLORS, getTextColorForBackground } from '../types/lsr';
+import { apiUrl } from '../utils/api';
 import 'leaflet/dist/leaflet.css';
 
 interface StormReportsSectionProps {
@@ -114,7 +115,7 @@ export const StormReportsSection: React.FC<StormReportsSectionProps> = ({
       });
 
       // Use /api/lsr/all to get both official and viewer reports
-      const response = await fetch(`/api/lsr/all?${params}`);
+      const response = await fetch(apiUrl(`/api/lsr/all?${params}`));
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
@@ -178,7 +179,7 @@ export const StormReportsSection: React.FC<StormReportsSectionProps> = ({
 
     setSubmitting(true);
     try {
-      const response = await fetch('/api/lsr/viewer', {
+      const response = await fetch(apiUrl('/api/lsr/viewer'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newReport),
@@ -214,7 +215,7 @@ export const StormReportsSection: React.FC<StormReportsSectionProps> = ({
     if (!confirm('Are you sure you want to remove this report?')) return;
 
     try {
-      const response = await fetch(`/api/lsr/viewer/${reportId}`, {
+      const response = await fetch(apiUrl(`/api/lsr/viewer/${reportId}`), {
         method: 'DELETE',
       });
 
