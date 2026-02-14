@@ -382,6 +382,45 @@ class TimezoneHelper:
         return None
 
     @staticmethod
+    def parse_nwws_timestamp(text: str) -> Optional[datetime]:
+        """
+        Parse a NWWS-style timestamp from raw alert text.
+        Example: "339 PM CDT Mon Aug 8 2022"
+        """
+        # Import here to avoid circular dependency
+        from ..parsers.patterns import PATTERN_ISSUED_TIME_LINE
+
+        match = PATTERN_ISSUED_TIME_LINE.search(text)
+        if not match:
+            return None
+
+        try:
+            time_val, am_pm, tz, _, month_name, day_num, year = match.groups()
+
+            # We need to handle time like "339" vs "1039"
+            if len(time_val) == 3:
+                time_val = f"0{time_val}"
+
+            # Reconstruct for strptime
+            ts_string = f"{time_val} {am_pm} {month_name} {day_num} {year}"
+            fmt = "%I%M %p %b %d %Y"
+
+            # Parse the date and time part
+            dt = datetime.strptime(ts_string, fmt)
+
+            # Get the timezone info
+            tz_info = TimezoneHelper.parse_timezone_abbreviation(tz)
+            if not tz_info:
+                logger.warning(f"Could not parse timezone '{tz}' from NWWS timestamp, using UTC.")
+                tz_info = timezone.utc
+
+            return dt.replace(tzinfo=tz_info)
+
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse NWWS timestamp '{match.group(0)}': {e}")
+            return None
+
+    @staticmethod
     def parse_text_time(
         time_str: str,
         am_pm: Optional[str],

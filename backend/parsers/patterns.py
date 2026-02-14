@@ -184,6 +184,13 @@ PATTERN_XML_EVENT_END: Pattern[str] = re.compile(
     re.IGNORECASE
 )
 
+# Pattern for issuance time in raw text alerts (e.g., "339 PM CDT Mon Aug 8 2022")
+PATTERN_ISSUED_TIME_LINE: Pattern[str] = re.compile(
+    r"(\d{1,4})\s+(AM|PM)\s+([A-Z]{3,4})\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(\d{4})",
+    re.IGNORECASE
+)
+
+
 
 # =============================================================================
 # THREAT/IMPACT PATTERNS

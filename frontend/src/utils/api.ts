@@ -22,3 +22,25 @@ export function wsUrl(): string {
   }
   return `${protocol}//${window.location.host}${BASE}/ws`;
 }
+
+/**
+ * Sends a request to the backend to manually clear/delete an alert.
+ * @param alertId The unique ID of the alert to clear (e.g., product_id).
+ * @returns True if successful, false otherwise.
+ */
+export async function clearAlert(alertId: string): Promise<boolean> {
+  try {
+    const response = await fetch(apiUrl(`/api/alerts/${alertId}`), {
+      method: 'DELETE',
+    });
+    if (response.ok) {
+      console.log(`Alert ${alertId} cleared successfully.`);
+      return true;
+    }
+    console.error(`Failed to clear alert ${alertId}: ${response.status} ${response.statusText}`);
+    return false;
+  } catch (error) {
+    console.error(`Error clearing alert ${alertId}:`, error);
+    return false;
+  }
+}

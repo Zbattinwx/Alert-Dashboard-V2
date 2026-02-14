@@ -45,6 +45,7 @@ try:
         get_spotter_network_service, start_spotter_network_service, stop_spotter_network_service,
         get_chase_log_service,
         get_radar_service,
+        get_nwws_products_service, start_nwws_products_service, stop_nwws_products_service,
     )
 except ImportError:
     # Direct execution: python backend/main.py
@@ -71,6 +72,7 @@ except ImportError:
         get_spotter_network_service, start_spotter_network_service, stop_spotter_network_service,
         get_chase_log_service,
         get_radar_service,
+        get_nwws_products_service, start_nwws_products_service, stop_nwws_products_service,
     )
 
 logger = logging.getLogger(__name__)
@@ -170,9 +172,16 @@ async def startup_services():
 
         nwws_handler.add_alert_callback(on_nwws_alert)
 
+        # Wire NWWS products service to capture ALL raw products (monitoring + AFD)
+        await start_nwws_products_service()
+        products_service = get_nwws_products_service()
+        nwws_handler.add_raw_callback(products_service.on_raw_product)
+        logger.info("NWWS Products service wired to raw callback")
+
         logger.info("NWWS Handler started")
     else:
         logger.warning("NWWS credentials not configured - using API-only mode")
+        await start_nwws_products_service()  # Start anyway for API fallback
 
     # 6. Start periodic API polling (backup to NWWS)
     asyncio.create_task(api_polling_loop())
@@ -232,6 +241,7 @@ async def shutdown_services():
     await stop_spc_service()
     await stop_odot_service()
     await stop_lsr_service()
+    await stop_nwws_products_service()
     await stop_nwws_handler()
     await stop_alert_manager()
     await stop_zone_geometry_service()
@@ -561,6 +571,17 @@ async def get_alert(product_id: str):
     return alert.to_dict()
 
 
+@app.delete("/api/alerts/{product_id}")
+async def clear_alert_manual(product_id: str):
+    """Manually clear an alert by product ID."""
+    alert_manager = get_alert_manager()
+
+    if alert_manager.remove_alert(product_id, reason="MANUAL"):
+        return {"success": True, "message": f"Alert {product_id} cleared manually"}
+    
+    raise HTTPException(status_code=404, detail="Alert not found or already removed")
+
+
 @app.get("/api/stats")
 async def get_stats():
     """Get alert statistics."""
@@ -584,7 +605,7 @@ async def get_map_zones():
 
     # Polygon-based phenomena that should NOT render zone fills
     # These are storm-based warnings that use polygon geometry instead of county/zone fills
-    POLYGON_ALERT_PHENOMENA = {'TO', 'SV', 'FF', 'SQ'}
+    POLYGON_ALERT_PHENOMENA = {'TO', 'SV', 'FF', 'SQ', 'SPS'}
 
     # Priority for significance (lower = higher priority)
     SIGNIFICANCE_PRIORITY = {
@@ -1446,6 +1467,96 @@ async def get_wind_gusts_stats():
     """Get wind gusts service statistics."""
     wind_service = get_wind_gusts_service()
     return wind_service.get_statistics()
+
+
+# =============================================================================
+# NWWS Products Feed Endpoints
+# =============================================================================
+
+@app.get("/api/nwws/products")
+async def get_nwws_products_feed(
+    limit: int = Query(50, ge=1, le=500, description="Number of products to return"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    product_type: Optional[str] = Query(None, description="Filter by product type (e.g., SVS, FFW, AFD)"),
+    office: Optional[str] = Query(None, description="Filter by office code (e.g., CLE)"),
+):
+    """Get recent NWWS products for monitoring NWWS connection health."""
+    service = get_nwws_products_service()
+    nwws_handler = get_nwws_handler()
+
+    products = service.get_products(
+        limit=limit,
+        offset=offset,
+        product_type=product_type,
+        office=office,
+    )
+
+    return {
+        "count": len(products),
+        "total_received": service.get_product_count(),
+        "nwws_connected": nwws_handler.is_connected if nwws_handler else False,
+        "products": products,
+    }
+
+
+@app.get("/api/nwws/stats")
+async def get_nwws_products_stats():
+    """Get NWWS products service statistics."""
+    service = get_nwws_products_service()
+    nwws_handler = get_nwws_handler()
+
+    stats = service.get_statistics()
+    stats["nwws_connected"] = nwws_handler.is_connected if nwws_handler else False
+    return stats
+
+
+# =============================================================================
+# AFD (Area Forecast Discussion) Endpoints
+# =============================================================================
+
+@app.get("/api/afd")
+async def get_afd_offices():
+    """Get list of offices with available AFDs."""
+    service = get_nwws_products_service()
+    offices = service.get_afd_offices()
+
+    return {
+        "count": len(offices),
+        "offices": offices,
+    }
+
+
+@app.get("/api/afd/{office}")
+async def get_afd(
+    office: str,
+    index: int = Query(0, ge=0, le=4, description="AFD index (0=latest, up to 4)"),
+    fallback: bool = Query(True, description="Fetch from NWS API if not cached"),
+):
+    """Get AFD for a specific office. Checks NWWS cache first, then NWS API."""
+    service = get_nwws_products_service()
+
+    # Try NWWS cache first
+    afd = service.get_afd(office, index=index)
+
+    if afd:
+        return {
+            "source": "nwws",
+            "afd": afd,
+        }
+
+    # Fallback to NWS API
+    if fallback and index == 0:
+        afd = await service.fetch_afd_from_api(office)
+        if afd:
+            return {
+                "source": "api",
+                "afd": afd,
+            }
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"No AFD available for office '{office.upper()}'"
+    )
 
 
 # =============================================================================

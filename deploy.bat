@@ -31,7 +31,7 @@ echo       (excluding node_modules, .git, data, logs)
 ) > _deploy_files.txt
 
 :: Add backend (excluding __pycache__)
-for /r backend %%F in (*.py) do (
+for /r backend %%F in (*.py *.json) do (
     set "fp=%%F"
     setlocal enabledelayedexpansion
     set "rel=!fp:%cd%\=!"
@@ -112,10 +112,10 @@ echo.
 
 :: Step 3: Extract and build on Pi
 echo [3/4] Building Docker containers on Pi...
-echo       (this may take several minutes on first build)
+echo       (uses cached Python/Rust layers when requirements.txt unchanged)
 echo.
 
-ssh %PI_USER%@%PI_HOST% "cd %PI_DIR% && tar -xzf %ARCHIVE% && rm %ARCHIVE% && docker compose up -d --build && docker builder prune -af && docker image prune -f"
+ssh %PI_USER%@%PI_HOST% "cd %PI_DIR% && tar -xzf %ARCHIVE% && rm %ARCHIVE% && docker compose up -d --build && docker image prune -f"
 if errorlevel 1 (
     echo [WARN] Docker build may have had issues. Check manually:
     echo        ssh %PI_USER%@%PI_HOST%

@@ -3,6 +3,7 @@ import type { Alert } from '../types/alert';
 import { PHENOMENON_NAMES, getAlertStyle } from '../types/alert';
 import { AlertCard } from './AlertCard';
 import { AlertDetailPane } from './AlertDetailPane';
+import { clearAlert } from '../utils/api';
 
 interface DynamicFilter {
   id: string;
@@ -219,6 +220,15 @@ export const AlertsSection: React.FC<AlertsSectionProps> = ({ alerts }) => {
     setDetailOpen(false);
   };
 
+  const handleClearAlert = async (alert: Alert) => {
+    const success = await clearAlert(alert.product_id);
+    if (success) {
+      // The websocket connection will automatically push the updated alert list
+      // so no manual refresh is needed here. We can add a toast notification later.
+      console.log(`Alert ${alert.product_id} was cleared. The list will update automatically.`);
+    }
+  };
+
   return (
     <div className="section active">
       <h2 className="section-title">Active Alerts</h2>
@@ -269,6 +279,7 @@ export const AlertsSection: React.FC<AlertsSectionProps> = ({ alerts }) => {
               key={alert.product_id}
               alert={alert}
               onClick={handleAlertClick}
+              onClear={handleClearAlert}
             />
           ))}
         </div>

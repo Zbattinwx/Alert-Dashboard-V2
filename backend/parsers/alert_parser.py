@@ -13,6 +13,7 @@ Key improvements over V1:
 - Clear separation of API vs text parsing
 """
 
+import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional, Union
@@ -141,6 +142,36 @@ class AlertParser:
                 else:
                     logger.warning(f"VTEC string found but invalid: {vtec_str[:100]}")
 
+            # Extract event information
+            alert.event_name = properties.get("event", "")
+            alert.headline = properties.get("headline", "")
+            alert.description = properties.get("description", "")
+            alert.instruction = properties.get("instruction", "")
+
+            # Parse timestamps early for SPS ID generation
+            sent_str = properties.get("sent")
+            if sent_str:
+                alert.issued_time = TimezoneHelper.parse_iso_timestamp(sent_str)
+
+            # Extract geographic codes early for SPS ID generation
+            geocode = properties.get("geocode", {})
+            ugc_list = geocode.get("UGC", [])
+            if ugc_list:
+                alert.affected_areas = ugc_list if isinstance(ugc_list, list) else [ugc_list]
+
+            if not alert.affected_areas:
+                affected_zones = properties.get("affectedZones", [])
+                if affected_zones:
+                    extracted_ugc = []
+                    for zone_url in affected_zones:
+                        if isinstance(zone_url, str):
+                            zone_id = zone_url.rstrip("/").split("/")[-1]
+                            if len(zone_id) == 6 and zone_id[:2].isalpha() and zone_id[2] in "CZ" and zone_id[3:].isdigit():
+                                extracted_ugc.append(zone_id.upper())
+                    if extracted_ugc:
+                        alert.affected_areas = extracted_ugc
+                        logger.debug(f"Extracted {len(extracted_ugc)} UGC codes from affectedZones URLs")
+
             # Build product ID
             if alert.vtec:
                 alert.product_id = VTECParser.build_product_id(alert.vtec)
@@ -148,48 +179,46 @@ class AlertParser:
                 alert.significance = alert.vtec.significance
                 alert.sender_office = alert.vtec.office
 
-                # Debug logging for watch merging
                 if alert.vtec.significance == AlertSignificance.WATCH:
                     logger.info(
                         f"Watch parsed: ETN={alert.vtec.event_tracking_number}, "
                         f"office={alert.vtec.office}, product_id={alert.product_id}"
                     )
-
-                # Handle cancellations
                 if VTECParser.is_cancellation(alert.vtec):
                     alert.status = AlertStatus.CANCELLED
             else:
-                # Fallback product ID from API ID
-                event_name_for_log = properties.get("event", "Unknown")
-                if alert.message_id:
-                    alert.product_id = alert.message_id.split("/")[-1]
-                    logger.warning(f"No VTEC found for '{event_name_for_log}', using fallback ID: {alert.product_id}")
-                else:
-                    alert.product_id = f"api_{datetime.now(timezone.utc).timestamp()}"
-                    logger.warning(f"No VTEC or message_id for '{event_name_for_log}', using timestamp ID: {alert.product_id}")
+                # No VTEC - determine phenomenon and check for SPS
+                if not alert.phenomenon and alert.event_name:
+                    alert.phenomenon = cls._event_name_to_phenomenon(alert.event_name)
+                    if alert.phenomenon == "SPS":
+                        alert.significance = AlertSignificance.STATEMENT
 
-            # Extract event information
-            alert.event_name = properties.get("event", "")
-            alert.headline = properties.get("headline", "")
-            alert.description = properties.get("description", "")
-            alert.instruction = properties.get("instruction", "")
+                # Special handling for SPS to generate a consistent ID
+                if alert.phenomenon == "SPS" and alert.issued_time and alert.affected_areas:
+                    sps_id = cls._generate_sps_id(alert.affected_areas, alert.issued_time)
+                    if sps_id:
+                        alert.product_id = sps_id
+                        logger.info(f"Generated consistent SPS ID for API alert: {sps_id}")
 
-            # Sender name - use API value or lookup from WFO code
+                if not alert.product_id:
+                    event_name_for_log = properties.get("event", "Unknown")
+                    if alert.message_id:
+                        alert.product_id = alert.message_id.split("/")[-1]
+                        logger.warning(f"No VTEC found for '{event_name_for_log}', using fallback ID: {alert.product_id}")
+                    else:
+                        alert.product_id = f"api_{datetime.now(timezone.utc).timestamp()}"
+                        logger.warning(f"No VTEC or message_id for '{event_name_for_log}', using timestamp ID: {alert.product_id}")
+
+            # Sender name
             alert.sender_name = properties.get("senderName", "")
             if not alert.sender_name and alert.sender_office:
                 alert.sender_name = get_wfo_name(alert.sender_office)
 
-            # Determine phenomenon from event name if not from VTEC
-            if not alert.phenomenon and alert.event_name:
-                alert.phenomenon = cls._event_name_to_phenomenon(alert.event_name)
-
-            # Parse timestamps
-            # Priority: ends > expires (ends is actual event end, expires is message expiration)
+            # Finish parsing remaining timestamps
             ends_str = properties.get("ends")
             expires_str = properties.get("expires")
             effective_str = properties.get("effective")
             onset_str = properties.get("onset")
-            sent_str = properties.get("sent")
 
             if ends_str:
                 alert.expiration_time = TimezoneHelper.parse_iso_timestamp(ends_str)
@@ -201,50 +230,21 @@ class AlertParser:
                 alert.effective_time = TimezoneHelper.parse_iso_timestamp(effective_str)
             if onset_str:
                 alert.onset_time = TimezoneHelper.parse_iso_timestamp(onset_str)
-            if sent_str:
-                alert.issued_time = TimezoneHelper.parse_iso_timestamp(sent_str)
-
-            # Extract geographic codes
-            geocode = properties.get("geocode", {})
-
-            # UGC codes from geocode
-            ugc_list = geocode.get("UGC", [])
-            if ugc_list:
-                alert.affected_areas = ugc_list if isinstance(ugc_list, list) else [ugc_list]
-
-            # Fallback: extract UGC codes from affectedZones URLs if geocode is empty
-            # URLs look like: https://api.weather.gov/zones/forecast/OHZ049
-            if not alert.affected_areas:
-                affected_zones = properties.get("affectedZones", [])
-                if affected_zones:
-                    extracted_ugc = []
-                    for zone_url in affected_zones:
-                        if isinstance(zone_url, str):
-                            # Extract last path segment (the zone ID)
-                            zone_id = zone_url.rstrip("/").split("/")[-1]
-                            # Validate it looks like a UGC code (2 letters + C/Z + 3 digits)
-                            if len(zone_id) == 6 and zone_id[:2].isalpha() and zone_id[2] in "CZ" and zone_id[3:].isdigit():
-                                extracted_ugc.append(zone_id.upper())
-                    if extracted_ugc:
-                        alert.affected_areas = extracted_ugc
-                        logger.debug(f"Extracted {len(extracted_ugc)} UGC codes from affectedZones URLs")
 
             # FIPS/SAME codes
             same_codes = geocode.get("SAME", [])
             if same_codes:
-                # Normalize to 5-digit FIPS
                 alert.fips_codes = [
                     code[-5:].zfill(5)
                     for code in same_codes
                     if code and len(code) >= 5
                 ]
 
-            # Area description - use UGC service if areaDesc is empty or just UGC codes
+            # Area description
             area_desc = properties.get("areaDesc", "")
             if area_desc and not cls._looks_like_ugc_codes(area_desc):
                 alert.display_locations = area_desc
             elif alert.affected_areas:
-                # Use UGC service to get human-readable names
                 alert.display_locations = ugc_get_display_locations(alert.affected_areas)
             else:
                 alert.display_locations = area_desc
@@ -255,51 +255,43 @@ class AlertParser:
                 if alert.polygon:
                     alert.centroid = cls._calculate_centroid(alert.polygon)
 
-            # Parse threat data from description
-            alert.threat = ThreatParser.parse(alert.description, is_xml=False)
+            if not alert.polygon and alert.description:
+                alert.polygon = cls._parse_text_polygon(alert.description, is_xml=False)
+                if alert.polygon:
+                    alert.centroid = cls._calculate_centroid(alert.polygon)
+                    logger.info(f"Parsed polygon from description text for {alert.product_id}")
 
-            # Also check parameters for threat tags
+            # Parse threat data
+            alert.threat = ThreatParser.parse(alert.description, is_xml=False)
             cls._parse_api_threat_parameters(parameters, alert)
 
-            # Apply SPS filter if applicable
+            # Apply SPS filter
             if alert.phenomenon == "SPS":
                 if not cls._is_relevant_sps(alert.description):
                     logger.debug(f"Filtering out non-thunderstorm SPS: {alert.product_id}")
                     return None
 
-            # Assign default expiration if needed
+            # Assign default expiration
             if not alert.expiration_time and alert.phenomenon in cls.TARGETED_PHENOMENA:
-                alert.expiration_time = datetime.now(timezone.utc) + timedelta(
-                    minutes=cls.DEFAULT_LIFETIME_MINUTES
-                )
+                alert.expiration_time = datetime.now(timezone.utc) + timedelta(minutes=cls.DEFAULT_LIFETIME_MINUTES)
                 logger.warning(
                     f"Assigned default {cls.DEFAULT_LIFETIME_MINUTES}-min expiration to "
-                    f"{alert.product_id} (no expiration found in API response)"
+                    f"{alert.product_id} (no expiration found in API)"
                 )
 
-            # Store raw text for reference
             alert.raw_text = alert.description
-
-            # Filter by target phenomena from config
             if not cls._is_target_phenomenon(alert.phenomenon):
                 logger.debug(f"Filtering out non-target phenomenon: {alert.phenomenon} ({alert.event_name})")
                 return None
-
-            # Filter by target states from config
             if not cls._is_target_state(alert.affected_areas):
                 logger.debug(f"Filtering out alert for non-target state: {alert.affected_areas}")
                 return None
 
-            # Filter affected_areas to only include counties from target states
-            # This ensures multi-state alerts only show our target state's counties
             original_areas = alert.affected_areas.copy() if alert.affected_areas else []
             alert.affected_areas = cls._filter_to_target_states(alert.affected_areas)
-
-            # Regenerate display_locations from filtered areas if we filtered any out
             if alert.affected_areas and len(alert.affected_areas) < len(original_areas):
                 alert.display_locations = ugc_get_display_locations(alert.affected_areas)
 
-            # Reject alerts with no valid affected_areas (after filtering)
             if not alert.affected_areas:
                 logger.warning(
                     f"Rejecting API alert {alert.product_id} - no valid affected_areas after filtering "
@@ -317,24 +309,13 @@ class AlertParser:
     def parse_text_alert(cls, raw_text: str, source: str = "nwws") -> Optional[Alert]:
         """
         Parse an alert from raw NWWS text or XML/CAP format.
-
-        Args:
-            raw_text: Raw alert text
-            source: Source identifier
-
-        Returns:
-            Parsed Alert object, or None if parsing fails
         """
         try:
-            # Filter out informational products that shouldn't create alerts
             if cls._is_informational_product(raw_text):
                 logger.debug("Filtering out informational product (HWO, etc.)")
                 return None
 
-            alert = Alert(source=source)
-            alert.raw_text = raw_text
-
-            # Detect if XML content
+            alert = Alert(source=source, raw_text=raw_text)
             is_xml = is_xml_content(raw_text)
 
             # Parse VTEC
@@ -345,121 +326,102 @@ class AlertParser:
                 alert.phenomenon = alert.vtec.phenomenon
                 alert.significance = alert.vtec.significance
                 alert.sender_office = alert.vtec.office
-
-                # Use VTEC end time as expiration
                 if alert.vtec.end_time:
                     alert.expiration_time = alert.vtec.end_time
-
-                # Handle cancellations
                 if VTECParser.is_cancellation(alert.vtec):
                     alert.status = AlertStatus.CANCELLED
-
-                # Log validation warnings
                 for warning in vtec_data.validation_warnings:
                     logger.warning(f"VTEC warning for {alert.product_id}: {warning}")
+
+            # This block handles non-VTEC alerts (like SPS)
             else:
-                # Check for watch product without standard VTEC
-                watch_match = PATTERN_WATCH_TYPE.search(raw_text)
-                if watch_match:
-                    watch_type = watch_match.group(1).upper()
-                    watch_number = watch_match.group(2)
+                alert.issued_time = TimezoneHelper.parse_nwws_timestamp(raw_text)
+                header_text = raw_text[:500]
+                alert.phenomenon = cls._event_name_to_phenomenon(header_text)
+                if alert.phenomenon:
+                    alert.significance = AlertSignificance.STATEMENT
+                    alert.event_name = cls._build_event_name(alert.phenomenon, alert.significance)
 
-                    if "TORNADO" in watch_type:
-                        alert.phenomenon = "TO"
-                    else:
-                        alert.phenomenon = "SV"
-
-                    alert.significance = AlertSignificance.WATCH
-                    alert.product_id = f"{alert.phenomenon}A.SPC.{watch_number.zfill(4)}"
-                else:
-                    # No VTEC or watch - generate fallback ID
-                    alert.product_id = f"nwws_{datetime.now(timezone.utc).timestamp()}"
-                    for error in vtec_data.validation_errors:
-                        logger.debug(f"VTEC parse issue: {error}")
-
-            # Parse UGC codes
+            # Parse UGC codes (needed for SPS ID generation)
             ugc_data = UGCParser.parse(raw_text)
             if ugc_data.is_valid:
                 alert.affected_areas = ugc_data.ugc_codes
                 alert.fips_codes = ugc_data.fips_codes
-
-                # Use UGC expiration if no VTEC expiration
                 if not alert.expiration_time and ugc_data.expiration_time:
                     alert.expiration_time = ugc_data.expiration_time
 
-            # Also try XML FIPS if XML content
+            # Generate consistent ID for SPS if no VTEC
+            if not alert.vtec and alert.phenomenon == "SPS":
+                if alert.issued_time and alert.affected_areas:
+                    sps_id = cls._generate_sps_id(alert.affected_areas, alert.issued_time)
+                    if sps_id:
+                        alert.product_id = sps_id
+                        logger.info(f"Generated consistent SPS ID for text alert: {sps_id}")
+
+            # Fallback ID generation if still no ID
+            if not alert.product_id:
+                watch_match = PATTERN_WATCH_TYPE.search(raw_text)
+                if watch_match:
+                    watch_type = watch_match.group(1).upper()
+                    watch_number = watch_match.group(2)
+                    alert.phenomenon = "TO" if "TORNADO" in watch_type else "SV"
+                    alert.significance = AlertSignificance.WATCH
+                    alert.product_id = f"{alert.phenomenon}A.SPC.{watch_number.zfill(4)}"
+                else:
+                    alert.product_id = f"nwws_{datetime.now(timezone.utc).timestamp()}"
+                    for error in vtec_data.validation_errors:
+                        logger.debug(f"VTEC parse issue: {error}")
+
             if is_xml:
                 xml_fips = UGCParser.parse_xml_fips(raw_text)
                 if xml_fips:
                     alert.fips_codes = list(set(alert.fips_codes + xml_fips))
 
-            # Parse expiration from text if still not found
             if not alert.expiration_time:
                 alert.expiration_time = cls._parse_text_expiration(raw_text, is_xml, alert.sender_office)
 
-            # Parse location description - prefer UGC service for human-readable names
             location_desc = cls._parse_location_description(raw_text, is_xml)
             if location_desc and not cls._looks_like_ugc_codes(location_desc):
                 alert.display_locations = location_desc
             elif alert.affected_areas:
-                # Use UGC service to get human-readable county/zone names
                 alert.display_locations = ugc_get_display_locations(alert.affected_areas)
             else:
                 alert.display_locations = location_desc
 
-            # Parse polygon
             alert.polygon = cls._parse_text_polygon(raw_text, is_xml)
             if alert.polygon:
                 alert.centroid = cls._calculate_centroid(alert.polygon)
 
-            # Parse threat data
             alert.threat = ThreatParser.parse(raw_text, is_xml)
-
-            # Set event name
             if alert.phenomenon:
                 alert.event_name = cls._build_event_name(alert.phenomenon, alert.significance)
-
-            # Set sender name from WFO code if not already set
             if not alert.sender_name and alert.sender_office:
                 alert.sender_name = get_wfo_name(alert.sender_office)
 
-            # Apply SPS filter
             if alert.phenomenon == "SPS":
                 if not cls._is_relevant_sps(raw_text):
                     logger.debug(f"Filtering out non-thunderstorm SPS")
                     return None
 
-            # Assign default expiration if needed
             if not alert.expiration_time and alert.phenomenon in cls.TARGETED_PHENOMENA:
-                alert.expiration_time = datetime.now(timezone.utc) + timedelta(
-                    minutes=cls.DEFAULT_LIFETIME_MINUTES
-                )
+                alert.expiration_time = datetime.now(timezone.utc) + timedelta(minutes=cls.DEFAULT_LIFETIME_MINUTES)
                 logger.warning(
                     f"Assigned default {cls.DEFAULT_LIFETIME_MINUTES}-min expiration to "
                     f"{alert.product_id} (no expiration found in text)"
                 )
 
-            # Filter by target phenomena from config
             if not cls._is_target_phenomenon(alert.phenomenon):
                 logger.debug(f"Filtering out non-target phenomenon: {alert.phenomenon}")
                 return None
-
-            # Filter by target states from config
             if not cls._is_target_state(alert.affected_areas):
                 logger.debug(f"Filtering out alert for non-target state: {alert.affected_areas}")
                 return None
 
-            # Filter affected_areas to only include counties from target states
-            # This ensures multi-state alerts only show our target state's counties
             original_areas = alert.affected_areas.copy() if alert.affected_areas else []
             alert.affected_areas = cls._filter_to_target_states(alert.affected_areas)
-
-            # Regenerate display_locations from filtered areas if we filtered any out
             if alert.affected_areas and len(alert.affected_areas) < len(original_areas):
                 alert.display_locations = ugc_get_display_locations(alert.affected_areas)
 
-            # Reject alerts with no valid affected_areas (after filtering)
-            # This catches malformed alerts like SPC watches with invalid UGC codes
             if not alert.affected_areas:
                 logger.warning(
                     f"Rejecting alert {alert.product_id} - no valid affected_areas after filtering "
@@ -476,6 +438,27 @@ class AlertParser:
     # ==========================================================================
     # Helper methods
     # ==========================================================================
+
+    @classmethod
+    def _generate_sps_id(
+        cls,
+        ugc_codes: list[str],
+        issued_time: datetime
+    ) -> Optional[str]:
+        """Generate a consistent product ID for non-VTEC Special Weather Statements."""
+        if not all([ugc_codes, issued_time]):
+            return None
+
+        # Sort UGC codes to ensure consistent order
+        sorted_ugc = sorted(ugc_codes)
+        ugc_hash = hashlib.sha1("".join(sorted_ugc).encode()).hexdigest()[:8]
+
+        # Format timestamp to nearest minute to handle small discrepancies
+        # Use UTC to ensure consistency across timezones
+        time_str = issued_time.astimezone(timezone.utc).strftime("%Y%m%d%H%M")
+
+        # Using "adhoc" to indicate a non-VTEC, generated ID
+        return f"SPS.adhoc.{time_str}.{ugc_hash}"
 
     @classmethod
     def _parse_geojson_geometry(cls, geometry: dict) -> list[list[float]]:
@@ -774,6 +757,9 @@ class AlertParser:
         }
 
         suffix = suffix_map.get(significance, "")
+        # Avoid doubling suffix (e.g. "Special Weather Statement Statement")
+        if suffix and base_name.endswith(suffix):
+            return base_name
         return f"{base_name} {suffix}".strip()
 
     @classmethod

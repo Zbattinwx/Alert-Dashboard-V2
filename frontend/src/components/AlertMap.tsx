@@ -87,7 +87,7 @@ interface MapZonesResponse {
 
 // Polygon alerts that should always render on top (storm-based)
 const POLYGON_ALERT_PHENOMENA = new Set([
-  'TO', 'TOR', 'SV', 'SVR', 'FF', 'FFW', 'FFS', 'SVS', 'SQ',
+  'TO', 'TOR', 'SV', 'SVR', 'FF', 'FFW', 'FFS', 'SVS', 'SQ', 'SPS',
 ]);
 
 // Component to fit map bounds

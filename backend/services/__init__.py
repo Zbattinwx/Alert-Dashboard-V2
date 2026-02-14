@@ -105,6 +105,12 @@ from .radar_service import (
     RadarService,
     get_radar_service,
 )
+from .nwws_products_service import (
+    NWWSProductsService,
+    get_nwws_products_service,
+    start_nwws_products_service,
+    stop_nwws_products_service,
+)
 
 __all__ = [
     # Alert Manager
@@ -187,4 +193,9 @@ __all__ = [
     # Radar Service
     "RadarService",
     "get_radar_service",
+    # NWWS Products Service
+    "NWWSProductsService",
+    "get_nwws_products_service",
+    "start_nwws_products_service",
+    "stop_nwws_products_service",
 ]

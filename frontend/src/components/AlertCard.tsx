@@ -5,9 +5,10 @@ import { getAlertStyle } from '../types/alert';
 interface AlertCardProps {
   alert: Alert;
   onClick?: (alert: Alert) => void;
+  onClear?: (alert: Alert) => void;
 }
 
-export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick }) => {
+export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear }) => {
   const formatTime = (isoString: string | null) => {
     if (!isoString) return '';
     const date = new Date(isoString);
@@ -88,6 +89,11 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick }) => {
     impacts.push(`Ice: ${alert.threat.ice_accumulation_inches}"`);
   }
 
+  const handleClearClick = (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent the main card click from firing
+    onClear?.(alert);
+  };
+
   return (
     <div
       className="alert-card"
@@ -107,6 +113,7 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick }) => {
         <span className="alert-card-time">
           {formatTime(alert.issued_time)}
         </span>
+        <span className="alert-card-clear" onClick={handleClearClick}>X</span>
       </div>
       <div className="alert-card-body">
         {/* Location - use display_locations (human readable), truncated for merged watches */}

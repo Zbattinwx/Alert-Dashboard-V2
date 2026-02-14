@@ -12,6 +12,8 @@ import { WindGustsSection } from './components/WindGustsSection';
 import { AssistantPanel } from './components/AssistantPanel';
 import { NewAlertNotification } from './components/NewAlertNotification';
 import { SettingsSection } from './components/SettingsSection';
+import { NWWSProductsSection } from './components/NWWSProductsSection';
+import { AFDSection } from './components/AFDSection';
 import { OBSOverlay } from './components/OBSOverlay';
 import { ChaseMode } from './components/ChaseMode';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -156,10 +158,7 @@ const Dashboard: React.FC = () => {
           )}
 
           {activeSection === 'afd' && (
-            <div className="section active">
-              <h2 className="section-title">Area Forecast Discussions</h2>
-              <p style={{ color: 'var(--text-secondary)' }}>AFD section coming soon...</p>
-            </div>
+            <AFDSection />
           )}
 
           {activeSection === 'gusts' && (
@@ -174,10 +173,7 @@ const Dashboard: React.FC = () => {
           )}
 
           {activeSection === 'nwws-feed' && (
-            <div className="section active">
-              <h2 className="section-title">NWWS Products</h2>
-              <p style={{ color: 'var(--text-secondary)' }}>NWWS feed section coming soon...</p>
-            </div>
+            <NWWSProductsSection />
           )}
 
           {activeSection === 'daily-recap' && (

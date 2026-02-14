@@ -62,6 +62,7 @@ data/
 
 # Claude Code
 .claude/
+.gemini/
 
 # Windows reserved names
 nul
