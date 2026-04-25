@@ -334,6 +334,28 @@ class TestPolygonParsing:
         assert all(20 <= p[0] <= 60 for p in polygon)  # Lat in US range
         assert all(-130 <= p[1] <= -60 for p in polygon)  # Lon in US range
 
+    def test_parse_text_polygon_double_newline(self):
+        """Test parsing LAT...LON polygon with double newline (blank line)."""
+        text = """
+        LAT...LON 2934 9656 2942 9664 2948 9639 2885 9636
+
+              2889 9673 2892 9679 2902 9683 2906 9694
+        TIME...MOT...LOC 2259Z 267DEG 53KT 2910 9710
+        """
+
+        polygon = AlertParser._parse_text_polygon(text, is_xml=False)
+
+        # Should find 16 values -> 8 points + 1 closing point = 9
+        assert len(polygon) == 9
+        
+        # Check first point of second line: 2889 9673 -> 28.89, -96.73
+        found = False
+        for p in polygon:
+            if abs(p[0] - 28.89) < 0.001 and abs(p[1] - (-96.73)) < 0.001:
+                found = True
+                break
+        assert found, "Did not find point from second line after blank line"
+
     def test_parse_geojson_polygon(self):
         """Test parsing GeoJSON polygon."""
         geometry = {

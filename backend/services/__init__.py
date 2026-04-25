@@ -60,6 +60,8 @@ from .spc_service import (
     MesoscaleDiscussion,
     RISK_COLORS,
     RISK_NAMES,
+    CIG_COLORS,
+    CIG_NAMES,
     get_spc_service,
     start_spc_service,
     stop_spc_service,
@@ -97,6 +99,12 @@ from .spotter_network_service import (
     start_spotter_network_service,
     stop_spotter_network_service,
 )
+from .social_media import (
+    SocialMediaService,
+    get_social_media_service,
+    start_social_media_service,
+    stop_social_media_service,
+)
 from .chase_log_service import (
     ChaseLogService,
     get_chase_log_service,
@@ -110,6 +118,38 @@ from .nwws_products_service import (
     get_nwws_products_service,
     start_nwws_products_service,
     stop_nwws_products_service,
+)
+from .agent_tools import (
+    ToolRegistry,
+    ToolDefinition,
+    build_default_tool_registry,
+)
+from .agent_service import (
+    AgentService,
+    AgentResponse,
+    get_agent_service,
+    start_agent_service,
+    stop_agent_service,
+)
+from .nexrad_service import (
+    NexradService,
+    RadarFrame,
+    RadarStatus,
+    get_nexrad_service,
+    start_nexrad_service,
+    stop_nexrad_service,
+)
+from .storm_tracking_service import (
+    StormTrackingService,
+    TrackedStormCell,
+    THREAT_LEVELS,
+    get_storm_tracking_service,
+    start_storm_tracking_service,
+    stop_storm_tracking_service,
+)
+from .nexrad_sites import (
+    NEXRAD_SITES,
+    get_nearest_sites,
 )
 
 __all__ = [
@@ -165,6 +205,8 @@ __all__ = [
     "MesoscaleDiscussion",
     "RISK_COLORS",
     "RISK_NAMES",
+    "CIG_COLORS",
+    "CIG_NAMES",
     "get_spc_service",
     "start_spc_service",
     "stop_spc_service",
@@ -187,6 +229,11 @@ __all__ = [
     "get_spotter_network_service",
     "start_spotter_network_service",
     "stop_spotter_network_service",
+    # Social Media Service
+    "SocialMediaService",
+    "get_social_media_service",
+    "start_social_media_service",
+    "stop_social_media_service",
     # Chase Log Service
     "ChaseLogService",
     "get_chase_log_service",
@@ -198,4 +245,31 @@ __all__ = [
     "get_nwws_products_service",
     "start_nwws_products_service",
     "stop_nwws_products_service",
+    # Agent Tools
+    "ToolRegistry",
+    "ToolDefinition",
+    "build_default_tool_registry",
+    # Agent Service
+    "AgentService",
+    "AgentResponse",
+    "get_agent_service",
+    "start_agent_service",
+    "stop_agent_service",
+    # NEXRAD Radar Service
+    "NexradService",
+    "RadarFrame",
+    "RadarStatus",
+    "get_nexrad_service",
+    "start_nexrad_service",
+    "stop_nexrad_service",
+    # Storm Tracking Service
+    "StormTrackingService",
+    "TrackedStormCell",
+    "THREAT_LEVELS",
+    "get_storm_tracking_service",
+    "start_storm_tracking_service",
+    "stop_storm_tracking_service",
+    # NEXRAD Sites
+    "NEXRAD_SITES",
+    "get_nearest_sites",
 ]

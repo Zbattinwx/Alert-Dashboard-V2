@@ -4,6 +4,10 @@ import L from 'leaflet';
 import type { Alert } from '../types/alert';
 import { getAlertStyle, PHENOMENON_NAMES } from '../types/alert';
 import type { ChaserPosition } from '../types/chaser';
+import type { RadarFrame, StormCell, RadarProduct } from '../types/radar';
+import { RADAR_PRODUCT_SHORT } from '../types/radar';
+import RadarOverlay from './RadarOverlay';
+import StormCellMarkers from './StormCellMarkers';
 import { apiUrl } from '../utils/api';
 import 'leaflet/dist/leaflet.css';
 
@@ -20,6 +24,8 @@ interface AlertMapProps {
   onAlertClick?: (alert: Alert) => void;
   selectedAlert?: Alert | null;
   chasers?: ChaserPosition[];
+  radarFrame?: RadarFrame | null;
+  stormCells?: StormCell[];
 }
 
 // Create a custom icon for chaser markers
@@ -89,6 +95,18 @@ interface MapZonesResponse {
 const POLYGON_ALERT_PHENOMENA = new Set([
   'TO', 'TOR', 'SV', 'SVR', 'FF', 'FFW', 'FFS', 'SVS', 'SQ', 'SPS',
 ]);
+
+// Create a custom pane so polygon overlays always render above zone fills
+const CreatePolygonPane: React.FC = () => {
+  const map = useMap();
+  useEffect(() => {
+    if (!map.getPane('polygonOverlay')) {
+      const pane = map.createPane('polygonOverlay');
+      pane.style.zIndex = '500'; // Above overlayPane (400) where zone fills render
+    }
+  }, [map]);
+  return null;
+};
 
 // Component to fit map bounds
 const FitBounds: React.FC<{ zones: ZoneData[]; polygonAlerts: Alert[] }> = ({ zones, polygonAlerts }) => {
@@ -166,11 +184,38 @@ export const AlertMap: React.FC<AlertMapProps> = ({
   onAlertClick,
   selectedAlert,
   chasers = [],
+  radarFrame = null,
+  stormCells = [],
 }) => {
   const [mapReady, setMapReady] = useState(false);
   const [zoneData, setZoneData] = useState<MapZonesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
+  const [radarEnabled, setRadarEnabled] = useState(false);
+  const [radarProduct, setRadarProduct] = useState<RadarProduct>('reflectivity');
+  const [radarFrameData, setRadarFrameData] = useState<RadarFrame | null>(radarFrame);
+
+  // Fetch radar frame when product changes or radar is toggled
+  useEffect(() => {
+    if (!radarEnabled) return;
+    const fetchFrame = async () => {
+      try {
+        const res = await fetch(apiUrl(`/api/radar/frame/${radarProduct}`));
+        if (res.ok) {
+          const data = await res.json();
+          if (data.image_url) setRadarFrameData(data);
+        }
+      } catch {}
+    };
+    fetchFrame();
+  }, [radarEnabled, radarProduct]);
+
+  // Update from WS frame
+  useEffect(() => {
+    if (radarFrame && radarFrame.product === radarProduct && radarEnabled) {
+      setRadarFrameData(radarFrame);
+    }
+  }, [radarFrame, radarProduct, radarEnabled]);
 
   // Default center: Ohio region
   const defaultCenter: L.LatLngExpression = [39.9612, -82.9988];
@@ -198,12 +243,14 @@ export const AlertMap: React.FC<AlertMapProps> = ({
     return () => clearInterval(interval);
   }, [fetchZoneData]);
 
-  // Separate polygon alerts (TOR, SVR, FFW) from the alerts prop
+  // Separate polygon alerts (TOR, SVR, FFW) from the alerts prop.
+  // Watches (significance A) use zone fills, not polygon overlays.
   const polygonAlerts = useMemo(() => {
     return alerts.filter(a =>
       a.polygon &&
       a.polygon.length > 0 &&
-      POLYGON_ALERT_PHENOMENA.has(a.phenomenon)
+      POLYGON_ALERT_PHENOMENA.has(a.phenomenon) &&
+      a.significance !== 'A'
     );
   }, [alerts]);
 
@@ -288,6 +335,7 @@ export const AlertMap: React.FC<AlertMapProps> = ({
           url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
         />
 
+        <CreatePolygonPane />
         {mapReady && <FitBounds zones={filteredZones} polygonAlerts={polygonAlerts} />}
         {mapReady && <ZoomToAlert alert={selectedAlert || null} />}
 
@@ -355,7 +403,9 @@ export const AlertMap: React.FC<AlertMapProps> = ({
         })}
 
         {/* Render polygon alerts on top (TOR, SVR, FFW) */}
-        {(!activeFilter || POLYGON_ALERT_PHENOMENA.has(activeFilter)) && polygonAlerts.map((alert) => {
+        {(!activeFilter || POLYGON_ALERT_PHENOMENA.has(activeFilter)) && polygonAlerts
+          .filter(a => !activeFilter || a.phenomenon === activeFilter)
+          .map((alert) => {
           const color = getPolygonColor(alert);
           const isSelected = selectedAlert?.product_id === alert.product_id;
           const polygons = normalizePolygon(alert.polygon);
@@ -364,11 +414,13 @@ export const AlertMap: React.FC<AlertMapProps> = ({
             <Polygon
               key={`polygon-${alert.product_id}-${polygonIndex}`}
               positions={positions}
+              pane="polygonOverlay"
               pathOptions={{
-                color: color,
+                color: '#ffffff',
                 fillColor: color,
-                fillOpacity: isSelected ? 0.6 : 0.45,
+                fillOpacity: isSelected ? 0.55 : 0.4,
                 weight: isSelected ? 4 : 3,
+                opacity: isSelected ? 1.0 : 0.8,
               }}
               eventHandlers={{
                 click: () => onAlertClick?.(alert),
@@ -453,7 +505,41 @@ export const AlertMap: React.FC<AlertMapProps> = ({
             </Popup>
           </Marker>
         ))}
+
+        {/* Radar overlay */}
+        {radarEnabled && radarFrameData && (
+          <RadarOverlay frame={radarFrameData} opacity={0.55} />
+        )}
+
+        {/* Storm cell markers (show when radar is on) */}
+        {radarEnabled && stormCells.length > 0 && (
+          <StormCellMarkers cells={stormCells} showForecasts={true} showTracks={true} />
+        )}
       </MapContainer>
+
+      {/* Radar toggle controls */}
+      <div className="radar-toggle-controls">
+        <button
+          className={`radar-toggle-btn ${radarEnabled ? 'active' : ''}`}
+          onClick={() => setRadarEnabled(!radarEnabled)}
+          title="Toggle radar overlay"
+        >
+          <i className="fa fa-satellite-dish" /> Radar
+        </button>
+        {radarEnabled && (
+          <div className="radar-mini-product-btns">
+            {(['reflectivity', 'velocity', 'cross_correlation_ratio'] as RadarProduct[]).map((p) => (
+              <button
+                key={p}
+                className={`radar-mini-product-btn ${radarProduct === p ? 'active' : ''}`}
+                onClick={() => setRadarProduct(p)}
+              >
+                {RADAR_PRODUCT_SHORT[p]}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Filter controls */}
       {zoneData && zoneData.alert_types.length > 0 && (

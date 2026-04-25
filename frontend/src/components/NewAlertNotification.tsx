@@ -43,7 +43,13 @@ export const NewAlertNotification: React.FC<NewAlertNotificationProps> = ({
 
   const alertStyle = getAlertStyle(currentAlert.phenomenon, currentAlert.significance);
   const isEmergency = currentAlert.event_name?.toLowerCase().includes('emergency') ||
-    currentAlert.threat?.tornado_damage_threat === 'CATASTROPHIC';
+    currentAlert.threat?.tornado_detection === 'OBSERVED' ||
+    currentAlert.threat?.tornado_damage_threat === 'CONSIDERABLE' ||
+    currentAlert.threat?.tornado_damage_threat === 'CATASTROPHIC' ||
+    currentAlert.threat?.thunderstorm_damage_threat === 'CONSIDERABLE' ||
+    currentAlert.threat?.thunderstorm_damage_threat === 'DESTRUCTIVE' ||
+    currentAlert.threat?.flash_flood_damage_threat === 'CONSIDERABLE' ||
+    currentAlert.threat?.flash_flood_damage_threat === 'CATASTROPHIC';
 
   return (
     <div

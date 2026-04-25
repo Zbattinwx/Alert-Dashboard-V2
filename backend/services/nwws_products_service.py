@@ -284,6 +284,207 @@ class NWWSProductsService:
             logger.error(f"Error fetching AFD from API for {office}: {e}")
             return None
 
+    async def extract_headlines_llm(self, afd: dict, max_headlines: int = 4) -> list[dict]:
+        """Extract public-friendly weather headlines using Ollama LLM.
+
+        Sends the AFD text to the local LLM with a focused prompt to generate
+        concise, public-friendly headlines suitable for social media graphics.
+
+        Falls back to basic regex extraction if LLM is unavailable.
+
+        Returns list of dicts: {headline, section, icon}
+        """
+        sections = afd.get("sections", {})
+        raw_text = afd.get("raw_text", "")
+        if not sections and not raw_text:
+            return []
+
+        # Build a clean version of the AFD text for the LLM
+        afd_text = ""
+        if sections:
+            for name, content in sections.items():
+                # Skip aviation and marine sections - not relevant for public headlines
+                skip = ["AVIATION", "FIRE WEATHER", "MARINE", "SPOTTER",
+                        "PRELIMINARY POINT"]
+                if any(s in name.upper() for s in skip):
+                    continue
+                afd_text += f"\n[{name}]\n{content}\n"
+        else:
+            afd_text = raw_text
+
+        # Truncate to avoid overwhelming the model (keep first ~3000 chars)
+        if len(afd_text) > 3000:
+            afd_text = afd_text[:3000] + "\n...[truncated]"
+
+        wfo_name = afd.get("wfo_name", "NWS")
+
+        # Try LLM first
+        try:
+            from .llm_service import get_llm_service
+            llm = get_llm_service()
+            is_available = await llm.check_health()
+
+            if is_available:
+                prompt = (
+                    f"Read this National Weather Service Area Forecast Discussion from {wfo_name} "
+                    f"and generate exactly {max_headlines} concise weather headlines that a general audience "
+                    f"would understand. Each headline should be a short, clear statement about what weather "
+                    f"to expect (like a news headline).\n\n"
+                    f"Rules:\n"
+                    f"- Each headline should be 5-12 words, max 80 characters\n"
+                    f"- Use plain language the public understands (no technical jargon, no model names)\n"
+                    f"- Focus on: what weather is coming, when, and how impactful\n"
+                    f"- Prioritize hazardous or notable weather first\n"
+                    f"- Include specifics when available (temperatures, snow amounts, wind speeds)\n"
+                    f"- Do NOT include the WFO name or 'NWS' in the headlines\n\n"
+                    f"Respond with ONLY the headlines, one per line, numbered 1-{max_headlines}. "
+                    f"No other text, explanations, or formatting.\n\n"
+                    f"--- FORECAST DISCUSSION ---\n{afd_text}\n--- END ---"
+                )
+
+                response = await llm.chat(
+                    message=prompt,
+                    system_prompt="You are a weather headline writer. You read National Weather Service forecast discussions and create short, clear headlines for social media graphics. Respond only with the numbered headlines, nothing else.",
+                    include_history=False,
+                )
+
+                headlines = self._parse_llm_headlines(response.content, max_headlines)
+                if headlines:
+                    logger.info(f"Generated {len(headlines)} headlines via LLM for {wfo_name}")
+                    return headlines
+                else:
+                    logger.warning("LLM returned no parseable headlines, falling back to regex")
+
+        except Exception as e:
+            logger.warning(f"LLM headline generation failed: {e}, falling back to regex")
+
+        # Fallback: basic regex extraction
+        return self._extract_headlines_regex(afd, max_headlines)
+
+    def _parse_llm_headlines(self, llm_response: str, max_headlines: int) -> list[dict]:
+        """Parse numbered headlines from LLM response text."""
+        WEATHER_ICONS = {
+            "tornado": "fa-tornado", "severe": "fa-bolt",
+            "thunderstorm": "fa-cloud-bolt", "storm": "fa-cloud-bolt",
+            "snow": "fa-snowflake", "flurr": "fa-snowflake",
+            "ice": "fa-icicles", "freezing": "fa-icicles", "sleet": "fa-icicles",
+            "rain": "fa-cloud-rain", "shower": "fa-cloud-rain",
+            "flood": "fa-water", "wind": "fa-wind", "gust": "fa-wind",
+            "cold": "fa-temperature-low", "chill": "fa-temperature-low",
+            "warm": "fa-temperature-high", "hot": "fa-sun", "heat": "fa-sun",
+            "fog": "fa-smog", "clear": "fa-sun", "dry": "fa-sun",
+            "sunny": "fa-sun", "cloud": "fa-cloud",
+        }
+
+        def pick_icon(text: str) -> str:
+            lower = text.lower()
+            for keyword, icon in WEATHER_ICONS.items():
+                if keyword in lower:
+                    return icon
+            return "fa-cloud-sun"
+
+        headlines = []
+        lines = llm_response.strip().split('\n')
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # Match numbered lines: "1. headline" or "1) headline" or just "1 headline"
+            match = re.match(r'^\d+[.):\s]+\s*(.+)$', line)
+            if match:
+                text = match.group(1).strip().rstrip('.')
+                # Skip if too short or looks like meta-text
+                if len(text) < 10:
+                    continue
+                headlines.append({
+                    "headline": text,
+                    "section": "Forecast",
+                    "icon": pick_icon(text),
+                })
+                if len(headlines) >= max_headlines:
+                    break
+
+        return headlines
+
+    def _extract_headlines_regex(self, afd: dict, max_headlines: int = 4) -> list[dict]:
+        """Fallback: extract headlines using regex when LLM is unavailable."""
+        sections = afd.get("sections", {})
+        if not sections:
+            return []
+
+        WEATHER_ICONS = {
+            "tornado": "fa-tornado", "severe": "fa-bolt",
+            "thunderstorm": "fa-cloud-bolt", "storm": "fa-cloud-bolt",
+            "snow": "fa-snowflake", "ice": "fa-icicles", "freezing": "fa-icicles",
+            "rain": "fa-cloud-rain", "shower": "fa-cloud-rain",
+            "flood": "fa-water", "wind": "fa-wind",
+            "cold": "fa-temperature-low", "warm": "fa-temperature-high",
+            "hot": "fa-sun", "heat": "fa-sun", "fog": "fa-smog",
+            "clear": "fa-sun", "dry": "fa-sun", "sunny": "fa-sun",
+            "cloud": "fa-cloud",
+        }
+
+        def pick_icon(text: str) -> str:
+            lower = text.lower()
+            for keyword, icon in WEATHER_ICONS.items():
+                if keyword in lower:
+                    return icon
+            return "fa-cloud-sun"
+
+        def clean_text(text: str) -> str:
+            text = re.sub(r'\n+', ' ', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            text = re.sub(r'\b\d{3,4}\s*(AM|PM)\s+[A-Z]{3,4}\b.*', '', text, flags=re.IGNORECASE)
+            text = re.sub(r'\b(NAM|GFS|ECMWF|EURO|HRRR|RAP|CMC)\b', '', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text
+
+        def extract_first_sentence(text: str) -> Optional[str]:
+            clean = clean_text(text)
+            if not clean or len(clean) < 20:
+                return None
+            sentences = re.split(r'(?<=[.!?])\s+', clean)
+            for s in sentences:
+                s = s.strip()
+                if len(s) < 15 or s.startswith("&&") or s.startswith("$$"):
+                    continue
+                headline = s.rstrip('.')
+                if len(headline) > 80:
+                    cut = headline[:80].rfind(',')
+                    if cut > 30:
+                        headline = headline[:cut]
+                    else:
+                        cut = headline[:80].rfind(' ')
+                        if cut > 30:
+                            headline = headline[:cut] + '...'
+                return headline
+            return None
+
+        PRIORITY = ["SYNOPSIS", "NEAR TERM", "SHORT TERM", "LONG TERM",
+                     "KEY MESSAGES", "HAZARDS", "UPDATE", "DISCUSSION"]
+
+        headlines = []
+        used = set()
+        for key in PRIORITY:
+            if len(headlines) >= max_headlines:
+                break
+            for name, content in sections.items():
+                if name in used:
+                    continue
+                if key.lower() in name.lower():
+                    text = extract_first_sentence(content)
+                    if text:
+                        headlines.append({
+                            "headline": text,
+                            "section": name,
+                            "icon": pick_icon(text),
+                        })
+                        used.add(name)
+                    break
+
+        return headlines
+
     def get_statistics(self) -> dict:
         """Service statistics."""
         return {

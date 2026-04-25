@@ -91,8 +91,8 @@ echo [2/4] Transferring to %PI_USER%@%PI_HOST%...
 echo       (enter password when prompted)
 echo.
 
-:: Create directory on Pi and transfer archive in one scp
-ssh %PI_USER%@%PI_HOST% "mkdir -p %PI_DIR%"
+:: Ensure Docker network and project directory exist
+ssh %PI_USER%@%PI_HOST% "docker network create proxy 2>/dev/null || true && mkdir -p %PI_DIR%"
 if errorlevel 1 (
     echo [ERROR] SSH connection failed. Make sure the Pi is reachable.
     echo         Try: ssh %PI_USER%@%PI_HOST%

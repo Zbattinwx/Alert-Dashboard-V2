@@ -15,6 +15,7 @@ Key improvements over V1:
 
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional, Union
 
@@ -91,6 +92,121 @@ class AlertParser:
         except Exception as e:
             logger.exception(f"Error parsing alert: {e}")
             return None
+
+    @classmethod
+    def parse_multi(cls, alert_data: Union[dict, str], source: str = "unknown") -> list[Alert]:
+        """
+        Parse an alert that may contain multiple segments (multi-VTEC products).
+
+        NWS products like "URGENT - WINTER WEATHER MESSAGE" can contain multiple
+        segments separated by $$, each with its own UGC block and VTEC line
+        (e.g., Winter Storm Warning for one area + Winter Weather Advisory for another).
+
+        Returns a list of parsed alerts (may be 1 for single-segment products).
+        """
+        if isinstance(alert_data, dict):
+            result = cls.parse_api_alert(alert_data, source)
+            return [result] if result else []
+
+        if not isinstance(alert_data, str):
+            return []
+
+        segments = cls._split_text_segments(alert_data)
+
+        if len(segments) <= 1:
+            # Single segment — use normal parser
+            result = cls.parse_text_alert(alert_data, source)
+            return [result] if result else []
+
+        # Multi-segment product — parse each segment independently
+        # Preserve the WMO header (first few lines before the first UGC block)
+        # so each segment has context for office/timestamp parsing
+        header = cls._extract_product_header(alert_data)
+        alerts = []
+
+        for i, segment_text in enumerate(segments):
+            try:
+                # Prepend the product header so each segment has WMO/office context
+                full_segment = header + "\n" + segment_text if header else segment_text
+                alert = cls.parse_text_alert(full_segment, source)
+                if alert:
+                    logger.info(
+                        f"Multi-segment product: segment {i+1}/{len(segments)} "
+                        f"parsed as {alert.phenomenon}.{alert.significance.value if hasattr(alert.significance, 'value') else alert.significance}"
+                        f" ({alert.product_id}), {len(alert.affected_areas)} zones"
+                    )
+                    alerts.append(alert)
+            except Exception as e:
+                logger.error(f"Error parsing segment {i+1}/{len(segments)}: {e}")
+
+        return alerts
+
+    @classmethod
+    def _split_text_segments(cls, raw_text: str) -> list[str]:
+        """
+        Split a multi-segment NWS product into individual segments.
+
+        NWS products use $$ as segment separators. Each segment has its own
+        UGC block and VTEC line. Only splits if multiple VTEC lines exist.
+
+        Returns list of segment strings. Returns [raw_text] if not multi-segment.
+        """
+        # Quick check: does this product have multiple VTEC lines?
+        all_vtecs = VTECParser.parse_all(raw_text)
+        if len(all_vtecs) <= 1:
+            return [raw_text]
+
+        # Check if different VTEC lines are actually for different products
+        # (different phenomenon or different ETN)
+        unique_products = set()
+        for v in all_vtecs:
+            if v.is_valid:
+                key = (v.vtec_info.phenomenon, v.vtec_info.significance.value
+                       if hasattr(v.vtec_info.significance, 'value') else v.vtec_info.significance,
+                       v.vtec_info.event_tracking_number)
+                unique_products.add(key)
+
+        if len(unique_products) <= 1:
+            # All VTECs are for the same product (e.g., CAN+CON for same warning)
+            return [raw_text]
+
+        # Split on $$ separator
+        segments = re.split(r'\n\$\$\s*\n', raw_text)
+
+        # Filter to only segments that contain a VTEC line
+        vtec_segments = []
+        for seg in segments:
+            seg = seg.strip()
+            if not seg:
+                continue
+            vtec_check = VTECParser.parse(seg)
+            if vtec_check.is_valid:
+                vtec_segments.append(seg)
+
+        if len(vtec_segments) > 1:
+            logger.info(
+                f"Split multi-segment product into {len(vtec_segments)} segments "
+                f"({len(all_vtecs)} VTEC lines, {len(unique_products)} unique products)"
+            )
+            return vtec_segments
+
+        # Couldn't split meaningfully — return original
+        return [raw_text]
+
+    @classmethod
+    def _extract_product_header(cls, raw_text: str) -> str:
+        """
+        Extract the WMO header lines from a product (before the first UGC block).
+        This includes the WMO abbreviated heading, product type, and office line.
+        """
+        lines = raw_text.split('\n')
+        header_lines = []
+        for line in lines:
+            # Stop when we hit a UGC line (starts with SSC### or SSZ###)
+            if re.match(r'^[A-Z]{2}[CZ]\d{3}', line.strip()):
+                break
+            header_lines.append(line)
+        return '\n'.join(header_lines)
 
     @classmethod
     def parse_api_alert(cls, feature: dict, source: str = "api") -> Optional[Alert]:
@@ -321,17 +437,42 @@ class AlertParser:
             # Parse VTEC
             vtec_data = VTECParser.parse(raw_text)
             if vtec_data.is_valid:
+                # Check for multi-VTEC products (e.g., SVS with CAN + CON for same warning).
+                # NWS cancels some counties and continues others in the same product.
+                # The first VTEC line may be CAN, but if a CON also exists for the same
+                # event, the warning is still active — use the CON instead.
+                if VTECParser.is_cancellation(vtec_data.vtec_info):
+                    all_vtecs = VTECParser.parse_all(raw_text)
+                    for other in all_vtecs:
+                        if (other.is_valid and
+                            VTECParser.is_continuation(other.vtec_info) and
+                            other.vtec_info.phenomenon == vtec_data.vtec_info.phenomenon and
+                            other.vtec_info.event_tracking_number == vtec_data.vtec_info.event_tracking_number):
+                            logger.info(
+                                f"Multi-VTEC product: using {other.vtec_info.action.value} "
+                                f"instead of CAN for "
+                                f"{vtec_data.vtec_info.phenomenon}.{vtec_data.vtec_info.office}."
+                                f"{vtec_data.vtec_info.event_tracking_number:04d}"
+                            )
+                            vtec_data = other
+                            break
+
                 alert.vtec = vtec_data.vtec_info
                 alert.product_id = VTECParser.build_product_id(alert.vtec)
                 alert.phenomenon = alert.vtec.phenomenon
                 alert.significance = alert.vtec.significance
                 alert.sender_office = alert.vtec.office
+                if alert.vtec.begin_time:
+                    alert.effective_time = alert.vtec.begin_time
+                    alert.onset_time = alert.vtec.begin_time
                 if alert.vtec.end_time:
                     alert.expiration_time = alert.vtec.end_time
                 if VTECParser.is_cancellation(alert.vtec):
                     alert.status = AlertStatus.CANCELLED
                 for warning in vtec_data.validation_warnings:
                     logger.warning(f"VTEC warning for {alert.product_id}: {warning}")
+                # Parse issued time from text body (e.g., "1230 PM CST Sat Feb 14 2026")
+                alert.issued_time = TimezoneHelper.parse_nwws_timestamp(raw_text)
 
             # This block handles non-VTEC alerts (like SPS)
             else:
@@ -388,6 +529,9 @@ class AlertParser:
             else:
                 alert.display_locations = location_desc
 
+            # Extract description and instruction from body text
+            alert.description, alert.instruction = cls._parse_text_body(raw_text)
+
             alert.polygon = cls._parse_text_polygon(raw_text, is_xml)
             if alert.polygon:
                 alert.centroid = cls._calculate_centroid(alert.polygon)
@@ -397,6 +541,15 @@ class AlertParser:
                 alert.event_name = cls._build_event_name(alert.phenomenon, alert.significance)
             if not alert.sender_name and alert.sender_office:
                 alert.sender_name = get_wfo_name(alert.sender_office)
+
+            # Generate headline from parsed metadata
+            if alert.event_name and not alert.headline:
+                parts = [alert.event_name]
+                if alert.issued_time:
+                    parts.append(f"issued {alert.issued_time.strftime('%B %d at %I:%M%p')}")
+                if alert.sender_name:
+                    parts.append(f"by {alert.sender_name}")
+                alert.headline = " ".join(parts)
 
             if alert.phenomenon == "SPS":
                 if not cls._is_relevant_sps(raw_text):
@@ -509,32 +662,54 @@ class AlertParser:
             if match:
                 coord_text = match.group(1)
                 values = PATTERN_COORD_VALUE.findall(coord_text)
-                logger.debug(f"[POLYGON] Found {len(values)} coordinate values in LAT...LON section")
+                logger.info(
+                    f"[POLYGON] LAT...LON matched: {len(values)} values "
+                    f"({len(values)//2} pairs), raw={repr(coord_text[:200])}"
+                )
 
                 # Values come in pairs: lat, lon
                 if len(values) >= 2 and len(values) % 2 == 0:
                     for i in range(0, len(values), 2):
                         try:
-                            # Values are in format: DDMM or DDDMM
+                            # Values are in format DD.dd without decimal
                             # Need to divide by 100 to get decimal degrees
                             lat = float(values[i]) / 100.0
-                            lon = -float(values[i + 1]) / 100.0  # West is negative
+                            
+                            raw_lon = float(values[i + 1]) / 100.0
+                            
+                            # NWS drops the leading 1 for longitudes >= 100W
+                            # E.g., 104.50W is encoded as 0450 (which parses as 4.50)
+                            if raw_lon < 40.0:
+                                raw_lon += 100.0
+                                
+                            lon = -raw_lon  # West is negative
 
                             # Validate ranges
                             if 20 <= lat <= 60 and -130 <= lon <= -60:  # Reasonable US bounds
                                 coords.append([lat, lon])
                             else:
-                                logger.warning(f"Coordinate out of range: {lat}, {lon}")
+                                logger.warning(f"[POLYGON] Coordinate out of range: {lat}, {lon}")
                         except (ValueError, IndexError):
                             continue
+                elif len(values) > 0:
+                    logger.warning(
+                        f"[POLYGON] Odd number of values ({len(values)}), "
+                        f"cannot form coordinate pairs"
+                    )
+            else:
+                # Log a snippet of the text around where LAT...LON should be
+                lat_pos = text.find("LAT...LON")
+                if lat_pos >= 0:
+                    snippet = text[lat_pos:lat_pos+200]
+                    logger.warning(f"[POLYGON] Found LAT...LON but regex didn't match: {repr(snippet)}")
 
         # Ensure polygon is closed (first point = last point)
         if coords and len(coords) >= 3:
             if coords[0] != coords[-1]:
                 coords.append(coords[0])
-            logger.debug(f"[POLYGON] Successfully parsed polygon with {len(coords)} vertices")
+            logger.info(f"[POLYGON] Parsed polygon with {len(coords)} vertices")
         elif not coords:
-            logger.debug("[POLYGON] No polygon coordinates found in text")
+            logger.info("[POLYGON] No polygon coordinates found in text")
 
         return coords
 
@@ -549,6 +724,53 @@ class AlertParser:
         n = len(polygon)
 
         return (lat_sum / n, lon_sum / n)
+
+    @classmethod
+    def _parse_text_body(cls, raw_text: str) -> tuple[str, str]:
+        """
+        Extract description and instruction from raw NWS product text.
+
+        NWS products follow a standard format:
+        - Header (WMO, product ID, UGC, VTEC, office, time)
+        - Body description text
+        - "PRECAUTIONARY/PREPAREDNESS ACTIONS..."
+        - Instruction text
+        - "&&"
+        - LAT...LON, TIME...MOT, threat tags, $$
+
+        Returns:
+            Tuple of (description, instruction)
+        """
+        description = ""
+        instruction = ""
+
+        # Extract instruction from PRECAUTIONARY/PREPAREDNESS ACTIONS section
+        precautionary_match = re.search(
+            r"PRECAUTIONARY/PREPAREDNESS ACTIONS\.\.\.\s*\n(.*?)(?=\n&&|\n\n&&)",
+            raw_text,
+            re.DOTALL
+        )
+        if precautionary_match:
+            instruction = precautionary_match.group(1).strip()
+
+        # Extract description: text between the double-newline after the header
+        # and the PRECAUTIONARY section (or && if no PRECAUTIONARY)
+        # The header ends with the issuance time line, followed by a blank line,
+        # then the body text begins
+        #
+        # Find the body start: look for the pattern after the issuance time line
+        # (e.g., "1230 PM CST Sat Feb 14 2026\n\n")
+        body_match = re.search(
+            r"\d{3,4}\s+(?:AM|PM)\s+[A-Z]{2,4}\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+"
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{4}\s*\n\s*\n"
+            r"(.*?)(?=PRECAUTIONARY/PREPAREDNESS|&&|\$\$|LAT\.\.\.LON)",
+            raw_text,
+            re.DOTALL | re.IGNORECASE
+        )
+        if body_match:
+            description = body_match.group(1).strip()
+
+        return description, instruction
 
     @classmethod
     def _parse_text_expiration(

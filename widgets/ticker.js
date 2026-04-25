@@ -19,6 +19,7 @@ class AlertTicker {
         this.rotationTimer = null;
         this.connected = false;
         this.currentScrollDuration = 0;  // Track current scroll animation duration
+        this.excludedTypes = new Set();  // e.g. Set(['TO_A', 'SV_A']) to exclude watches
 
         // DOM elements
         this.container = null;
@@ -52,6 +53,13 @@ class AlertTicker {
         if (params.get('speed')) {
             this.config.rotationSpeed = parseInt(params.get('speed')) || 10000;
         }
+
+        // URL-based exclusions (e.g. ?exclude=TO_A,SV_A to hide watches)
+        if (params.get('exclude')) {
+            params.get('exclude').split(',').forEach(t => {
+                this.excludedTypes.add(t.trim().toUpperCase());
+            });
+        }
     }
 
     init() {
@@ -83,14 +91,39 @@ class AlertTicker {
         // Apply theme
         this.applyTheme(this.config.theme);
 
-        // Connect to WebSocket
-        this.connect();
-
-        // Start rotation timer
-        this.startRotation();
+        // Fetch ticker filter settings from dashboard, then connect
+        this.fetchTickerSettings().then(() => {
+            this.connect();
+            this.startRotation();
+        });
 
         // Update expiration times every minute
         setInterval(() => this.updateExpirationTime(), 60000);
+    }
+
+    async fetchTickerSettings() {
+        try {
+            const response = await fetch(getApiUrl('/api/settings/ticker'));
+            if (response.ok) {
+                const data = await response.json();
+                if (data.excluded_types && Array.isArray(data.excluded_types)) {
+                    data.excluded_types.forEach(t => this.excludedTypes.add(t));
+                    console.log('Ticker excluded types:', Array.from(this.excludedTypes));
+                }
+            }
+        } catch (err) {
+            console.warn('Could not fetch ticker settings:', err);
+        }
+    }
+
+    isAlertExcluded(alert) {
+        if (this.excludedTypes.size === 0) return false;
+        const phenomenon = alert.phenomenon || '';
+        const significance = alert.significance || '';
+        const key = `${phenomenon}_${significance}`;
+        const excluded = this.excludedTypes.has(key);
+        console.log(`Ticker filter: ${alert.event_name} key=${key} excluded=${excluded}`);
+        return excluded;
     }
 
     applyTheme(theme) {
@@ -193,6 +226,11 @@ class AlertTicker {
             alerts = this.filterAlertsByState(alerts);
         }
 
+        // Filter out excluded alert types
+        if (this.excludedTypes.size > 0) {
+            alerts = alerts.filter(a => !this.isAlertExcluded(a));
+        }
+
         this.alerts = alerts;
         this.currentIndex = 0;
 
@@ -212,6 +250,11 @@ class AlertTicker {
             if (!this.alertMatchesStateFilter(alert)) {
                 return;
             }
+        }
+
+        // Check excluded types
+        if (this.isAlertExcluded(alert)) {
+            return;
         }
 
         // Add to beginning of alerts list
@@ -251,8 +294,17 @@ class AlertTicker {
     handleAlertUpdate(alert) {
         console.log('Alert updated:', alert.event_name);
 
-        const alertId = alert.id || alert.alert_id;
-        const index = this.alerts.findIndex(a => a.id === alertId || a.alert_id === alertId);
+        // Skip excluded types
+        if (this.isAlertExcluded(alert)) {
+            return;
+        }
+
+        const alertId = alert.product_id || alert.id || alert.alert_id;
+        const index = this.alerts.findIndex(a =>
+            (a.product_id && a.product_id === alertId) ||
+            (a.id && a.id === alertId) ||
+            (a.alert_id && a.alert_id === alertId)
+        );
 
         if (index !== -1) {
             this.alerts[index] = alert;

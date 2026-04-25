@@ -6,9 +6,10 @@ interface AlertCardProps {
   alert: Alert;
   onClick?: (alert: Alert) => void;
   onClear?: (alert: Alert) => void;
+  onShare?: (alert: Alert) => void;
 }
 
-export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear }) => {
+export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, onShare }) => {
   const formatTime = (isoString: string | null) => {
     if (!isoString) return '';
     const date = new Date(isoString);
@@ -94,9 +95,36 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear })
     onClear?.(alert);
   };
 
+  const handleShareClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onShare?.(alert);
+  };
+
+  // Determine if this is a high-threat alert that should visually stand out
+  const isCatastrophic =
+    alert.threat.tornado_damage_threat === 'CATASTROPHIC' ||
+    alert.threat.thunderstorm_damage_threat === 'CATASTROPHIC';
+  const isHighThreat =
+    alert.threat.tornado_detection === 'OBSERVED' ||
+    alert.threat.tornado_damage_threat === 'CONSIDERABLE' ||
+    isCatastrophic ||
+    alert.threat.thunderstorm_damage_threat === 'CONSIDERABLE' ||
+    alert.threat.thunderstorm_damage_threat === 'DESTRUCTIVE' ||
+    alert.threat.flash_flood_damage_threat === 'CONSIDERABLE' ||
+    alert.threat.flash_flood_damage_threat === 'CATASTROPHIC';
+
+  // Build CSS class list
+  const cardClasses = ['alert-card'];
+  if (isHighThreat) {
+    cardClasses.push('high-threat');
+    if (isCatastrophic) cardClasses.push('threat-catastrophic');
+    if (alert.phenomenon === 'SV') cardClasses.push('threat-svr');
+    if (alert.phenomenon === 'FF') cardClasses.push('threat-ffw');
+  }
+
   return (
     <div
-      className="alert-card"
+      className={cardClasses.join(' ')}
       onClick={() => onClick?.(alert)}
       style={{
         borderLeftColor: alertStyle.borderColor,
@@ -112,6 +140,9 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear })
         <span className="alert-card-type">{alert.event_name}</span>
         <span className="alert-card-time">
           {formatTime(alert.issued_time)}
+        </span>
+        <span className="alert-card-share" onClick={handleShareClick} title="Share to social media">
+          <i className="fas fa-share-alt"></i>
         </span>
         <span className="alert-card-clear" onClick={handleClearClick}>X</span>
       </div>
@@ -151,6 +182,24 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear })
           }}>
             <i className="fas fa-exclamation-triangle" style={{ marginRight: '4px' }}></i>
             TORNADO {alert.threat.tornado_detection}
+          </div>
+        )}
+
+        {/* Thunderstorm Damage Threat */}
+        {alert.threat.thunderstorm_damage_threat && (
+          <div style={{
+            marginTop: '8px',
+            padding: '4px 8px',
+            backgroundColor: alert.threat.thunderstorm_damage_threat === 'DESTRUCTIVE' ? '#D50000' : '#FF6D00', // Red for Destructive, Orange for Considerable
+            color: 'white',
+            borderRadius: '4px',
+            fontSize: '0.75rem',
+            fontWeight: 'bold',
+            display: 'inline-block',
+            marginLeft: alert.threat.tornado_detection ? '8px' : '0'
+          }}>
+            <i className="fas fa-bolt" style={{ marginRight: '4px' }}></i>
+            THUNDERSTORM DAMAGE: {alert.threat.thunderstorm_damage_threat}
           </div>
         )}
 

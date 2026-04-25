@@ -23,6 +23,7 @@ from shapely.geometry import shape, Point, Polygon, MultiPolygon
 from shapely.ops import unary_union
 
 from ..config import get_settings
+from .message_broker import get_message_broker
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,25 @@ PROB_ORDER = {
     "SIGN": 8, "SIGPROB": 8,
 }
 
+# CIG (Conditional Intensity Group) colors and names
+CIG_COLORS = {
+    "CIG1": "#888888",   # Group 1 - Gray hatching
+    "CIG2": "#444444",   # Group 2 - Darker gray hatching
+    "CIG3": "#000000",   # Group 3 - Black hatching
+}
+
+CIG_NAMES = {
+    "CIG1": "Conditional Intensity Group 1",
+    "CIG2": "Conditional Intensity Group 2",
+    "CIG3": "Conditional Intensity Group 3",
+}
+
+CIG_ORDER = {
+    "CIG1": 1,
+    "CIG2": 2,
+    "CIG3": 3,
+}
+
 
 @dataclass
 class OutlookPolygon:
@@ -172,6 +192,7 @@ class OutlookPolygon:
     expire_time: Optional[str] = None
     issue_time: Optional[str] = None
     geometry: Optional[dict] = None  # GeoJSON geometry
+    is_hatched: bool = False  # CIG overlays use hatching
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -248,6 +269,14 @@ class SPCService:
         "day2_tornado": "https://www.spc.noaa.gov/products/outlook/day2otlk_torn.nolyr.geojson",
         "day2_wind": "https://www.spc.noaa.gov/products/outlook/day2otlk_wind.nolyr.geojson",
         "day2_hail": "https://www.spc.noaa.gov/products/outlook/day2otlk_hail.nolyr.geojson",
+        # Day 1 CIG (Conditional Intensity Group)
+        "day1_cigtorn": "https://www.spc.noaa.gov/products/outlook/day1otlk_cigtorn.nolyr.geojson",
+        "day1_cigwind": "https://www.spc.noaa.gov/products/outlook/day1otlk_cigwind.nolyr.geojson",
+        "day1_cighail": "https://www.spc.noaa.gov/products/outlook/day1otlk_cighail.nolyr.geojson",
+        # Day 2 CIG (Conditional Intensity Group)
+        "day2_cigtorn": "https://www.spc.noaa.gov/products/outlook/day2otlk_cigtorn.nolyr.geojson",
+        "day2_cigwind": "https://www.spc.noaa.gov/products/outlook/day2otlk_cigwind.nolyr.geojson",
+        "day2_cighail": "https://www.spc.noaa.gov/products/outlook/day2otlk_cighail.nolyr.geojson",
     }
 
     # Mesoscale Discussion RSS feed
@@ -266,6 +295,11 @@ class SPCService:
         self._outlooks_cache_time: Optional[datetime] = None
         self._mds: list[MesoscaleDiscussion] = []
         self._mds_cache_time: Optional[datetime] = None
+        
+        # Polling state
+        self._seen_md_numbers: set[str] = set()
+        self._polling_initialized: bool = False
+        self._polling_task: Optional[asyncio.Task] = None
 
         self._fetch_lock = asyncio.Lock()
 
@@ -335,6 +369,9 @@ class SPCService:
         day = int(parts[0].replace("day", ""))
         outlook_type = parts[1] if len(parts) > 1 else "categorical"
 
+        # Check if this is a CIG (Conditional Intensity Group) product
+        is_cig = outlook_type.startswith("cig")
+
         polygons = []
         features = data.get("features", [])
 
@@ -345,6 +382,16 @@ class SPCService:
 
         for feature in features:
             props = feature.get("properties", {})
+
+            # Skip features with empty geometry
+            geom = feature.get("geometry", {})
+            if not geom or (geom.get("type") == "GeometryCollection" and not geom.get("geometries")):
+                # Still extract timing from empty features
+                if not valid_time:
+                    valid_time = parse_spc_datetime(props.get("VALID") or props.get("valid"))
+                    expire_time = parse_spc_datetime(props.get("EXPIRE") or props.get("expire"))
+                    issue_time = parse_spc_datetime(props.get("ISSUE") or props.get("issue"))
+                continue
 
             # Get timing from first feature (parse to ISO format)
             if not valid_time:
@@ -359,18 +406,23 @@ class SPCService:
             # Determine if this is a probabilistic outlook
             is_prob = outlook_type in ["tornado", "wind", "hail"]
 
-            if is_prob:
+            if is_cig:
+                # CIG (Conditional Intensity Group) overlays - hatched areas
+                risk_name = CIG_NAMES.get(label_upper, props.get("LABEL2") or props.get("label2") or label)
+                color = props.get("fill") or CIG_COLORS.get(label_upper, "#888888")
+                is_hatched = True
+            elif is_prob:
                 # For probabilistic outlooks, use probability colors/names
-                # Labels are typically like "0.02", "0.05", "0.10", etc. or "2", "5", "10"
-                # or "SIGN" for significant
                 risk_name = PROB_NAMES.get(label, PROB_NAMES.get(label_upper, props.get("LABEL2") or props.get("label2") or f"{label}%"))
                 color = props.get("fill") or PROB_COLORS.get(label, PROB_COLORS.get(label_upper, "#888888"))
+                is_hatched = False
             else:
                 # For categorical outlooks
                 if label_upper not in RISK_COLORS:
                     continue
                 risk_name = RISK_NAMES.get(label_upper, props.get("LABEL2") or props.get("label2") or label)
                 color = props.get("fill") or RISK_COLORS.get(label_upper, "#888888")
+                is_hatched = False
 
             polygon = OutlookPolygon(
                 risk_level=label,
@@ -379,16 +431,24 @@ class SPCService:
                 valid_time=parse_spc_datetime(props.get("VALID") or props.get("valid")) or valid_time,
                 expire_time=parse_spc_datetime(props.get("EXPIRE") or props.get("expire")) or expire_time,
                 issue_time=parse_spc_datetime(props.get("ISSUE") or props.get("issue")) or issue_time,
-                geometry=feature.get("geometry"),
+                geometry=geom,
+                is_hatched=is_hatched,
             )
             polygons.append(polygon)
 
         # Sort polygons by risk level (highest risk first)
-        is_prob = outlook_type in ["tornado", "wind", "hail"]
-        if is_prob:
+        if is_cig:
+            polygons.sort(key=lambda p: CIG_ORDER.get(p.risk_level.upper(), -1), reverse=True)
+        elif outlook_type in ["tornado", "wind", "hail"]:
             polygons.sort(key=lambda p: PROB_ORDER.get(p.risk_level, PROB_ORDER.get(p.risk_level.upper(), -1)), reverse=True)
         else:
             polygons.sort(key=lambda p: RISK_ORDER.get(p.risk_level.upper(), -1), reverse=True)
+
+        # Inject is_hatched into GeoJSON features for frontend rendering
+        if is_cig and data.get("features"):
+            for feat in data["features"]:
+                if feat.get("properties"):
+                    feat["properties"]["is_hatched"] = True
 
         return OutlookData(
             day=day,
@@ -470,6 +530,63 @@ class SPCService:
                 logger.exception(f"Error fetching SPC MDs: {e}")
                 return self._mds
 
+    async def start_polling(self):
+        """Start polling for new MDs."""
+        if self._polling_task and not self._polling_task.done():
+            return
+
+        logger.info("Starting SPC MD polling")
+        self._polling_task = asyncio.create_task(self._poll_loop())
+
+    async def stop_polling(self):
+        """Stop polling for new MDs."""
+        if self._polling_task:
+            self._polling_task.cancel()
+            try:
+                await self._polling_task
+            except asyncio.CancelledError:
+                pass
+            self._polling_task = None
+
+    async def _poll_loop(self):
+        """Poll for new MDs periodically."""
+        while True:
+            try:
+                await self._check_for_new_mds()
+                # Poll every minute
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in SPC MD poll loop: {e}")
+                await asyncio.sleep(60)
+
+    async def _check_for_new_mds(self):
+        """Fetch MDs and notify if new ones found."""
+        try:
+            # Force refresh to get latest data
+            mds = await self.fetch_mesoscale_discussions(force_refresh=True)
+            settings = get_settings()
+            
+            # If this is the first run, just populate seen set
+            if not self._polling_initialized:
+                self._seen_md_numbers = {md.md_number for md in mds}
+                self._polling_initialized = True
+                return
+
+            # Check for new MDs
+            for md in mds:
+                if md.md_number not in self._seen_md_numbers:
+                    self._seen_md_numbers.add(md.md_number)
+                    
+                    # Check if relevant to filtered states
+                    if not settings.filter_states or self.filter_mds_by_states([md], settings.filter_states):
+                        logger.info(f"New MD found: {md.md_number} - {md.title}")
+                        await get_message_broker().broadcast_md_new(md)
+
+        except Exception as e:
+            logger.error(f"Error checking for new MDs: {e}")
+
     def _parse_md_rss(self, xml_content: str) -> list[MesoscaleDiscussion]:
         """Parse mesoscale discussion RSS feed."""
         mds = []
@@ -483,12 +600,15 @@ class SPCService:
                 link_elem = item.find("link")
                 desc_elem = item.find("description")
 
-                if not all([title_elem, link_elem]):
+                if title_elem is None or link_elem is None:
                     continue
 
                 title = title_elem.text or ""
                 link = link_elem.text or ""
                 description = desc_elem.text if desc_elem is not None else ""
+
+                # Strip HTML tags from description if present
+                description = re.sub(r'<[^>]+>', ' ', description).strip()
 
                 # Extract MD number from link
                 md_match = re.search(r"/md(\d+)\.html", link)
@@ -500,8 +620,7 @@ class SPCService:
                 # Build image URL
                 image_url = f"https://www.spc.noaa.gov/products/md/mcd{md_number}.png"
 
-                # Extract affected states from title/description
-                # MDs often have state abbreviations in title like "...IA KS MO..."
+                # Extract affected states from title + description
                 states = self._extract_states(title + " " + description)
 
                 md = MesoscaleDiscussion(
@@ -519,26 +638,51 @@ class SPCService:
 
         return mds
 
+    # Full state name to abbreviation mapping
+    STATE_NAME_TO_CODE = {
+        "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+        "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+        "district of columbia": "DC", "florida": "FL", "georgia": "GA", "hawaii": "HI",
+        "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA",
+        "kansas": "KS", "kentucky": "KY", "louisiana": "LA", "maine": "ME",
+        "maryland": "MD", "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+        "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+        "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM",
+        "new york": "NY", "north carolina": "NC", "north dakota": "ND", "ohio": "OH",
+        "oklahoma": "OK", "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI",
+        "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
+        "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
+        "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+        # Common region names that imply specific states
+        "ohio valley": "OH", "upper ohio valley": "OH",
+        "mid-atlantic": "PA", "mid atlantic": "PA",
+    }
+
+    STATE_CODES = [
+        "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA",
+        "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+        "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+        "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+        "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"
+    ]
+
     def _extract_states(self, text: str) -> list[str]:
-        """Extract state abbreviations from text."""
-        # Common US state abbreviations
-        state_codes = [
-            "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
-            "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
-            "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
-            "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
-            "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"
-        ]
-
-        found_states = []
+        """Extract state abbreviations from text, matching both codes and full names."""
+        found_states = set()
         text_upper = text.upper()
+        text_lower = text.lower()
 
-        for state in state_codes:
-            # Look for state code as standalone word
+        # Match 2-letter state abbreviations
+        for state in self.STATE_CODES:
             if re.search(rf'\b{state}\b', text_upper):
-                found_states.append(state)
+                found_states.add(state)
 
-        return found_states
+        # Match full state names and region names
+        for name, code in self.STATE_NAME_TO_CODE.items():
+            if name in text_lower:
+                found_states.add(code)
+
+        return list(found_states)
 
     def filter_mds_by_states(
         self,
@@ -547,6 +691,8 @@ class SPCService:
     ) -> list[MesoscaleDiscussion]:
         """
         Filter mesoscale discussions by affected states.
+
+        MDs with no extracted states are always included (could be relevant).
 
         Args:
             mds: List of MesoscaleDiscussion objects
@@ -562,7 +708,8 @@ class SPCService:
 
         return [
             md for md in mds
-            if any(state in md.affected_states for state in states_upper)
+            if not md.affected_states  # Include MDs where we couldn't determine states
+            or any(state in md.affected_states for state in states_upper)
         ]
 
     def get_state_outlook_urls(self, states: list[str], day: int = 1) -> dict[str, dict[str, str]]:
@@ -735,11 +882,15 @@ async def start_spc_service():
         service.fetch_outlook("day1_categorical"),
         service.fetch_mesoscale_discussions(),
     )
+    # Start polling
+    await service.start_polling()
     logger.info("SPC service started")
 
 
 async def stop_spc_service():
     """Stop the SPC service."""
     global _service
+    if _service:
+        await _service.stop_polling()
     _service = None
     logger.info("SPC service stopped")

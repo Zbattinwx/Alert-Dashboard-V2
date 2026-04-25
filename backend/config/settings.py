@@ -191,7 +191,8 @@ class Settings(BaseSettings):
     )
     ollama_host: str = Field(
         default="http://localhost:11434",
-        description="Ollama API host URL"
+        description="Ollama API host URL",
+        validation_alias="OLLAMA_API_URL",
     )
     ollama_model: str = Field(
         default="gemma3:4b",
@@ -200,6 +201,24 @@ class Settings(BaseSettings):
     llm_timeout: int = Field(
         default=120,
         description="LLM request timeout in seconds"
+    )
+
+    # AI Agent Configuration (tool-calling agent using Ollama)
+    agent_enabled: bool = Field(
+        default=True,
+        description="Enable AI agent with tool calling"
+    )
+    agent_model: str = Field(
+        default="qwen2.5:7b",
+        description="Ollama model for agent (must support tool calling)"
+    )
+    agent_max_tool_rounds: int = Field(
+        default=5,
+        description="Maximum tool-call rounds per user message"
+    )
+    agent_tool_timeout: int = Field(
+        default=30,
+        description="Timeout per tool execution in seconds"
     )
 
     # Remote Access
@@ -226,6 +245,24 @@ class Settings(BaseSettings):
         default=["TO", "SV", "FF"],
         description="Alert phenomena to send to Google Chat (TO=Tornado, SV=Severe, FF=Flash Flood)"
     )
+
+    # Social Media - Facebook
+    fb_enabled: bool = Field(default=False, description="Enable Facebook posting")
+    fb_page_id: str = Field(default="885594544634534", description="Facebook Page ID")
+    fb_access_token: Optional[str] = Field(default=None, description="Facebook Page Access Token")
+
+    # Social Media - Bluesky
+    bsky_enabled: bool = Field(default=False, description="Enable Bluesky posting")
+    bsky_handle: str = Field(default="zbattin.bsky.social", description="Bluesky handle")
+    bsky_app_password: Optional[str] = Field(default=None, description="Bluesky app password")
+
+    # NEXRAD Level 2 Radar
+    nexrad_enabled: bool = Field(default=False, description="Enable Level 2 NEXRAD radar processing")
+    nexrad_default_site: str = Field(default="KILN", description="Default NEXRAD site ICAO code (e.g., KILN for Wilmington OH)")
+    nexrad_poll_interval: int = Field(default=60, description="Seconds between checking for new volume scans")
+    nexrad_history_count: int = Field(default=10, description="Number of past volume scans to keep in memory")
+    nexrad_grid_resolution_km: float = Field(default=1.0, description="Grid resolution in km (increase for lower-power hardware)")
+    nexrad_max_range_km: int = Field(default=230, description="Maximum radar range in km for rendering")
 
     @field_validator("filter_states", mode="before")
     @classmethod
@@ -314,6 +351,23 @@ def get_settings() -> Settings:
         logger.info(
             f"Applied user override: {len(settings.target_phenomena)} target phenomena"
         )
+    if "filter_states" in overrides:
+        settings.filter_states = [
+            s.upper() for s in overrides["filter_states"]
+        ]
+        logger.info(
+            f"Applied user override: {len(settings.filter_states)} filter states"
+        )
+    # General settings overrides
+    _GENERAL_OVERRIDE_FIELDS = [
+        "nexrad_enabled", "nexrad_default_site",
+        "llm_enabled", "agent_enabled",
+        "google_chat_enabled",
+    ]
+    for field in _GENERAL_OVERRIDE_FIELDS:
+        if field in overrides:
+            setattr(settings, field, overrides[field])
+            logger.info(f"Applied user override: {field} = {overrides[field]}")
     return settings
 
 

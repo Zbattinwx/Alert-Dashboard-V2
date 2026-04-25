@@ -64,6 +64,7 @@ def _alert_summary(alert: Alert) -> dict:
         "sender_office": alert.sender_office,
         "affected_areas": alert.affected_areas[:5] if alert.affected_areas else [],  # First 5
         "area_count": len(alert.affected_areas) if alert.affected_areas else 0,
+        "polygon_vertices": len(alert.polygon) if alert.polygon else 0,
         "issuing_offices": alert.issuing_offices,
         "expiration": alert.expiration_time.isoformat() if alert.expiration_time else None,
         "threat": {
@@ -231,16 +232,10 @@ class AlertManager:
             # Capture before state for audit
             existing_before = _alert_summary(existing)
 
-            # Handle UPG (upgrade) - update significance and event_name
-            # Example: Winter Weather Advisory upgraded to Winter Storm Warning
-            if alert.vtec and alert.vtec.action.value == "UPG":
-                if alert.significance != existing.significance:
-                    logger.info(
-                        f"Upgrading {alert.product_id}: {existing.significance.value} → {alert.significance.value}"
-                    )
-                    existing.significance = alert.significance
-                    existing.event_name = alert.event_name or existing.event_name
-                    existing.phenomenon = alert.phenomenon or existing.phenomenon
+            # Update VTEC action on the existing alert (CON, EXT, etc.)
+            # This ensures the stored alert reflects the latest action
+            if alert.vtec and existing.vtec:
+                existing.vtec.action = alert.vtec.action
 
             # Update existing alert
             existing.headline = alert.headline or existing.headline
@@ -312,11 +307,20 @@ class AlertManager:
                 logger.debug(f"Merged affected_areas: {len(existing.affected_areas)} zones")
 
             # Update polygon if new alert has one
-            # Note: We REPLACE the polygon rather than append, because repeated CON products
-            # for the same alert would cause massive duplication. The polygon represents the
-            # current storm location, not a history of locations.
+            # For storm-based warnings (CON products): REPLACE polygon because it represents
+            # the current storm location, not a history.
+            # For zone-based alerts (watches/advisories): DON'T replace, because the map
+            # renders zone fills from affected_areas, not from the polygon field.
             if alert.polygon:
-                existing.polygon = alert.polygon
+                is_zone_based = (
+                    existing.significance == AlertSignificance.WATCH or
+                    existing.significance == AlertSignificance.ADVISORY
+                )
+                if is_zone_based:
+                    # Don't replace zone-based polygons — zone fills come from affected_areas
+                    pass
+                else:
+                    existing.polygon = alert.polygon
 
             existing.mark_updated()
 

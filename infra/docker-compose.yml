@@ -1,0 +1,45 @@
+# =============================================================================
+# Infrastructure Stack - Portainer, Uptime Kuma, Homepage
+#
+# Deploy to Pi: deploy-infra.bat (from parent directory)
+# Requires: docker network create proxy (run once on fresh Pi)
+# =============================================================================
+
+services:
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    ports:
+      - "9443:9443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer-data:/data
+
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: uptime-kuma
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - uptime-kuma-data:/app/data
+
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: homepage
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - homepage-config:/app/config
+
+volumes:
+  portainer-data:
+  uptime-kuma-data:
+  homepage-config:
+
+networks:
+  default:
+    name: proxy
+    external: true

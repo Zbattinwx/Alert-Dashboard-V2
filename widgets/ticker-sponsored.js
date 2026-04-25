@@ -23,6 +23,7 @@ class SponsoredAlertTicker {
         this.sponsorRotationTimer = null;
         this.connected = false;
         this.currentScrollDuration = 0;  // Track current scroll animation duration
+        this.excludedTypes = new Set();  // e.g. Set(['TO_A', 'SV_A']) to exclude watches
 
         // DOM elements
         this.container = null;
@@ -60,6 +61,13 @@ class SponsoredAlertTicker {
 
         if (params.get('sponsor_speed')) {
             this.config.sponsorRotationSpeed = parseInt(params.get('sponsor_speed')) || 15000;
+        }
+
+        // URL-based exclusions (e.g. ?exclude=TO_A,SV_A to hide watches)
+        if (params.get('exclude')) {
+            params.get('exclude').split(',').forEach(t => {
+                this.excludedTypes.add(t.trim().toUpperCase());
+            });
         }
 
         // Parse sponsors from URL or use defaults
@@ -100,15 +108,38 @@ class SponsoredAlertTicker {
         // Load sponsors
         this.loadSponsors();
 
-        // Connect to WebSocket
-        this.connect();
-
-        // Start rotation timers
-        this.startAlertRotation();
-        this.startSponsorRotation();
+        // Fetch ticker filter settings from dashboard, then connect
+        this.fetchTickerSettings().then(() => {
+            this.connect();
+            this.startAlertRotation();
+            this.startSponsorRotation();
+        });
 
         // Update expiration times every minute
         setInterval(() => this.updateExpirationTime(), 60000);
+    }
+
+    async fetchTickerSettings() {
+        try {
+            const response = await fetch(getApiUrl('/api/settings/ticker'));
+            if (response.ok) {
+                const data = await response.json();
+                if (data.excluded_types && Array.isArray(data.excluded_types)) {
+                    data.excluded_types.forEach(t => this.excludedTypes.add(t));
+                    console.log('Ticker excluded types:', Array.from(this.excludedTypes));
+                }
+            }
+        } catch (err) {
+            console.warn('Could not fetch ticker settings:', err);
+        }
+    }
+
+    isAlertExcluded(alert) {
+        if (this.excludedTypes.size === 0) return false;
+        const phenomenon = alert.phenomenon || '';
+        const significance = alert.significance || '';
+        const key = `${phenomenon}_${significance}`;
+        return this.excludedTypes.has(key);
     }
 
     applyTheme(theme) {
@@ -290,6 +321,11 @@ class SponsoredAlertTicker {
             alerts = this.filterAlertsByState(alerts);
         }
 
+        // Filter out excluded alert types
+        if (this.excludedTypes.size > 0) {
+            alerts = alerts.filter(a => !this.isAlertExcluded(a));
+        }
+
         this.alerts = alerts;
         this.currentAlertIndex = 0;
 
@@ -309,6 +345,11 @@ class SponsoredAlertTicker {
             if (!this.alertMatchesStateFilter(alert)) {
                 return;
             }
+        }
+
+        // Check excluded types
+        if (this.isAlertExcluded(alert)) {
+            return;
         }
 
         // Add to beginning of alerts list
@@ -348,8 +389,17 @@ class SponsoredAlertTicker {
     handleAlertUpdate(alert) {
         console.log('Alert updated:', alert.event_name);
 
-        const alertId = alert.id || alert.alert_id;
-        const index = this.alerts.findIndex(a => a.id === alertId || a.alert_id === alertId);
+        // Skip excluded types
+        if (this.isAlertExcluded(alert)) {
+            return;
+        }
+
+        const alertId = alert.product_id || alert.id || alert.alert_id;
+        const index = this.alerts.findIndex(a =>
+            (a.product_id && a.product_id === alertId) ||
+            (a.id && a.id === alertId) ||
+            (a.alert_id && a.alert_id === alertId)
+        );
 
         if (index !== -1) {
             this.alerts[index] = alert;

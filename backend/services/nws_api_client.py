@@ -21,7 +21,6 @@ from tenacity import (
 )
 
 from ..config import get_settings
-from ..parsers import AlertParser
 from ..models.alert import Alert
 
 logger = logging.getLogger(__name__)
@@ -253,6 +252,9 @@ class NWSAPIClient:
         # Fetch all active alerts (NWS API doesn't support multi-state area param well)
         # We'll filter by state locally after parsing
         features = await self.get_active_alerts()
+
+        # Local import to avoid circular dependency
+        from ..parsers import AlertParser
 
         # Parse each alert
         alerts = []

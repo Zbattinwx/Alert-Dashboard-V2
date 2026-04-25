@@ -56,6 +56,7 @@ const PHENOMENON_PRIORITY: Record<string, number> = {
 
 interface AlertsSectionProps {
   alerts: Alert[];
+  onShareAlert?: (alert: Alert) => void;
 }
 
 // Helper to get priority for an alert (using composite key phenomenon-significance)
@@ -72,7 +73,7 @@ const getAlertPriority = (alert: Alert): number => {
   return PHENOMENON_PRIORITY[phenomenon] ?? 99;
 };
 
-export const AlertsSection: React.FC<AlertsSectionProps> = ({ alerts }) => {
+export const AlertsSection: React.FC<AlertsSectionProps> = ({ alerts, onShareAlert }) => {
   const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set());
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -280,6 +281,7 @@ export const AlertsSection: React.FC<AlertsSectionProps> = ({ alerts }) => {
               alert={alert}
               onClick={handleAlertClick}
               onClear={handleClearAlert}
+              onShare={onShareAlert}
             />
           ))}
         </div>

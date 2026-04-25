@@ -99,6 +99,29 @@ export const StormReportsSection: React.FC<StormReportsSectionProps> = ({
   });
   const [submitting, setSubmitting] = useState(false);
 
+  // Damage survey graphic
+  const [graphicUrl, setGraphicUrl] = useState<string | null>(null);
+  const [generatingGraphic, setGeneratingGraphic] = useState(false);
+
+  const handleGenerateGraphic = async (saveToGallery = false) => {
+    setGeneratingGraphic(true);
+    setGraphicUrl(null);
+    try {
+      const params = new URLSearchParams({ hours: String(hours), save: String(saveToGallery) });
+      const url = `/api/lsr/summary-graphic?${params}`;
+      // Open in a new tab as a PNG for easy viewing/saving
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      setGraphicUrl(objectUrl);
+    } catch (e) {
+      alert(`Failed to generate graphic: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setGeneratingGraphic(false);
+    }
+  };
+
   // Default center: Ohio region
   const defaultCenter: L.LatLngExpression = [39.9612, -82.9988];
   const defaultZoom = 7;
@@ -270,6 +293,23 @@ export const StormReportsSection: React.FC<StormReportsSectionProps> = ({
           >
             <i className="fas fa-plus"></i>
             Add Report
+          </button>
+          <button
+            onClick={() => handleGenerateGraphic(false)}
+            disabled={generatingGraphic || reports.length === 0}
+            title="Generate damage survey summary graphic"
+            style={{
+              padding: '6px 12px', borderRadius: '4px',
+              border: '1px solid var(--primary-color)',
+              backgroundColor: 'rgba(59,130,246,0.12)',
+              color: 'var(--primary-color)',
+              cursor: reports.length === 0 ? 'not-allowed' : 'pointer',
+              fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '5px',
+              opacity: reports.length === 0 ? 0.5 : 1,
+            }}
+          >
+            <i className={`fas ${generatingGraphic ? 'fa-spinner fa-spin' : 'fa-image'}`}></i>
+            {generatingGraphic ? 'Generating...' : 'Summary Graphic'}
           </button>
         </div>
         <div className="lsr-stats">
@@ -622,6 +662,43 @@ export const StormReportsSection: React.FC<StormReportsSectionProps> = ({
                 )}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Damage Survey Graphic Lightbox */}
+      {graphicUrl && (
+        <div
+          style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.88)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', flexDirection: 'column', gap: '12px' }}
+          onClick={() => { setGraphicUrl(null); URL.revokeObjectURL(graphicUrl); }}
+        >
+          <div
+            style={{ maxWidth: '95vw', maxHeight: '80vh', borderRadius: '8px', overflow: 'hidden', boxShadow: '0 8px 40px rgba(0,0,0,0.7)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <img src={graphicUrl} alt="LSR Summary Graphic" style={{ display: 'block', maxWidth: '100%', maxHeight: '80vh', objectFit: 'contain' }} />
+          </div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <a
+              href={graphicUrl}
+              download="lsr_summary.png"
+              style={{ padding: '8px 16px', borderRadius: '6px', backgroundColor: 'var(--primary-color)', color: 'white', textDecoration: 'none', fontSize: '0.85rem' }}
+              onClick={e => e.stopPropagation()}
+            >
+              <i className="fas fa-download" style={{ marginRight: '6px' }}></i>Download PNG
+            </a>
+            <button
+              onClick={async (e) => { e.stopPropagation(); await handleGenerateGraphic(true); }}
+              style={{ padding: '8px 16px', borderRadius: '6px', border: '1px solid var(--border-color)', backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', cursor: 'pointer', fontSize: '0.85rem' }}
+            >
+              <i className="fas fa-save" style={{ marginRight: '6px' }}></i>Save to Gallery
+            </button>
+            <button
+              onClick={() => { setGraphicUrl(null); URL.revokeObjectURL(graphicUrl); }}
+              style={{ padding: '8px 16px', borderRadius: '6px', border: '1px solid var(--border-color)', backgroundColor: 'var(--bg-secondary)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.85rem' }}
+            >
+              <i className="fas fa-times" style={{ marginRight: '6px' }}></i>Close
+            </button>
           </div>
         </div>
       )}

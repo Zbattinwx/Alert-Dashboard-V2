@@ -69,6 +69,10 @@ TIMEZONE_ABBREVIATIONS: dict[str, timezone | ZoneInfo] = {
     "UTC": timezone.utc,
     "GMT": timezone.utc,
     "Z": timezone.utc,
+
+    # NWS "Local Time" — used when office doesn't specify a zone
+    # Default to Eastern since most NWS products with LT are CONUS
+    "LT": timezone(timedelta(hours=-5)),
 }
 
 

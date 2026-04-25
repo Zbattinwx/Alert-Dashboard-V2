@@ -124,9 +124,10 @@ PATTERN_SAME_CODE: Pattern[str] = re.compile(r"\b(\d{6})\b")
 # Example:
 # LAT...LON 4105 8145 4098 8132 4087 8145
 #           4093 8167 4105 8167
-# Note: \$\$ matches the literal $$ end marker in NWS products
+# Note: Uses .+? (any char) instead of [\d\s]+? to handle unexpected characters
+# in NWWS XMPP delivery. PATTERN_COORD_VALUE extracts only valid numbers.
 PATTERN_POLYGON_TEXT: Pattern[str] = re.compile(
-    r"LAT\.\.\.LON\s+([\d\s]+?)(?=TIME\.\.\.MOT|\n\n|\$\$|&&|$)",
+    r"LAT\.\.\.LON\s+(.*?)(?=TIME\.\.\.MOT|&&|\$\$|\Z)",
     re.DOTALL
 )
 
@@ -206,6 +207,12 @@ PATTERN_TORNADO_DETECTION: Pattern[str] = re.compile(
 # Tornado damage threat tag
 PATTERN_TORNADO_DAMAGE: Pattern[str] = re.compile(
     r"TORNADO\s+DAMAGE\s+THREAT\.{3}(CONSIDERABLE|CATASTROPHIC)",
+    re.IGNORECASE
+)
+
+# Thunderstorm damage threat tag
+PATTERN_THUNDERSTORM_DAMAGE: Pattern[str] = re.compile(
+    r"THUNDERSTORM\s+DAMAGE\s+THREAT\.{3}(CONSIDERABLE|DESTRUCTIVE|CATASTROPHIC)",
     re.IGNORECASE
 )
 

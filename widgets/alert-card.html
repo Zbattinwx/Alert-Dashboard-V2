@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alert Card - OBS Widget</title>
+    <link rel="stylesheet" href="alert-card.css">
+</head>
+<body>
+    <div id="alert-card-container" class="hidden">
+        <div id="alert-card" class="alert-card">
+            <div id="card-header" class="card-header">
+                <span id="card-event-name" class="card-event-name"></span>
+                <span id="card-issued-time" class="card-issued-time"></span>
+            </div>
+            <div class="card-body">
+                <div id="card-locations" class="card-locations"></div>
+                <div id="card-expiration" class="card-expiration"></div>
+                <div id="card-sender" class="card-sender"></div>
+                <div id="card-tags" class="card-tags"></div>
+                <div id="card-impacts" class="card-impacts"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="widget-common.js"></script>
+    <script src="alert-card.js"></script>
+</body>
+</html>

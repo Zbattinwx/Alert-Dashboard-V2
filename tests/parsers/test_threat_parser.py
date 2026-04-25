@@ -281,7 +281,7 @@ class TestFullThreatParsing:
 
     def test_parse_severe_thunderstorm_full(self):
         """Test parsing complete severe thunderstorm threat data."""
-        text = """
+        text = '''
         SEVERE THUNDERSTORM WARNING
 
         HAZARD...60 MPH WIND GUSTS AND QUARTER SIZE HAIL.
@@ -291,7 +291,7 @@ class TestFullThreatParsing:
         IMPACT...HAIL DAMAGE TO VEHICLES IS EXPECTED.
 
         TIME...MOT...LOC 1830Z 250DEG 30KT 4105 8140
-        """
+        '''
 
         threat = ThreatParser.parse(text)
 
@@ -303,7 +303,7 @@ class TestFullThreatParsing:
 
     def test_parse_tornado_warning_full(self):
         """Test parsing complete tornado warning threat data."""
-        text = """
+        text = '''
         TORNADO WARNING
 
         TORNADO...RADAR INDICATED
@@ -312,7 +312,7 @@ class TestFullThreatParsing:
         TORNADO DAMAGE THREAT...CONSIDERABLE
 
         TIME...MOT...LOC 1900Z 220DEG 45KT 4110 8120
-        """
+        '''
 
         threat = ThreatParser.parse(text)
 
@@ -350,3 +350,54 @@ class TestFullThreatParsing:
 
         threat = ThreatData(max_hail_size_inches=0.75)
         assert not threat.has_significant_hail
+
+
+class TestThunderstormDamageParsing:
+    """Tests for thunderstorm damage threat parsing."""
+
+    def test_thunderstorm_damage_considerable(self):
+        """Test parsing considerable thunderstorm damage threat."""
+        text = '''
+        ...
+        TORNADO...POSSIBLE
+        THUNDERSTORM DAMAGE THREAT...CONSIDERABLE
+        HAIL THREAT...RADAR INDICATED
+        MAX HAIL SIZE...<.75 IN
+        WIND THREAT...RADAR INDICATED
+        MAX WIND GUST...70 MPH
+        ...
+        '''
+        threat = ThreatParser.parse(text)
+        assert threat.thunderstorm_damage_threat == "CONSIDERABLE"
+        assert threat.max_wind_gust_mph == 70
+
+    def test_thunderstorm_damage_destructive(self):
+        """Test parsing destructive thunderstorm damage threat."""
+        text = '''
+        ...
+        THUNDERSTORM DAMAGE THREAT...DESTRUCTIVE
+        ...
+        '''
+        threat = ThreatParser.parse(text)
+        assert threat.thunderstorm_damage_threat == "DESTRUCTIVE"
+
+    def test_thunderstorm_damage_catastrophic(self):
+        """Test parsing catastrophic thunderstorm damage threat."""
+        text = '''
+        ...
+        THUNDERSTORM DAMAGE THREAT...CATASTROPHIC
+        ...
+        '''
+        threat = ThreatParser.parse(text)
+        assert threat.thunderstorm_damage_threat == "CATASTROPHIC"
+
+    def test_no_thunderstorm_damage(self):
+        """Test text without thunderstorm damage threat."""
+        text = '''
+        ...
+        TORNADO...POSSIBLE
+        HAIL THREAT...RADAR INDICATED
+        ...
+        '''
+        threat = ThreatParser.parse(text)
+        assert threat.thunderstorm_damage_threat is None

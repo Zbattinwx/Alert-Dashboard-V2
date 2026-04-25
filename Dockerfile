@@ -26,6 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg62-turbo-dev \
     zlib1g-dev \
     libffi-dev \
+    libhdf5-dev \
+    libnetcdf-dev \
+    pkg-config \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -45,11 +48,14 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install only the runtime libraries
+# Use apt-cache search to handle version differences across architectures
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgeos-c1v5 \
     libjpeg62-turbo \
     zlib1g \
     libffi8 \
+    libhdf5-dev \
+    libnetcdf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder
@@ -64,8 +70,8 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 # Copy widgets (vanilla JS ticker overlays for OBS/streaming)
 COPY widgets/ ./widgets/
 
-# Create data directory for chase logs, alerts, etc.
-RUN mkdir -p /app/data/chase_logs/radar
+# Create data directories for chase logs, alerts, radar cache, etc.
+RUN mkdir -p /app/data/chase_logs/radar /app/data/radar
 
 # Default environment (can be overridden by docker-compose or env_file)
 ENV HOST=0.0.0.0

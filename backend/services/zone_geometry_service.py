@@ -282,10 +282,27 @@ class ZoneGeometryService:
         client = self._get_client()
 
         try:
+            geometry = None
             if zone_type == "zone":
                 geometry = await client.get_zone_geometry(zone_id)
             else:
                 geometry = await client.get_county_geometry(zone_id)
+
+                # Fallback: If county fetch failed, try as forecast zone
+                # This handles cases where NWS alerts use "TXC..." for what are actually public zones (TXZ...)
+                # e.g., TXC150 -> TXZ150 (Rusk County Zone) or TXC300 -> TXZ300 (Southern Liberty)
+                # These codes appear in alerts with 'C' type but are invalid as counties in the API
+                if not geometry and len(zone_id) == 6 and zone_id[2] == 'C':
+                    fallback_id = f"{zone_id[:2]}Z{zone_id[3:]}"
+                    logger.warning(
+                        f"County geometry fetch failed for {zone_id}. "
+                        f"Retrying as forecast zone {fallback_id}..."
+                    )
+                    geometry = await client.get_zone_geometry(fallback_id)
+                    if geometry:
+                        logger.info(
+                            f"Successfully fetched geometry for {zone_id} using fallback zone ID {fallback_id}"
+                        )
 
             if not geometry:
                 logger.debug(f"No geometry available for {zone_id}")

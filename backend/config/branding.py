@@ -57,6 +57,9 @@ class BrandConfig(BaseModel):
     short_name: str = Field(description="Short/abbreviated name")
     tagline: Optional[str] = Field(default=None, description="Brand tagline")
 
+    # CSS variable overrides applied to :root at runtime
+    css_overrides: dict[str, str] = Field(default_factory=dict, description="CSS custom property overrides")
+
     # Assets
     logo: str = Field(default="logo.png", description="Main logo filename")
     logo_dark: Optional[str] = Field(default=None, description="Dark mode logo")
@@ -137,12 +140,16 @@ DEFAULT_BRANDS = {
         tagline="Your Local Severe Weather Source",
         logo="onw_logo.png",
         colors=ColorScheme(
-            primary="#1565c0",
-            secondary="#00897b",
-            accent="#ff6f00",
+            primary="#7aa2f7",
+            secondary="#bb9af7",
+            accent="#ff9e64",
+            background="#1a1d2e",
+            surface="#2a2f41",
+            text="#c0c5d5",
+            text_secondary="#8892aa",
         ),
         fonts=FontConfig(
-            heading="Roboto Condensed",
+            heading="Roboto",
             body="Roboto",
         ),
         ticker=TickerConfig(
@@ -151,6 +158,32 @@ DEFAULT_BRANDS = {
         ),
         website_url="https://ohionewsandweather.com",
         social_twitter="@ohionewswx",
+        css_overrides={
+            "--bg-primary": "#1a1d2e",
+            "--bg-secondary": "#24283b",
+            "--bg-tertiary": "#1e2235",
+            "--bg-card": "#2a2f41",
+            "--text-primary": "#c0c5d5",
+            "--text-secondary": "#8892aa",
+            "--text-muted": "#5c6a8a",
+            "--border-color": "rgba(65, 72, 104, 0.6)",
+            "--border-light": "rgba(65, 72, 104, 0.2)",
+            "--accent-blue": "#7aa2f7",
+            "--accent-cyan": "#7dcfff",
+            "--accent-indigo": "#7aa2f7",
+            "--accent-purple": "#bb9af7",
+            "--accent-green": "#26a269",
+            "--accent-red": "#c01c28",
+            "--accent-yellow": "#e5a50a",
+            "--accent-orange": "#ff9e64",
+            "--primary-color": "#7aa2f7",
+            "--primary-light": "#9db8f7",
+            "--primary-dark": "#5a82d7",
+            "--secondary-color": "#ff9e64",
+            "--tbf-gradient": "linear-gradient(135deg, #7aa2f7 0%, #bb9af7 100%)",
+            "--tbf-gradient-subtle": "linear-gradient(135deg, rgba(122, 162, 247, 0.15) 0%, rgba(187, 154, 247, 0.15) 100%)",
+            "--storm-gradient": "linear-gradient(135deg, #7aa2f7 0%, #ff9e64 100%)",
+        },
     ),
     "battinfront": BrandConfig(
         name="The Battin Front",
@@ -158,17 +191,43 @@ DEFAULT_BRANDS = {
         tagline="Weather Coverage You Can Trust",
         logo="tbf_logo.png",
         colors=ColorScheme(
-            primary="#2563eb",
-            secondary="#059669",
-            accent="#dc2626",
-            background="#0f172a",
-            surface="#1e293b",
+            primary="#00CED1",
+            secondary="#9333EA",
+            accent="#f97316",
+            background="#06080f",
+            surface="#0e1322",
         ),
         fonts=FontConfig(
             heading="Inter",
             body="Inter",
         ),
         website_url="https://thebattinfront.com",
+        css_overrides={
+            "--bg-primary": "#06080f",
+            "--bg-secondary": "#0c1019",
+            "--bg-tertiary": "#161c2e",
+            "--bg-card": "#0e1322",
+            "--text-primary": "#e2e8f0",
+            "--text-secondary": "#94a3b8",
+            "--text-muted": "#64748b",
+            "--border-color": "rgba(255, 255, 255, 0.07)",
+            "--border-light": "rgba(255, 255, 255, 0.03)",
+            "--accent-blue": "#00CED1",
+            "--accent-cyan": "#00CED1",
+            "--accent-indigo": "#6366F1",
+            "--accent-purple": "#9333EA",
+            "--accent-green": "#10b981",
+            "--accent-red": "#ef4444",
+            "--accent-yellow": "#f59e0b",
+            "--accent-orange": "#f97316",
+            "--primary-color": "#00CED1",
+            "--primary-light": "#22d3ee",
+            "--primary-dark": "#0891b2",
+            "--secondary-color": "#9333EA",
+            "--tbf-gradient": "linear-gradient(135deg, #00CED1 0%, #6366F1 50%, #9333EA 100%)",
+            "--tbf-gradient-subtle": "linear-gradient(135deg, rgba(0, 206, 209, 0.15) 0%, rgba(99, 102, 241, 0.1) 50%, rgba(147, 51, 234, 0.15) 100%)",
+            "--storm-gradient": "linear-gradient(135deg, #00CED1 0%, #6366F1 50%, #9333EA 100%)",
+        },
     ),
 }
 

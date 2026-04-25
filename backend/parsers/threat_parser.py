@@ -24,6 +24,7 @@ from typing import Optional
 from .patterns import (
     PATTERN_TORNADO_DETECTION,
     PATTERN_TORNADO_DAMAGE,
+    PATTERN_THUNDERSTORM_DAMAGE,
     PATTERN_WIND_GUST,
     PATTERN_WIND_XML,
     PATTERN_WIND_DAMAGE,
@@ -71,6 +72,7 @@ class ThreatParser:
         # Parse each threat type
         threat.tornado_detection = cls.parse_tornado_detection(text)
         threat.tornado_damage_threat = cls.parse_tornado_damage(text)
+        threat.thunderstorm_damage_threat = cls.parse_thunderstorm_damage(text)
 
         # Parse sustained wind (e.g., "winds 25 to 35 mph")
         sustained_min, sustained_max = cls.parse_sustained_wind(text)
@@ -124,6 +126,21 @@ class ThreatParser:
         if match:
             threat_level = match.group(1).upper()
             logger.debug(f"Tornado damage threat: {threat_level}")
+            return threat_level
+        return None
+
+    @classmethod
+    def parse_thunderstorm_damage(cls, text: str) -> Optional[str]:
+        """
+        Parse thunderstorm damage threat level.
+
+        Returns:
+            "CONSIDERABLE", "DESTRUCTIVE", "CATASTROPHIC", or None
+        """
+        match = PATTERN_THUNDERSTORM_DAMAGE.search(text)
+        if match:
+            threat_level = match.group(1).upper()
+            logger.debug(f"Thunderstorm damage threat: {threat_level}")
             return threat_level
         return None
 

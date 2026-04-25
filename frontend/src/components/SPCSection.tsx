@@ -8,7 +8,7 @@ import type {
   MesoscaleDiscussionsResponse,
   StateImagesResponse,
 } from '../types/spc';
-import { RISK_COLORS, RISK_NAMES, RISK_ORDER, PROB_COLORS, PROB_NAMES, getContrastColor } from '../types/spc';
+import { RISK_COLORS, RISK_NAMES, RISK_ORDER, PROB_COLORS, PROB_NAMES, CIG_NAMES, getContrastColor } from '../types/spc';
 import { apiUrl } from '../utils/api';
 import 'leaflet/dist/leaflet.css';
 
@@ -67,15 +67,215 @@ const getPolygonStyle = (feature: GeoJSON.Feature | undefined) => {
   };
 };
 
+// Style function for CIG (hatched) overlays
+const getCIGPolygonStyle = (feature: GeoJSON.Feature | undefined) => {
+  if (!feature || !feature.properties) {
+    return { weight: 0, opacity: 0, fillOpacity: 0 };
+  }
+
+  return {
+    weight: 2,
+    opacity: 0.9,
+    fillOpacity: 0.4,
+    color: '#000000',
+    fillColor: '#000000',
+    dashArray: '8, 4',
+    // CSS className triggers the hatching pattern
+    className: 'cig-hatched',
+  };
+};
+
+// Inject SVG hatching pattern into the DOM (once)
+const injectHatchPattern = () => {
+  if (document.getElementById('spc-hatch-pattern-svg')) return;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.id = 'spc-hatch-pattern-svg';
+  svg.setAttribute('width', '0');
+  svg.setAttribute('height', '0');
+  svg.style.position = 'absolute';
+  svg.innerHTML = `
+    <defs>
+      <pattern id="cig-hatch" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="10" stroke="#000" stroke-width="2.5" stroke-opacity="0.7" />
+      </pattern>
+    </defs>
+  `;
+  document.body.appendChild(svg);
+};
+
 // Response type for Day 2 with probabilities (same structure as Day 1)
 interface DayDataResponse {
   categorical: OutlookData | null;
   tornado?: OutlookData | null;
   wind?: OutlookData | null;
   hail?: OutlookData | null;
+  cig_tornado?: OutlookData | null;
+  cig_wind?: OutlookData | null;
+  cig_hail?: OutlookData | null;
   risk_colors: Record<string, string>;
   risk_names: Record<string, string>;
 }
+
+// ── Mesoanalysis constants (module-level, no re-creation on render) ──────────
+const MESO_SECTORS = [
+  { id: '19', label: 'CONUS' },
+  { id: '16', label: 'NE' },
+  { id: '17', label: 'E. Coast' },
+  { id: '20', label: 'Midwest' },
+  { id: '21', label: 'Gt. Lakes' },
+  { id: '18', label: 'SE' },
+  { id: '15', label: 'S. Plains' },
+  { id: '14', label: 'C. Plains' },
+  { id: '13', label: 'N. Plains' },
+  { id: '12', label: 'SW' },
+  { id: '22', label: 'Gt. Basin' },
+  { id: '11', label: 'NW' },
+];
+
+const MESO_CATEGORIES: Record<string, { label: string; icon: string; params: { id: string; label: string }[] }> = {
+  composite: {
+    label: 'Composite Parameters', icon: 'fa-layer-group',
+    params: [
+      { id: 'scp',   label: 'Supercell Composite' },
+      { id: 'stpc',  label: 'STP (Fixed Layer)' },
+      { id: 'stpc5', label: 'STP (Eff. Layer)' },
+      { id: 'sigh',  label: 'Sig. Hail Param.' },
+      { id: 'cpsh',  label: 'Cond. Prob. Sig. Hail' },
+      { id: 'qlcs1', label: 'QLCS Tornado Param.' },
+    ],
+  },
+  instability: {
+    label: 'Instability', icon: 'fa-bolt',
+    params: [
+      { id: 'sbcp', label: 'SBCAPE' },
+      { id: 'mucp', label: 'MUCAPE' },
+      { id: 'mlcp', label: 'MLCAPE' },
+      { id: 'ncap', label: 'Norm. CAPE' },
+      { id: 'dcap', label: 'DCAPE' },
+      { id: 'mbcp', label: 'Mixed Layer CAPE/CINH' },
+    ],
+  },
+  shear: {
+    label: 'Shear & Helicity', icon: 'fa-wind',
+    params: [
+      { id: 'eshr', label: 'Effective Shear' },
+      { id: 'shr6', label: '0-6 km Shear' },
+      { id: 'srh1', label: '0-1 km SRH' },
+      { id: 'srh3', label: '0-3 km SRH' },
+      { id: 'brns', label: 'BRN Shear' },
+      { id: 'effh', label: 'Eff. SRH' },
+    ],
+  },
+  thermo: {
+    label: 'Thermodynamics', icon: 'fa-thermometer-half',
+    params: [
+      { id: 'lllr', label: '0-3 km Lapse Rate' },
+      { id: 'mllr', label: '3-6 km Lapse Rate' },
+      { id: 'lcls', label: 'LCL Height' },
+      { id: 'lclp', label: 'LCL (surface parcel)' },
+      { id: 'thea', label: 'Theta-E' },
+      { id: 'thet', label: 'Theta (850 mb)' },
+    ],
+  },
+  surface: {
+    label: 'Surface & Upper Air', icon: 'fa-map-marked-alt',
+    params: [
+      { id: 'sfc',  label: 'Surface Analysis' },
+      { id: 'ttd',  label: 'Temp / Dewpoint' },
+      { id: 'sfct', label: 'Surface Temp' },
+      { id: 'stor', label: 'Storm Reports' },
+      { id: 'pwtr', label: 'Precipitable Water' },
+      { id: 'mixr', label: 'Mixing Ratio' },
+    ],
+  },
+};
+
+interface MesoanalysisPanelProps {
+  sector: string;
+  category: string;
+  onSectorChange: (s: string) => void;
+  onCategoryChange: (c: string) => void;
+  onLightbox: (url: string, label: string) => void;
+}
+
+const MesoanalysisPanel: React.FC<MesoanalysisPanelProps> = ({
+  sector, category, onSectorChange, onCategoryChange, onLightbox,
+}) => {
+  const cat = MESO_CATEGORIES[category] ?? MESO_CATEGORIES.composite;
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', paddingTop: '8px' }}>
+      {/* Header row: title + sector buttons */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+        <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-primary)' }}>
+          <i className="fas fa-layer-group" style={{ marginRight: '6px', color: 'var(--primary-color)' }}></i>
+          SPC Mesoanalysis
+        </h3>
+        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+          {MESO_SECTORS.map(s => (
+            <button
+              key={s.id}
+              onClick={() => onSectorChange(s.id)}
+              style={{
+                padding: '3px 8px', borderRadius: '4px', fontSize: '0.75rem',
+                border: '1px solid var(--border-color)', cursor: 'pointer',
+                backgroundColor: sector === s.id ? 'var(--primary-color)' : 'var(--bg-secondary)',
+                color: sector === s.id ? 'white' : 'var(--text-secondary)',
+              }}
+            >{s.label}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Category tabs */}
+      <div style={{ display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' }}>
+        {Object.entries(MESO_CATEGORIES).map(([key, c]) => (
+          <button
+            key={key}
+            onClick={() => onCategoryChange(key)}
+            style={{
+              padding: '5px 10px', borderRadius: '4px', fontSize: '0.8rem',
+              border: '1px solid var(--border-color)', cursor: 'pointer',
+              backgroundColor: category === key ? 'var(--primary-color)' : 'var(--bg-secondary)',
+              color: category === key ? 'white' : 'var(--text-primary)',
+            }}
+          >
+            <i className={`fas ${c.icon}`} style={{ marginRight: '4px' }}></i>{c.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Image grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
+        {cat.params.map(p => {
+          const url = apiUrl(`/api/proxy/mesoanalysis?sector=${sector}&param=${p.id}`);
+          return (
+            <div
+              key={p.id}
+              style={{ backgroundColor: 'var(--bg-secondary)', borderRadius: '6px', border: '1px solid var(--border-color)', overflow: 'hidden', cursor: 'pointer' }}
+              onClick={() => onLightbox(url, p.label)}
+            >
+              <div style={{ padding: '6px 8px', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span>{p.label}</span>
+                <i className="fas fa-expand-alt" style={{ fontSize: '0.7rem', opacity: 0.5 }}></i>
+              </div>
+              <img
+                src={url}
+                alt={p.label}
+                style={{ width: '100%', display: 'block', backgroundColor: '#f0f0f0' }}
+                onError={e => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      <p style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '8px', textAlign: 'right' }}>
+        Images from <a href="https://www.spc.noaa.gov/exper/mesoanalysis/" target="_blank" rel="noreferrer" style={{ color: 'var(--primary-color)' }}>SPC Mesoanalysis</a> · Click any image to expand
+      </p>
+    </div>
+  );
+};
 
 export const SPCSection: React.FC = () => {
   const [activeDay, setActiveDay] = useState<1 | 2 | 3>(1);
@@ -89,12 +289,22 @@ export const SPCSection: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [selectedMD, setSelectedMD] = useState<MesoscaleDiscussion | null>(null);
   const [discussionText, setDiscussionText] = useState<string | null>(null);
+  const [showMesoanalysis, setShowMesoanalysis] = useState(false);
+  const [mesoSector, setMesoSector] = useState('19');
+  const [mesoCategory, setMesoCategory] = useState('composite');
+  const [mesoLightbox, setMesoLightbox] = useState<{ url: string; label: string } | null>(null);
   const [discussionExpanded, setDiscussionExpanded] = useState(false);
   const [expandedImage, setExpandedImage] = useState<{ state: string; url: string } | null>(null);
+  const [currentCIG, setCurrentCIG] = useState<OutlookData | null>(null);
 
   // Default center: US
   const defaultCenter: L.LatLngExpression = [39.8283, -98.5795];
   const defaultZoom = 4;
+
+  // Inject SVG hatch pattern on mount
+  useEffect(() => {
+    injectHatchPattern();
+  }, []);
 
   // Fetch Day 1 data with probabilities
   const fetchDay1Data = useCallback(async (refresh = false) => {
@@ -104,17 +314,22 @@ export const SPCSection: React.FC = () => {
       const data: Day1Response = await response.json();
       setDay1Data(data);
 
-      // Set initial outlook based on active tab
+      // Set initial outlook and CIG overlay based on active tab
       if (activeTab === 'categorical' && data.categorical) {
         setCurrentOutlook(data.categorical);
+        setCurrentCIG(null);
       } else if (activeTab === 'tornado' && data.tornado) {
         setCurrentOutlook(data.tornado);
+        setCurrentCIG(data.cig_tornado || null);
       } else if (activeTab === 'wind' && data.wind) {
         setCurrentOutlook(data.wind);
+        setCurrentCIG(data.cig_wind || null);
       } else if (activeTab === 'hail' && data.hail) {
         setCurrentOutlook(data.hail);
+        setCurrentCIG(data.cig_hail || null);
       } else if (data.categorical) {
         setCurrentOutlook(data.categorical);
+        setCurrentCIG(null);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch SPC data');
@@ -124,41 +339,55 @@ export const SPCSection: React.FC = () => {
   // Fetch Day 2 data with probabilities
   const fetchDay2Data = useCallback(async (refresh = false) => {
     try {
-      // Fetch all Day 2 outlooks in parallel
-      const [catRes, tornRes, windRes, hailRes] = await Promise.all([
+      // Fetch all Day 2 outlooks + CIG in parallel
+      const [catRes, tornRes, windRes, hailRes, cigTornRes, cigWindRes, cigHailRes] = await Promise.all([
         fetch(apiUrl(`/api/spc/outlook/day2_categorical?refresh=${refresh}`)),
         fetch(apiUrl(`/api/spc/outlook/day2_tornado?refresh=${refresh}`)),
         fetch(apiUrl(`/api/spc/outlook/day2_wind?refresh=${refresh}`)),
         fetch(apiUrl(`/api/spc/outlook/day2_hail?refresh=${refresh}`)),
+        fetch(apiUrl(`/api/spc/outlook/day2_cigtorn?refresh=${refresh}`)),
+        fetch(apiUrl(`/api/spc/outlook/day2_cigwind?refresh=${refresh}`)),
+        fetch(apiUrl(`/api/spc/outlook/day2_cighail?refresh=${refresh}`)),
       ]);
 
       const catData = catRes.ok ? await catRes.json() : null;
       const tornData = tornRes.ok ? await tornRes.json() : null;
       const windData = windRes.ok ? await windRes.json() : null;
       const hailData = hailRes.ok ? await hailRes.json() : null;
+      const cigTornData = cigTornRes.ok ? await cigTornRes.json() : null;
+      const cigWindData = cigWindRes.ok ? await cigWindRes.json() : null;
+      const cigHailData = cigHailRes.ok ? await cigHailRes.json() : null;
 
       const day2: DayDataResponse = {
         categorical: catData?.outlook || null,
         tornado: tornData?.outlook || null,
         wind: windData?.outlook || null,
         hail: hailData?.outlook || null,
+        cig_tornado: cigTornData?.outlook?.polygons?.length ? cigTornData.outlook : null,
+        cig_wind: cigWindData?.outlook?.polygons?.length ? cigWindData.outlook : null,
+        cig_hail: cigHailData?.outlook?.polygons?.length ? cigHailData.outlook : null,
         risk_colors: catData?.risk_colors || {},
         risk_names: catData?.risk_names || {},
       };
 
       setDay2Data(day2);
 
-      // Set initial outlook based on active tab
+      // Set initial outlook and CIG based on active tab
       if (activeTab === 'categorical' && day2.categorical) {
         setCurrentOutlook(day2.categorical);
+        setCurrentCIG(null);
       } else if (activeTab === 'tornado' && day2.tornado) {
         setCurrentOutlook(day2.tornado);
+        setCurrentCIG(day2.cig_tornado || null);
       } else if (activeTab === 'wind' && day2.wind) {
         setCurrentOutlook(day2.wind);
+        setCurrentCIG(day2.cig_wind || null);
       } else if (activeTab === 'hail' && day2.hail) {
         setCurrentOutlook(day2.hail);
+        setCurrentCIG(day2.cig_hail || null);
       } else if (day2.categorical) {
         setCurrentOutlook(day2.categorical);
+        setCurrentCIG(null);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch Day 2 data');
@@ -260,7 +489,10 @@ export const SPCSection: React.FC = () => {
   // Handle tab change (Day 1 and Day 2)
   useEffect(() => {
     // Day 3 only has categorical, so ignore tab changes for Day 3
-    if (activeDay === 3) return;
+    if (activeDay === 3) {
+      setCurrentCIG(null);
+      return;
+    }
 
     const dayData = activeDay === 1 ? day1Data : day2Data;
     if (!dayData) return;
@@ -268,15 +500,19 @@ export const SPCSection: React.FC = () => {
     switch (activeTab) {
       case 'categorical':
         setCurrentOutlook(dayData.categorical);
+        setCurrentCIG(null);
         break;
       case 'tornado':
         setCurrentOutlook(dayData.tornado || null);
+        setCurrentCIG(dayData.cig_tornado || null);
         break;
       case 'wind':
         setCurrentOutlook(dayData.wind || null);
+        setCurrentCIG(dayData.cig_wind || null);
         break;
       case 'hail':
         setCurrentOutlook(dayData.hail || null);
+        setCurrentCIG(dayData.cig_hail || null);
         break;
     }
   }, [activeTab, activeDay, day1Data, day2Data]);
@@ -339,6 +575,13 @@ export const SPCSection: React.FC = () => {
               </button>
             ))}
           </div>
+          <button
+            className={`spc-day-btn${showMesoanalysis ? ' active' : ''}`}
+            onClick={() => setShowMesoanalysis(p => !p)}
+            title="SPC Mesoanalysis parameter images"
+          >
+            <i className="fas fa-layer-group"></i> Mesoanalysis
+          </button>
           <button onClick={handleRefresh} className="spc-refresh-btn" disabled={loading}>
             <i className={`fas fa-sync-alt ${loading ? 'fa-spin' : ''}`}></i>
             Refresh
@@ -354,6 +597,7 @@ export const SPCSection: React.FC = () => {
         </div>
       )}
 
+      {!showMesoanalysis && <>
       {/* Outlook type tabs (Day 1 and Day 2) */}
       {(activeDay === 1 || activeDay === 2) && (
         <div className="spc-tabs">
@@ -429,7 +673,7 @@ export const SPCSection: React.FC = () => {
                   onEachFeature={(feature, layer) => {
                     const props = feature.properties || {};
                     const label = (props.LABEL || props.label || '').toUpperCase();
-                    const riskName = RISK_NAMES[label] || props.LABEL2 || props.label2 || label;
+                    const riskName = RISK_NAMES[label] || PROB_NAMES[label] || props.LABEL2 || props.label2 || label;
 
                     layer.bindPopup(`
                       <div class="spc-popup">
@@ -442,6 +686,28 @@ export const SPCSection: React.FC = () => {
                   }}
                 />
               </>
+            )}
+
+            {/* CIG (Conditional Intensity Group) hatched overlay */}
+            {currentCIG?.geojson && (
+              <GeoJSON
+                key={`cig-${activeDay}-${activeTab}-${Date.now()}`}
+                data={currentCIG.geojson}
+                style={getCIGPolygonStyle}
+                onEachFeature={(feature, layer) => {
+                  const props = feature.properties || {};
+                  const label = (props.LABEL || props.label || '').toUpperCase();
+                  const cigName = CIG_NAMES[label] || props.LABEL2 || props.label2 || label;
+
+                  layer.bindPopup(`
+                    <div class="spc-popup">
+                      <h4>Day ${activeDay} ${activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} - Conditional Intensity</h4>
+                      <p><strong>${cigName}</strong></p>
+                      <p class="spc-popup-note">Hatched area indicates potential for more intense/violent storms</p>
+                    </div>
+                  `);
+                }}
+              />
             )}
           </MapContainer>
         </div>
@@ -468,18 +734,25 @@ export const SPCSection: React.FC = () => {
                     </div>
                   ))
               ) : (
-                // Probabilistic legend - use unique keys to avoid duplicates
-                ['0.02', '0.05', '0.10', '0.15', '0.30', '0.45', '0.60', 'SIGN']
-                  .reverse()
-                  .map((level) => (
-                    <div key={level} className="spc-legend-item">
-                      <span
-                        className="spc-legend-color"
-                        style={{ backgroundColor: PROB_COLORS[level] || '#888888' }}
-                      ></span>
-                      <span className="spc-legend-label">{PROB_NAMES[level]}</span>
-                    </div>
-                  ))
+                // Probabilistic legend with CIG hatching indicator
+                <>
+                  {['0.02', '0.05', '0.10', '0.15', '0.30', '0.45', '0.60', 'SIGN']
+                    .reverse()
+                    .map((level) => (
+                      <div key={level} className="spc-legend-item">
+                        <span
+                          className="spc-legend-color"
+                          style={{ backgroundColor: PROB_COLORS[level] || '#888888' }}
+                        ></span>
+                        <span className="spc-legend-label">{PROB_NAMES[level]}</span>
+                      </div>
+                    ))}
+                  <div className="spc-legend-divider"></div>
+                  <div className="spc-legend-item">
+                    <span className="spc-legend-color spc-legend-hatched"></span>
+                    <span className="spc-legend-label">Conditional Intensity (hatched)</span>
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -604,8 +877,40 @@ export const SPCSection: React.FC = () => {
           </div>
         </div>
       </div>
+      </>}
 
-      {/* Expanded Image Modal */}
+      {/* ── Mesoanalysis Panel ─────────────────────────────────────── */}
+      {showMesoanalysis && (
+        <MesoanalysisPanel
+          sector={mesoSector}
+          category={mesoCategory}
+          onSectorChange={setMesoSector}
+          onCategoryChange={setMesoCategory}
+          onLightbox={(url, label) => setMesoLightbox({ url, label })}
+        />
+      )}
+
+      {/* Mesoanalysis lightbox */}
+      {mesoLightbox && (
+        <div
+          style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}
+          onClick={() => setMesoLightbox(null)}
+        >
+          <div
+            style={{ maxWidth: '95vw', maxHeight: '90vh', backgroundColor: 'var(--bg-primary)', borderRadius: '8px', overflow: 'hidden', boxShadow: '0 4px 32px rgba(0,0,0,0.6)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-color)' }}>
+              <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>{mesoLightbox.label}</span>
+              <button onClick={() => setMesoLightbox(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '1.1rem' }}>
+                <i className="fas fa-times"></i>
+              </button>
+            </div>
+            <img src={mesoLightbox.url} alt={mesoLightbox.label} style={{ maxWidth: '100%', maxHeight: 'calc(90vh - 50px)', display: 'block', objectFit: 'contain', backgroundColor: '#f0f0f0' }} />
+          </div>
+        </div>
+      )}
+
       {expandedImage && (
         <div
           className="spc-image-modal-overlay"

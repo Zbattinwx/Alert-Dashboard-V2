@@ -336,14 +336,14 @@ class VTECParser:
     @classmethod
     def is_cancellation(cls, vtec_info: VTECInfo) -> bool:
         """Check if VTEC represents a cancellation."""
-        return vtec_info.action in (VTECAction.CAN, VTECAction.EXP)
+        return vtec_info.action in (VTECAction.CAN, VTECAction.EXP, VTECAction.UPG)
 
     @classmethod
     def is_continuation(cls, vtec_info: VTECInfo) -> bool:
         """Check if VTEC represents a continuation/update."""
         return vtec_info.action in (
             VTECAction.CON, VTECAction.EXT, VTECAction.EXA,
-            VTECAction.EXB, VTECAction.UPG, VTECAction.COR
+            VTECAction.EXB, VTECAction.COR
         )
 
     @classmethod

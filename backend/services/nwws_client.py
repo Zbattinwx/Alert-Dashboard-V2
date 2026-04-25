@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 import slixmpp
 
 from ..config import get_settings
-from ..parsers import AlertParser
 from ..models.alert import Alert
 
 logger = logging.getLogger(__name__)
@@ -261,18 +260,22 @@ class NWWSAlertHandler:
             except Exception as e:
                 logger.error(f"Error in raw callback: {e}")
 
-        # Parse the alert
-        try:
-            alert = AlertParser.parse_text_alert(raw_text, source="nwws")
-            if alert:
-                logger.info(f"Parsed NWWS alert: {alert.product_id} ({alert.event_name})")
+        # Local import to avoid circular dependency
+        from ..parsers import AlertParser
 
-                # Call alert callbacks
-                for callback in self._alert_callbacks:
-                    try:
-                        callback(alert)
-                    except Exception as e:
-                        logger.error(f"Error in alert callback: {e}")
+        # Parse the alert (may return multiple for multi-segment products)
+        try:
+            alerts = AlertParser.parse_multi(raw_text, source="nwws")
+            if alerts:
+                for alert in alerts:
+                    logger.info(f"Parsed NWWS alert: {alert.product_id} ({alert.event_name})")
+
+                    # Call alert callbacks
+                    for callback in self._alert_callbacks:
+                        try:
+                            callback(alert)
+                        except Exception as e:
+                            logger.error(f"Error in alert callback: {e}")
             else:
                 logger.debug("NWWS message did not parse to valid alert")
         except Exception as e:

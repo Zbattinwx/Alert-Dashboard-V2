@@ -30,6 +30,7 @@ class MessageType(str, Enum):
     ALERT_UPDATE = "alert_update"
     ALERT_REMOVE = "alert_remove"
     ALERT_BULK = "alert_bulk"
+    MD_NEW = "md_new"
     SYSTEM_STATUS = "system_status"
     CONNECTION_ACK = "connection_ack"
     ERROR = "error"
@@ -46,6 +47,21 @@ class MessageType(str, Enum):
     # Chaser tracking (Server -> Client)
     CHASER_POSITION = "chaser_position"
     CHASER_DISCONNECT = "chaser_disconnect"
+
+    # NEXRAD Radar (Server -> Client)
+    RADAR_FRAME = "radar_frame"
+    RADAR_STATUS = "radar_status"
+    STORM_CELLS = "storm_cells"
+    MCS_SYSTEMS = "mcs_systems"
+
+    # Lightning (Server -> Client)
+    LIGHTNING_STRIKES = "lightning_strikes"
+
+    # NEXRAD Radar (Client -> Server)
+    RADAR_SET_SITE = "radar_set_site"
+
+    # Proactive agent notifications (Server -> Client)
+    AGENT_NOTIFICATION = "agent_notification"
 
 
 @dataclass
@@ -269,6 +285,16 @@ class MessageBroker:
             "reason": "expired" if alert.is_expired else "cancelled",
         })
 
+    async def broadcast_md_new(self, md: Any):
+        """
+        Broadcast a new mesoscale discussion to all clients.
+
+        Args:
+            md: New mesoscale discussion object (or dict)
+        """
+        data = md.to_dict() if hasattr(md, "to_dict") else md
+        await self._broadcast(MessageType.MD_NEW, data)
+
     async def broadcast_alerts_bulk(self, alerts: list[Alert]):
         """
         Broadcast multiple alerts at once (e.g., initial sync).
@@ -289,6 +315,30 @@ class MessageBroker:
             status: Status data to broadcast
         """
         await self._broadcast(MessageType.SYSTEM_STATUS, status)
+
+    async def broadcast_radar_frame(self, frame_data: dict):
+        """Broadcast a new radar frame to all clients."""
+        await self._broadcast(MessageType.RADAR_FRAME, frame_data)
+
+    async def broadcast_radar_status(self, status_data: dict):
+        """Broadcast radar status update to all clients."""
+        await self._broadcast(MessageType.RADAR_STATUS, status_data)
+
+    async def broadcast_storm_cells(self, cells_data: list[dict]):
+        """Broadcast storm cell tracking data to all clients."""
+        await self._broadcast(MessageType.STORM_CELLS, cells_data)
+
+    async def broadcast_mcs_systems(self, systems_data: list[dict]):
+        """Broadcast MCS/QLCS system detections to all clients."""
+        await self._broadcast(MessageType.MCS_SYSTEMS, systems_data)
+
+    async def broadcast_lightning_strikes(self, flashes: list[dict]):
+        """Broadcast new lightning flashes to all clients."""
+        await self._broadcast(MessageType.LIGHTNING_STRIKES, flashes)
+
+    async def broadcast_agent_notification(self, notification: dict):
+        """Broadcast a proactive agent notification to all clients."""
+        await self._broadcast(MessageType.AGENT_NOTIFICATION, notification)
 
     async def _broadcast(self, msg_type: MessageType, data: Any):
         """

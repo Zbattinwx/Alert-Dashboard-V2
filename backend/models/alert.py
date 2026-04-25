@@ -311,6 +311,9 @@ class ThreatData:
     tornado_detection: Optional[str] = None  # "RADAR INDICATED", "OBSERVED", etc.
     tornado_damage_threat: Optional[str] = None  # "CONSIDERABLE", "CATASTROPHIC"
 
+    # Thunderstorm
+    thunderstorm_damage_threat: Optional[str] = None  # "CONSIDERABLE", "DESTRUCTIVE"
+
     # Wind - sustained and gusts
     sustained_wind_min_mph: Optional[int] = None  # e.g., 25 in "winds 25 to 35 mph"
     sustained_wind_max_mph: Optional[int] = None  # e.g., 35 in "winds 25 to 35 mph"
@@ -354,6 +357,7 @@ class ThreatData:
         """Check if this is a Particularly Dangerous Situation."""
         return (
             self.tornado_damage_threat in ("CONSIDERABLE", "CATASTROPHIC") or
+            self.thunderstorm_damage_threat in ("CONSIDERABLE", "DESTRUCTIVE", "CATASTROPHIC") or
             self.wind_damage_threat in ("CONSIDERABLE", "DESTRUCTIVE", "CATASTROPHIC") or
             self.hail_damage_threat in ("CONSIDERABLE", "CATASTROPHIC")
         )
@@ -363,6 +367,7 @@ class ThreatData:
         result = {
             "tornado_detection": self.tornado_detection,
             "tornado_damage_threat": self.tornado_damage_threat,
+            "thunderstorm_damage_threat": self.thunderstorm_damage_threat,
             "sustained_wind_min_mph": self.sustained_wind_min_mph,
             "sustained_wind_max_mph": self.sustained_wind_max_mph,
             "max_wind_gust_mph": self.max_wind_gust_mph,

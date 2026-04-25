@@ -11,33 +11,43 @@ interface NavItem {
 const navItems: NavItem[] = [
   { id: 'alerts', label: 'Active Alerts', icon: 'fa-exclamation-triangle' },
   { id: 'map', label: 'Alert Map', icon: 'fa-map-marked-alt' },
+  { id: 'radar', label: 'NEXRAD Radar', icon: 'fa-satellite-dish' },
   { id: 'lsr', label: 'Storm Reports', icon: 'fa-bullhorn' },
   { id: 'odot', label: 'ODOT Cameras', icon: 'fa-road' },
   { id: 'spc', label: 'SPC Outlooks', icon: 'fa-cloud-sun-rain' },
-  { id: 'md', label: 'Mesoscale Discussions', icon: 'fa-file-alt' },
   { id: 'afd', label: 'Forecast Discussions', icon: 'fa-book-open' },
   { id: 'gusts', label: 'Top Wind Gusts', icon: 'fa-wind' },
+  { id: 'metar', label: 'Surface Obs', icon: 'fa-thermometer-half' },
   { id: 'snow-emergency', label: 'Snow Emergencies', icon: 'fa-car-crash' },
   { id: 'nwws-feed', label: 'NWWS Products', icon: 'fa-rss' },
   { id: 'daily-recap', label: 'Daily Recap', icon: 'fa-calendar-day' },
+  { id: 'social', label: 'Social Media', icon: 'fa-share-nodes' },
+  { id: 'event-stats', label: 'Event Stats', icon: 'fa-chart-bar' },
+  { id: 'alert-graphics', label: 'Alert Graphics', icon: 'fa-images' },
   { id: 'settings', label: 'Settings', icon: 'fa-sliders-h' },
 ];
 
 interface SidebarProps {
   activeSection: string;
   onSectionChange: (section: string) => void;
+  brandLogo?: string;
+  brandName?: string;
+  brandWebsite?: string | null;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   activeSection,
   onSectionChange,
+  brandLogo = 'tbf_logo.png',
+  brandName = 'The Battin Front',
+  brandWebsite = 'https://www.thebattinfront.com',
 }) => {
   return (
     <aside className="sidebar">
       <div className="sidebar-header" style={{ flexDirection: 'column', gap: '8px' }}>
         <img
-          src={`${import.meta.env.BASE_URL}tbf_logo.png`}
-          alt="The Battin Front"
+          src={`${import.meta.env.BASE_URL}${brandLogo}`}
+          alt={brandName}
           style={{
             maxWidth: '160px',
             height: 'auto',
@@ -84,14 +94,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
         color: 'var(--text-muted)',
         textAlign: 'center'
       }}>
-        <a
-          href="https://www.thebattinfront.com"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ color: 'var(--text-muted)', textDecoration: 'none' }}
-        >
-          thebattinfront.com
-        </a>
+        {brandWebsite && (
+          <a
+            href={brandWebsite}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: 'var(--text-muted)', textDecoration: 'none' }}
+          >
+            {brandWebsite.replace(/^https?:\/\/(www\.)?/, '')}
+          </a>
+        )}
       </div>
     </aside>
   );

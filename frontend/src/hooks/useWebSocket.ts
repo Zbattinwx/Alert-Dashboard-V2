@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import type { Alert, WSMessage, AlertBulkData, AlertRemoveData } from '../types/alert';
+import type { Alert, WSMessage, AlertBulkData, AlertRemoveData, AgentNotification } from '../types/alert';
+import type { MesoscaleDiscussion } from '../types/spc';
 import type { ChaserPosition } from '../types/chaser';
+import type { RadarFrame, RadarStatus, StormCell, LightningFlash, MCSSystem } from '../types/radar';
 
 interface UseWebSocketOptions {
   url: string;
@@ -8,9 +10,16 @@ interface UseWebSocketOptions {
   onAlertUpdate?: (alert: Alert) => void;
   onAlertRemove?: (data: AlertRemoveData) => void;
   onBulkAlerts?: (alerts: Alert[]) => void;
+  onMD?: (md: MesoscaleDiscussion) => void;
   onStatusChange?: (connected: boolean) => void;
   onChaserPosition?: (data: ChaserPosition) => void;
   onChaserDisconnect?: (data: { client_id: string }) => void;
+  onRadarFrame?: (frame: RadarFrame) => void;
+  onRadarStatus?: (status: RadarStatus) => void;
+  onStormCells?: (cells: StormCell[]) => void;
+  onMcsSystems?: (systems: MCSSystem[]) => void;
+  onAgentNotification?: (notification: AgentNotification) => void;
+  onLightningStrikes?: (flashes: LightningFlash[]) => void;
   reconnectInterval?: number;
 }
 
@@ -28,9 +37,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onAlertUpdate,
     onAlertRemove,
     onBulkAlerts,
+    onMD,
     onStatusChange,
     onChaserPosition,
     onChaserDisconnect,
+    onRadarFrame,
+    onRadarStatus,
+    onStormCells,
+    onMcsSystems,
+    onAgentNotification,
+    onLightningStrikes,
     reconnectInterval = 5000,
   } = options;
 
@@ -133,6 +149,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         break;
       }
 
+      case 'md_new': {
+        const md = message.data as MesoscaleDiscussion;
+        onMD?.(md);
+        break;
+      }
+
       case 'system_status':
         console.log('System status:', message.data);
         break;
@@ -149,6 +171,30 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         onChaserDisconnect?.(message.data as { client_id: string });
         break;
 
+      case 'radar_frame':
+        onRadarFrame?.(message.data as RadarFrame);
+        break;
+
+      case 'radar_status':
+        onRadarStatus?.(message.data as RadarStatus);
+        break;
+
+      case 'storm_cells':
+        onStormCells?.(message.data as StormCell[]);
+        break;
+
+      case 'mcs_systems':
+        onMcsSystems?.(message.data as MCSSystem[]);
+        break;
+
+      case 'agent_notification':
+        onAgentNotification?.(message.data as AgentNotification);
+        break;
+
+      case 'lightning_strikes':
+        onLightningStrikes?.(message.data as LightningFlash[]);
+        break;
+
       case 'error':
         console.error('WebSocket error message:', message.data);
         break;
@@ -156,7 +202,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       default:
         console.log('Unknown message type:', message.type);
     }
-  }, [onAlert, onAlertUpdate, onAlertRemove, onBulkAlerts, onChaserPosition, onChaserDisconnect]);
+  }, [onAlert, onAlertUpdate, onAlertRemove, onBulkAlerts, onMD, onChaserPosition, onChaserDisconnect, onRadarFrame, onRadarStatus, onStormCells, onMcsSystems, onAgentNotification, onLightningStrikes]);
 
   const sendMessage = useCallback((type: string, data?: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

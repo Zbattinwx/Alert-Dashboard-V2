@@ -10,6 +10,7 @@ export interface OutlookPolygon {
   expire_time: string | null;
   issue_time: string | null;
   geometry: GeoJSON.Geometry | null;
+  is_hatched: boolean;
 }
 
 export interface OutlookData {
@@ -48,6 +49,9 @@ export interface Day1Response {
   tornado?: OutlookData | null;
   wind?: OutlookData | null;
   hail?: OutlookData | null;
+  cig_tornado?: OutlookData | null;
+  cig_wind?: OutlookData | null;
+  cig_hail?: OutlookData | null;
   risk_colors: Record<string, string>;
   risk_names: Record<string, string>;
 }
@@ -146,6 +150,27 @@ export const PROB_NAMES: Record<string, string> = {
   '60': '60% Probability',
   'SIGN': 'Significant',
   'SIGPROB': 'Significant',
+};
+
+// CIG (Conditional Intensity Group) colors
+export const CIG_COLORS: Record<string, string> = {
+  'CIG1': '#888888',
+  'CIG2': '#444444',
+  'CIG3': '#000000',
+};
+
+// CIG display names
+export const CIG_NAMES: Record<string, string> = {
+  'CIG1': 'Conditional Intensity Group 1',
+  'CIG2': 'Conditional Intensity Group 2',
+  'CIG3': 'Conditional Intensity Group 3',
+};
+
+// CIG risk order
+export const CIG_ORDER: Record<string, number> = {
+  'CIG1': 1,
+  'CIG2': 2,
+  'CIG3': 3,
 };
 
 // Probabilistic risk order

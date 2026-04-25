@@ -21,6 +21,9 @@ export interface ThreatInfo {
   tornado_possible?: boolean;
   tornado_observed?: boolean;
 
+  // Thunderstorm
+  thunderstorm_damage_threat: string | null;
+
   // Wind - sustained and gusts
   sustained_wind_min_mph: number | null;  // e.g., 25 in "winds 25 to 35 mph"
   sustained_wind_max_mph: number | null;  // e.g., 35 in "winds 25 to 35 mph"
@@ -97,18 +100,33 @@ export interface AlertStats {
   by_source: Record<string, number>;
 }
 
+// Proactive agent notification from storm analyst
+export interface AgentNotification {
+  id: string;
+  content: string;
+  cells: Record<string, unknown>[];
+  timestamp: string;
+}
+
 // WebSocket message types
 export type WSMessageType =
   | 'alert_new'
   | 'alert_update'
   | 'alert_remove'
   | 'alert_bulk'
+  | 'md_new'
   | 'system_status'
   | 'connection_ack'
   | 'error'
   | 'pong'
   | 'chaser_position'
-  | 'chaser_disconnect';
+  | 'chaser_disconnect'
+  | 'radar_frame'
+  | 'radar_status'
+  | 'storm_cells'
+  | 'mcs_systems'
+  | 'agent_notification'
+  | 'lightning_strikes';
 
 export interface WSMessage {
   type: WSMessageType;

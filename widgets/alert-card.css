@@ -1,0 +1,163 @@
+/* Alert Card OBS Widget */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    overflow: hidden;
+}
+
+#alert-card-container {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    width: 380px;
+    z-index: 1000;
+    transition: transform 0.4s ease-out, opacity 0.4s ease-out;
+    transform: translateX(0);
+    opacity: 1;
+}
+
+#alert-card-container.hidden {
+    transform: translateX(110%);
+    opacity: 0;
+    pointer-events: none;
+}
+
+#alert-card-container.slide-out {
+    transform: translateX(110%);
+    opacity: 0;
+    transition: transform 0.4s ease-in, opacity 0.4s ease-in;
+}
+
+/* Card */
+.alert-card {
+    background-color: #1a1a2e;
+    border-radius: 8px;
+    border-left: 5px solid #808080;
+    overflow: hidden;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6), 0 0 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Header */
+.card-header {
+    padding: 10px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.card-event-name {
+    font-weight: 700;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.card-issued-time {
+    font-size: 0.75rem;
+    opacity: 0.85;
+}
+
+/* Body */
+.card-body {
+    padding: 12px 14px;
+}
+
+.card-locations {
+    font-size: 0.8rem;
+    color: #c0c0d0;
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+.card-locations::before {
+    content: '\f3c5';  /* map-marker-alt unicode */
+    font-family: 'Font Awesome 5 Free', 'FontAwesome';
+    font-weight: 900;
+    margin-right: 5px;
+    font-size: 0.7rem;
+}
+
+.card-expiration {
+    font-size: 0.75rem;
+    color: #9090a0;
+    margin-top: 5px;
+}
+
+.card-expiration:empty {
+    display: none;
+}
+
+.card-sender {
+    font-size: 0.7rem;
+    color: #707080;
+    margin-top: 4px;
+}
+
+.card-sender:empty {
+    display: none;
+}
+
+/* Threat Tags */
+.card-tags {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.card-tags:empty {
+    display: none;
+}
+
+.tag {
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: white;
+    display: inline-block;
+    letter-spacing: 0.02em;
+}
+
+.tag-tornado {
+    background-color: #FF0000;
+}
+
+.tag-tstorm-destructive {
+    background-color: #D50000;
+}
+
+.tag-tstorm-considerable {
+    background-color: #FF6D00;
+}
+
+.tag-flood {
+    background-color: #8B0000;
+}
+
+/* Impact Badges */
+.card-impacts {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.card-impacts:empty {
+    display: none;
+}
+
+.impact-badge {
+    padding: 3px 8px;
+    background-color: #2a2a3e;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    color: #d0d0e0;
+}
