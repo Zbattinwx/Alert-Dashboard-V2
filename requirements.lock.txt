@@ -31,8 +31,10 @@ cycler==0.12.1
 dask==2026.6.0
 ecape==0.1.1
 ecape-parcel==1.2.2
+eccodes==2.47.0
 ecmwf-datastores-client==0.5.1
 fastapi==0.137.0
+findlibs==0.1.2
 flexcache==0.3
 flexparser==0.4
 fonttools==4.63.0

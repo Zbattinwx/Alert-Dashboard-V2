@@ -38,6 +38,8 @@ ROOT_WIN="$(pwd -W 2>/dev/null || pwd)"
   --collect-all cmweather \
   --collect-all open_radar_data \
   --collect-all xarray \
+  --collect-all eccodes \
+  --collect-all findlibs \
   --collect-submodules backend \
   --add-data "$ROOT_WIN/backend/data;backend/data" \
   packaging/run_backend.py
