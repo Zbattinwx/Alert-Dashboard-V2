@@ -77,9 +77,10 @@ class AlertTicker {
         this.logoImg = document.getElementById('ticker-logo-img');
         this.content = document.getElementById('ticker-content');
 
-        // Set logo src using base path
+        // Logo from the active white-label brand (falls back to the default
+        // brand logo server-side). Was hardcoded to /tbf_logo.png.
         if (this.logoImg) {
-            this.logoImg.src = getBasePath() + '/tbf_logo.png';
+            this.logoImg.src = getBasePath() + '/api/brand/logo';
         }
         this.titleEl = document.getElementById('ticker-title');
         this.subtitleEl = document.getElementById('ticker-subtitle');
