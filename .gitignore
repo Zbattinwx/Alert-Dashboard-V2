@@ -67,3 +67,9 @@ data/
 # Windows reserved names
 nul
 NUL
+
+# Desktop-bundle packaging (build venv + PyInstaller output)
+.venv-build/
+packaging/dist/
+packaging/build/
+packaging/*.spec
