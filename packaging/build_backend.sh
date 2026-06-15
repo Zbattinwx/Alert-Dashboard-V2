@@ -42,6 +42,8 @@ ROOT_WIN="$(pwd -W 2>/dev/null || pwd)"
   --collect-all findlibs \
   --collect-submodules backend \
   --add-data "$ROOT_WIN/backend/data;backend/data" \
+  --add-data "$ROOT_WIN/frontend/dist;frontend/dist" \
+  --add-data "$ROOT_WIN/widgets;widgets" \
   packaging/run_backend.py
 
 echo "Built: packaging/dist/dashboard-backend/"
