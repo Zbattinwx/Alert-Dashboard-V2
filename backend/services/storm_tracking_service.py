@@ -29,21 +29,32 @@ THREAT_LEVELS = {
     "extreme": {"min": 86, "max": 100, "color": "#FF00FF"},
 }
 
-# Scoring weights (must sum to 100)
+# Scoring weights — 11 factors, must sum to 100.
+# Phase 5 restructure: LLSD (the single most predictive feature for
+# tornadogenesis per published research) now outweighs the noisier velocity-
+# couplet rotation factor.  Grid-based rotation is Barnes2-blurred and the
+# multi-tilt profile measures column rotation that may not reach the surface;
+# LLSD directly measures near-surface azimuthal shear on raw polar data.
 SCORE_WEIGHTS = {
-    "reflectivity": 18,
-    "growth_trend": 10,
-    "hail": 18,
-    "rotation": 24,
-    "debris": 15,
-    "vil": 5,
-    "cell_top": 5,
-    "lightning": 5,
+    "reflectivity":    15,  # SCIT core dBZ level
+    "growth_trend":    10,  # Quantitative intensification (LLSD/rot/echo-top/VIL slopes)
+    "rotation":        10,  # Velocity couplet (grid + multi-tilt profile)
+    "llsd":            16,  # Low-level azimuthal shear (polar, lowest tilt)
+    "hail":            13,  # Dual-pol strict core + TBSS confirmation + MESH
+    "downburst_marc":   8,  # Downburst ΔV + MARC mid-level convergence
+    "straight_line":    4,  # Broad severe outflow swath + RIJ
+    "debris":          14,  # TDS with multi-tilt depth confirmation
+    "vil":              4,  # Cell-based VIL from multi-tilt integration
+    "cell_top":         3,  # Echo top height (overshooting top severity)
+    "lightning":        3,  # GLM flash rate near cell
 }
 
 # Detection thresholds
-CELL_DETECT_DBZ = 35  # Minimum reflectivity for cell detection
-CELL_MIN_AREA_KM2 = 5  # Minimum cell area to filter noise
+# SCIT thresholds (Johnson et al. 1998, WAF) — processed high→low so that
+# distinct high-reflectivity cores are found before lower-threshold halos are tested.
+SCIT_THRESHOLDS = [60, 55, 50, 45, 40, 35, 30]  # dBZ
+CELL_DETECT_DBZ = 35  # Used for MCS classification filter (not identification)
+CELL_MIN_AREA_KM2 = 5  # Minimum component area to reject noise pixels
 MAX_MATCH_DISTANCE_KM = 20  # Max distance for cell matching across scans
 # Minimum time between motion vector updates.  When two active sites
 # produce scans only seconds apart, cross-site parallax (3–5 km) divided
@@ -51,7 +62,11 @@ MAX_MATCH_DISTANCE_KM = 20  # Max distance for cell matching across scans
 # Below this threshold we keep the previous motion vector unchanged.
 MIN_MOTION_DT_SECONDS = 120.0   # 2 minutes
 MAX_STORM_SPEED_KPH   = 175.0   # Hard physical cap (extreme derecho upper bound)
-MESO_VELOCITY_THRESHOLD_MS = 15  # Minimum rotational velocity for mesocyclone
+MESO_VELOCITY_THRESHOLD_MS = 13  # Minimum rotational velocity for mesocyclone
+                                  # (lowered from 15 to catch borderline LP/QLCS
+                                  # mesos where forecasters issue TOR warnings on
+                                  # 12–15 m/s couplets; couplet-diameter and
+                                  # straddling guards still reject noise)
 TVS_VELOCITY_THRESHOLD_MS = 25  # Tornado vortex signature threshold
 MESO_MAX_DIAMETER_KM = 10  # Max diameter for mesocyclone couplet
 HAIL_REFLECTIVITY_DBZ = 55  # Reflectivity threshold for hail check
@@ -94,6 +109,128 @@ LLSD_CELL_SEARCH_KM = 4.0      # Half-width of the window around each cell
 # Multi-tilt rotation profile — run the same shear analysis at every tilt to
 # catch mid-level mesos that may not extend to the surface.
 ROTATION_PROFILE_MAX_ELEV_DEG = 8.0   # Don't bother above this (mesos below here)
+# Mesocyclone height constraints — prevents anvil/outflow divergence from being
+# misclassified.  Real supercell mesos live at 2–8 km AGL.  Rotation detected
+# only above 8 km is upper-level wind shear, not a low-level vortex.
+MESO_MAX_CONFIRM_HEIGHT_KM = 8.0
+# Minimum vertical depth (km) across tilts for a CONFIRMED mesocyclone.
+# 0.0 km means only ONE tilt exceeded the velocity threshold — not enough.
+# LLSD confirmation can override this requirement for single-tilt low-level rotation.
+MESO_MIN_DEPTH_FOR_CONFIRM_KM = 0.1  # > 0 requires at least 2 tilts
+
+# Altitude bands for operational rotation classification.
+# Low-level mesos (≤ 2 km AGL OR LLSD-confirmed surface shear) are the
+# primary tornadogenesis precursor.  Mid-level rotation (2–6 km) is a
+# normal supercell signature without imminent tornado risk; rotation
+# above 6 km AGL with no lower extent is anvil-level shear.
+LOW_LEVEL_MESO_MAX_HEIGHT_KM = 2.0
+MID_LEVEL_MESO_MAX_HEIGHT_KM = 6.0
+# Depth bonus only applies when rotation reaches the boundary layer.
+LOW_LEVEL_ROT_DEPTH_BONUS_BASE_KM = 1.5
+
+# Trend detection — slope computed over this many consecutive scans.
+# Research (TorNet/WAF 2023) shows 5 scans ≈ 25 minutes is the optimal
+# window: long enough to filter noise, short enough to catch rapid onset.
+TREND_WINDOW_SCANS  = 5
+TREND_HISTORY_MAX   = 12   # keep at most this many snapshots per cell
+
+# ---------------------------------------------------------------------------
+# Phase 2: Kinematic wind signatures
+# ---------------------------------------------------------------------------
+
+# Downburst / microburst — lowest-tilt radial divergence
+# NWS defines microburst as ΔV ≥ 10 m/s; severe microburst ≥ 25 m/s.
+# We use 20 m/s as the flag threshold (operationally significant).
+DOWNBURST_DELTA_V_MS      = 20.0    # Minimum ΔV across divergent signature (m/s)
+DOWNBURST_MAX_DIAMETER_KM = 10.0    # Maximum compact diameter; wider → storm-scale motion
+DOWNBURST_INBOUND_FLOOR_MS  = -10.0 # Near-side must be at least this inbound (m/s)
+DOWNBURST_OUTBOUND_FLOOR_MS =  10.0 # Far-side must at least be this outbound (m/s)
+
+# MARC (Mid-Altitude Radial Convergence) — strong updraft inflow at 3–9 km AGL
+# Operationally used as a supercell hail/tornado precursor by NWS forecasters.
+MARC_MIN_HEIGHT_KM      = 3.0       # Bottom of the MARC search layer (km AGL)
+MARC_MAX_HEIGHT_KM      = 9.0       # Top of the MARC search layer (km AGL)
+MARC_CONVERGENCE_MS     = -12.0     # Peak inbound required (m/s; negative = inbound)
+MARC_REFL_FLOOR_DBZ     = 45.0      # Require this reflectivity at low levels beneath MARC
+
+# Straight-line winds — broad swath of damaging outflow
+SLW_SEVERE_MS           = 25.7      # 50 knots — NWS severe wind threshold (m/s)
+SLW_SEARCH_RADIUS_KM    = 40.0      # Broad window radius for swath measurement
+SLW_MIN_SWATH_KM2       = 30.0      # Minimum severe-velocity coverage area (km²)
+
+# Sub-severe but operationally notable: ~35 kt (18 m/s).  Catches the
+# strong-but-not-yet-severe wind regime in developing squall lines and
+# bow echoes — gust front pushes, intensifying QLCS outflow, etc.  Smaller
+# swath threshold because the strong tier is meant to flag concern earlier
+# in the life cycle, when the high-wind footprint is still building.
+SLW_STRONG_MS           = 18.0      # 35 knots (sub-severe but damaging)
+SLW_STRONG_MIN_SWATH_KM2 = 15.0     # Smaller area threshold for the strong tier
+
+# Rear-Inflow Jet (RIJ) — mid-level inbound channel behind a bow echo
+RIJ_INBOUND_MS          = -20.0     # Strong inbound threshold for RIJ channel (m/s)
+RIJ_HEIGHT_MIN_KM       = 1.0       # Lower AGL bound of the RIJ search layer
+RIJ_HEIGHT_MAX_KM       = 4.0       # Upper AGL bound of the RIJ search layer
+
+# ---------------------------------------------------------------------------
+# Phase 3: Enhanced dual-pol signatures
+# ---------------------------------------------------------------------------
+
+# Strict hail core: pixel-level co-location required (Z > 55, ZDR ≈ 0, CC 0.85-0.95).
+# The 0.85 lower bound is the key upgrade — the old HAIL_CC_RANGE started at 0.70,
+# which admits large-drop rain and even debris.  True large hail tumbles, producing
+# ZDR ≈ 0 and CC 0.85-0.95 (mixed-phase ice/water coating).
+HAIL_STRICT_CC_MIN    = 0.85    # Lower CC bound for confirmed large-hail core
+HAIL_STRICT_CC_MAX    = 0.95    # Upper CC bound (>0.95 is rain, not hail)
+HAIL_STRICT_ZDR_MAX   = 0.5     # |ZDR| ≤ this value confirms tumbling hailstones
+HAIL_STRICT_MIN_PX    = 3       # Minimum co-located pixels to confirm hail core
+
+# Three-Body Scatter Spike (TBSS): range ghost behind hail core at same azimuth.
+# Radar energy hits hail, scatters to ground, reflects back, then hail re-scatters
+# it to the radar — arriving at ~1.3–2x the actual hail range (same azimuth).
+TBSS_MIN_RANGE_KM         = 40.0   # Minimum hail core range for TBSS to be detectable
+TBSS_SPIKE_DBZ_MIN        = 10.0   # Minimum reflectivity in the spike region
+TBSS_SPIKE_DBZ_MAX        = 40.0   # Maximum (spike is always weaker than the hail core)
+TBSS_SPIKE_CC_MAX         = 0.85   # TBSS returns have anomalously low CC
+TBSS_RANGE_FACTOR_MIN     = 1.2    # Spike begins at this fraction of hail core range
+TBSS_RANGE_FACTOR_MAX     = 2.0    # Spike ends at this fraction
+TBSS_MIN_SPIKE_PIXELS     = 3      # Minimum spike gates to confirm
+
+# TDS multi-tilt continuity.  A true debris signature is a deep column of mixed
+# scatterers visible across multiple low-level tilts.  Single-tilt detection can
+# be ground clutter, roost scatter, or AP — requiring TWO tilts eliminates >90 %
+# of false positives while preserving true TDS detection (ops experience, NSSL).
+TDS_MIN_TILT_COUNT        = 2      # Minimum confirming tilts for TDS (was 1, implicitly)
+TDS_MAX_TILT_HEIGHT_KM    = 2.0    # Only count tilts whose beam height ≤ this AGL
+
+# ---------------------------------------------------------------------------
+# Phase 5: BWER + MESH
+# ---------------------------------------------------------------------------
+
+# Bounded Weak Echo Region — column signature of an intense, tilted supercell
+# updraft.  Weak echo (≤ BWER_WEAK_DBZ) bounded above by strong echo overhang
+# (≥ BWER_OVERHANG_DBZ) and below by moderate echo.  Classic indicator of an
+# updraft strong enough to suspend large hail and support tornadogenesis.
+BWER_WEAK_DBZ           = 25.0   # Reflectivity ceiling for the weak region
+BWER_OVERHANG_DBZ       = 50.0   # Strong echo required ABOVE the weak region
+BWER_BELOW_DBZ          = 35.0   # Moderate echo required BELOW (bounded)
+BWER_MIN_WEAK_HEIGHT_KM = 3.0    # Weak region must be at or above this AGL
+BWER_MAX_WEAK_HEIGHT_KM = 8.0    # ...and below this (anvil starts above 8–10 km)
+BWER_MIN_OVERHANG_KM    = 1.0    # Vertical separation between weak and overhang
+
+# MESH (Maximum Estimated Size of Hail) — NSSL formula derived from the
+# Severe Hail Index (Witt et al. 1998).  Requires the environmental 0°C and
+# −20°C heights; we use sensible defaults for warm-season convection and
+# allow site configuration via the freezing_level_km setting.  Implementation
+# integrates per-tilt reflectivity through the column and weights by the
+# temperature-based hail kinetic energy function.
+MESH_FREEZING_LEVEL_KM_DEFAULT = 3.5   # Warm-season default (~July US plains)
+MESH_MINUS_20C_DELTA_KM        = 2.5   # −20°C ≈ freezing level + 2.5 km
+MESH_Z_LOWER_DBZ               = 40.0  # Lower Z cutoff for hail kinetic energy
+MESH_Z_UPPER_DBZ               = 50.0  # Upper Z for full kinetic energy weight
+MESH_SHI_TO_MM_COEFF           = 2.54  # NSSL MESH (mm) = coeff × SHI^0.5
+MESH_SIG_HAIL_MM               = 19.0  # 3/4" — severe threshold
+MESH_LARGE_HAIL_MM             = 44.0  # 1.75" — significant severe
+MESH_GIANT_HAIL_MM             = 76.0  # 3" — giant hail
 
 
 # ---------------------------------------------------------------------------
@@ -133,18 +270,64 @@ class TrackedStormCell:
     llsd_rotation_detected: bool = False   # Low-level azimuthal shear exceeds weak-meso threshold
     llsd_max_shear: Optional[float] = None # Peak |∂V/∂az| (/s) on the lowest tilt near this cell
     llsd_elevation_deg: Optional[float] = None  # Elevation angle of the sweep used
+    llsd_diagnostic: Optional[str] = None  # Skip-reason when LLSD bailed; None on success
     # Multi-tilt rotation profile
     max_rot_velocity_ms: Optional[float] = None  # Peak rotational velocity anywhere in column
     max_rot_height_km: Optional[float] = None    # Height where peak rotation occurs
     rotation_profile: list = field(default_factory=list)  # [{height_km, shear, rot_ms}]
     rotation_depth_km: Optional[float] = None    # Vertical extent of rotation ≥ meso threshold
+    rotation_base_km: Optional[float] = None     # Lowest tilt with ≥ meso-class rotation
+    # Operational altitude classification — set in _reconcile_rotation_flags.
+    # `low_level_meso_detected` is the primary tornado precursor; mid-level
+    # alone is just a supercell signature.  A deep meso can be both.
+    low_level_meso_detected: bool = False
+    mid_level_meso_detected: bool = False
     cell_base_km: Optional[float] = None       # Lowest 18 dBZ echo height (AGL)
     max_ref_height_km: Optional[float] = None  # Height at which max reflectivity occurs
     centroid_height_km: Optional[float] = None # Reflectivity-weighted mean height
     depth_km: Optional[float] = None           # cell_top - cell_base
 
+    # ── Trend fields (rate of change per scan, positive = increasing) ──────
+    # Computed by _compute_trends() over the last TREND_WINDOW_SCANS scans.
+    # These are the most important features for pre-alert detection because
+    # a rapidly intensifying storm is far more dangerous than a steady one.
+    llsd_trend: Optional[float] = None        # LLSD shear /s per scan
+    rot_vel_trend: Optional[float] = None     # rotational velocity m/s per scan
+    vil_trend: Optional[float] = None         # VIL kg/m² per scan
+    echo_top_trend: Optional[float] = None    # echo top km per scan
+    dbz_trend: Optional[float] = None         # max reflectivity dBZ per scan
+
+    # ── Phase 2: Kinematic wind signatures (set each scan by Phase 2 detectors) ──
+    downburst_detected: bool = False
+    downburst_delta_v_ms: Optional[float] = None    # ΔV across divergent signature (m/s)
+    marc_signature_detected: bool = False
+    marc_convergence_ms: Optional[float] = None     # Peak inbound at mid-level (m/s, negative)
+    straight_line_wind_detected: bool = False
+    strong_wind_detected: bool = False               # Sub-severe (≥35 kt) broad outflow swath
+    strong_wind_swath_km2: Optional[float] = None    # Area of strong-tier coverage (km²)
+    max_wind_velocity_ms: Optional[float] = None    # Peak broad outbound velocity (m/s)
+    rij_detected: bool = False                       # Rear-Inflow Jet inside a bow echo
+
+    # ── Phase 3: Enhanced dual-pol ───────────────────────────────────────────
+    tbss_detected: bool = False          # Three-Body Scatter Spike confirmed behind hail core
+    tds_tilt_count: int = 0             # Number of low tilts confirming TDS (≥2 = genuine)
+
+    # ── Phase 5: BWER + MESH ─────────────────────────────────────────────────
+    bwer_detected: bool = False          # Bounded weak echo region (strong updraft signature)
+    bwer_overhang_dbz: Optional[float] = None  # Peak Z above the weak region
+    mesh_mm: Optional[float] = None       # Maximum Estimated Size of Hail (mm)
+    shi_value: Optional[float] = None     # Raw Severe Hail Index integral
+    # ML rotation classifier output (None if no model loaded or features unavailable)
+    p_rotation_model: Optional[float] = None
+
+    # ── Internal scan-history for trend computation (not sent to frontend) ──
+    # Stores the last TREND_HISTORY_MAX snapshots of key numeric fields.
+    feature_history: list = field(default_factory=list)
+
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("feature_history", None)   # internal only — strip before WebSocket
+        return d
 
 
 @dataclass
@@ -193,6 +376,8 @@ class _InternalCell:
     dbz_50_area_km2: float = 0.0
     dbz_55_area_km2: float = 0.0
     dbz_60_area_km2: float = 0.0
+    # Phase 3: strict pixel-level dual-pol hail confirmation
+    hail_core_pixels: int = 0   # pixels where Z>55, |ZDR|≤0.5, CC∈[0.85,0.95] co-locate
 
 
 # ---------------------------------------------------------------------------
@@ -221,18 +406,183 @@ class StormTrackingService:
         # partitioning so each cell/pixel is analysed by its closest radar.
         self._radar_locations: dict[str, tuple[float, float]] = {}
 
+        # Environmental freezing level (km AGL) — used by MESH/SHI hail sizing.
+        # Defaults to warm-season convection; overridable via set_freezing_level()
+        # so callers can wire HRRR/RAP sounding data when available.
+        self._freezing_level_km: float = MESH_FREEZING_LEVEL_KM_DEFAULT
+
+        # Optional ML rotation classifier (loaded on service start if a trained
+        # model exists at data/rotation_model.joblib).  Inert until trained.
+        self._rotation_model = None
+        self._rotation_model_features: list[str] = []
+
         # GLM lightning service reference (optional)
         self._glm_service = None
 
         # Callbacks
         self.on_cells_updated: Optional[Callable] = None   # (cells: list[TrackedStormCell]) -> None
         self.on_systems_updated: Optional[Callable] = None  # (systems: list[MCSSystem]) -> None
+        # (direction_deg, speed_kph) — pushed after each scan so the radar
+        # renderer can compute Storm-Relative Velocity using the latest mean
+        # storm motion across all tracked cells.
+        self.on_motion_update: Optional[Callable] = None
 
         self._running = False
 
     def set_glm_service(self, glm_svc):
         """Wire in the GLM lightning service for flash-rate scoring."""
         self._glm_service = glm_svc
+
+    def set_freezing_level(self, freezing_level_km: float) -> None:
+        """Override the environmental 0°C height used for MESH/SHI calculation.
+
+        Callers (e.g. an HRRR/RAP sounding ingester) can update this between
+        scans; the default is warm-season convection.
+        """
+        if freezing_level_km > 0:
+            self._freezing_level_km = float(freezing_level_km)
+
+    def load_rotation_model(self, model_path: Optional[str] = None) -> bool:
+        """Attempt to load a trained ML rotation classifier from disk.
+
+        Returns True on success.  Safe to call when no model exists — the
+        service stays in pure physics mode in that case.
+        """
+        try:
+            from pathlib import Path
+            import sys
+            project_root = Path(__file__).resolve().parents[2]
+            if str(project_root) not in sys.path:
+                sys.path.insert(0, str(project_root))
+            from scripts.train_rotation_model import (
+                load_rotation_model as _load,
+                FEATURE_NAMES,
+            )
+            model = _load() if model_path is None else None
+            if model_path is not None:
+                import joblib
+                model = joblib.load(model_path)
+            if model is None:
+                logger.info("No rotation ML model found — running pure physics")
+                return False
+            self._rotation_model = model
+            self._rotation_model_features = list(FEATURE_NAMES)
+            logger.info(
+                f"Loaded ML rotation model with {len(FEATURE_NAMES)} features"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Could not load ML rotation model: {e}")
+            return False
+
+    @staticmethod
+    def _cell_to_feature_vector(
+        cell: "TrackedStormCell", feature_names: list[str]
+    ) -> list[float]:
+        """Build the feature vector consumed by the trained classifier.
+
+        Mirrors the schema in live_qa.extract_features.  Unknown features
+        default to 0.0 so trained models with a superset of fields still work.
+        """
+        peak_profile_vel = 0.0
+        if cell.rotation_profile:
+            peak_profile_vel = max(
+                (p.get("rot_velocity_ms", 0.0) for p in cell.rotation_profile),
+                default=0.0,
+            )
+
+        # MRMS multi-radar rotation features — sampled at the cell's lat/lon
+        # from the cached MRMS rotation service.  Both default to 0.0 when
+        # MRMS is unavailable so the model handles missing data gracefully.
+        mrms_rot = 0.0
+        mrms_azshear = 0.0
+        try:
+            from backend.services.mrms_rotation_service import get_mrms_rotation_service
+            svc = get_mrms_rotation_service()
+            if svc is not None and svc.available:
+                rt = svc.get_rotation_track_at(float(cell.lat), float(cell.lon))
+                if rt is not None:
+                    mrms_rot = float(rt)
+                az = svc.get_azshear_at(float(cell.lat), float(cell.lon))
+                if az is not None:
+                    mrms_azshear = float(az)
+        except Exception:
+            pass
+
+        feat: dict[str, float] = {
+            "max_dbz":              float(cell.max_reflectivity_dbz or 0),
+            "area_km2":             float(cell.area_km2 or 0),
+            "vil_kg_m2":            float(cell.vil_kg_m2 or 0),
+            "cell_top_km":          float(cell.cell_top_km or 0),
+            "cell_base_km":         float(cell.cell_base_km or 0),
+            "depth_km":             float(cell.depth_km or 0),
+            "max_ref_height_km":    float(cell.max_ref_height_km or 0),
+            "centroid_height_km":   float(cell.centroid_height_km or 0),
+            "mean_cc":              0.0,  # not currently stored on the cell
+            "min_cc":               0.0,
+            "mean_zdr":             0.0,
+            "rot_velocity_ms":      float(cell.rotation_velocity_ms or 0),
+            "llsd_max_shear":       float(cell.llsd_max_shear or 0),
+            "llsd_elevation_deg":   float(cell.llsd_elevation_deg or 0),
+            "max_rot_vel_profile_ms": float(
+                cell.max_rot_velocity_ms or peak_profile_vel
+            ),
+            "max_rot_height_km":    float(cell.max_rot_height_km or 0),
+            "rotation_depth_km":    float(cell.rotation_depth_km or 0),
+            "motion_speed_kph":     float(cell.motion_speed_kph or 0),
+            "motion_dir_deg":       float(cell.motion_direction_deg or 0),
+            "score_rotation":       float((cell.score_breakdown or {}).get("rotation", 0)),
+            "llsd_trend":           float(cell.llsd_trend or 0),
+            "rot_vel_trend":        float(cell.rot_vel_trend or 0),
+            "vil_trend":            float(cell.vil_trend or 0),
+            "echo_top_trend":       float(cell.echo_top_trend or 0),
+            "dbz_trend":            float(cell.dbz_trend or 0),
+            "mrms_rotation_track_30min": mrms_rot,
+            "mrms_azshear_0_2km":        mrms_azshear,
+        }
+        return [feat.get(name, 0.0) for name in feature_names]
+
+    def _apply_rotation_model(self, cells: list["TrackedStormCell"]) -> None:
+        """Run the loaded ML classifier on each cell and store probabilities.
+
+        Probability is exposed as `p_rotation_model` for downstream consumers.
+        Score adjustment: scales with how strongly the model disagrees with
+        the physics detectors.  Calibrated for the current ROC-AUC ~0.81
+        ensemble vote rather than transformative classification — the model
+        learns severe-storm proxies (VIL, area, dBZ) more than rotation
+        per se, so impact is intentionally small.
+        """
+        if self._rotation_model is None or not self._rotation_model_features:
+            return
+        import numpy as np
+        for cell in cells:
+            if cell.scan_count < 0:
+                cell.p_rotation_model = None
+                continue
+            try:
+                row = np.array(
+                    self._cell_to_feature_vector(cell, self._rotation_model_features),
+                    dtype=float,
+                ).reshape(1, -1)
+                p = float(self._rotation_model.predict_proba(row)[0, 1])
+                cell.p_rotation_model = round(p, 3)
+            except Exception:
+                cell.p_rotation_model = None
+                continue
+
+            # Conservative ensemble vote — only highly-confident model
+            # predictions nudge the score, and the magnitude is bounded
+            # tightly (±2) so the physics-driven detectors remain the
+            # primary signal.  At AUC 0.81 the model is most useful as a
+            # corroboration signal, not as a co-equal classifier.
+            adj = 0
+            if cell.p_rotation_model >= 0.80 and not cell.rotation_detected:
+                adj = 2
+            elif cell.p_rotation_model < 0.10 and cell.rotation_detected:
+                adj = -2
+            if adj:
+                cell.severity_score = max(0, min(100, cell.severity_score + adj))
+                cell.threat_level   = self._score_to_threat(cell.severity_score)
 
     @property
     def tracked_cells(self) -> list[TrackedStormCell]:
@@ -260,6 +610,38 @@ class StormTrackingService:
                 await self.on_cells_updated(cells)
             if self.on_systems_updated:
                 await self.on_systems_updated(self.tracked_systems)
+            if self.on_motion_update:
+                motion = self._compute_mean_storm_motion(cells)
+                if motion is not None:
+                    await self.on_motion_update(motion[0], motion[1])
+
+    def _compute_mean_storm_motion(
+        self, cells: list["TrackedStormCell"]
+    ) -> Optional[tuple[float, float]]:
+        """Mean storm motion (direction_deg, speed_kph) across active cells.
+
+        Used to push a single SRV reference vector to the radar renderer.
+        Weighted by severity score so a notable supercell dominates the
+        average over weak embedded cells; falls back to unweighted mean
+        if all scores are zero.  Returns None if no cells have motion yet.
+        """
+        moving = [
+            c for c in cells
+            if c.scan_count > 0
+            and c.motion_speed_kph > 0
+            and c.motion_speed_kph < MAX_STORM_SPEED_KPH
+        ]
+        if not moving:
+            return None
+        weights = [max(1.0, float(c.severity_score)) for c in moving]
+        avg_speed = float(
+            sum(w * c.motion_speed_kph for w, c in zip(weights, moving))
+            / sum(weights)
+        )
+        avg_dir = self._circular_mean(
+            [c.motion_direction_deg for c in moving], weights
+        )
+        return float(avg_dir), avg_speed
 
         return cells or []
 
@@ -297,6 +679,9 @@ class StormTrackingService:
             # Step 3: Match to existing tracked cells
             matched = self._match_cells(raw_cells, timestamp)
 
+            # Step 3b: Phase 3 — TBSS check (hail_indicated is set inside _match_cells)
+            self._check_tbss_signatures(radar, matched)
+
             # Step 4: Detect supercell mesocyclone / TVS rotation
             self._detect_rotation(grid, radar, matched)
 
@@ -312,12 +697,38 @@ class StormTrackingService:
             # Step 4d: Compute vertical structure (top/base/VIL/etc.) from all tilts
             self._compute_cell_structure(radar, matched)
 
+            # Step 4e: Phase 2 — kinematic wind signatures.
+            # Must run after vertical-structure so reflectivity flags are populated,
+            # but before trend computation so these readings enter the snapshot.
+            self._detect_downburst_signatures(radar, matched)
+            self._detect_marc_signatures(radar, matched)
+            self._detect_straight_line_winds(radar, matched)
+
+            # Step 4f: Compute per-scan trend features BEFORE reconciling flags,
+            # so trend data is available to scoring (and to the training JSONL).
+            self._compute_trends(matched, timestamp)
+
+            # Step 4g: Reconcile rotation flags using the best available signal.
+            # Priority (highest → lowest accuracy):
+            #   1. Multi-tilt profile (polar data, multiple elevation angles)
+            #   2. LLSD azimuthal shear (polar data, lowest tilt, direct derivative)
+            #   3. Grid-based couplet (Barnes2-blurred, used only when polar unavailable)
+            # The grid-based detection sets the initial flag but the polar signals
+            # override it here, after they have run.
+            self._reconcile_rotation_flags(matched)
+
             # Step 5: Score each cell (uses both rotation + qlcs_meso flags)
             self._score_cells(matched, timestamp)
+
+            # Step 5b: ML rotation classifier ensemble vote (inert if no model)
+            self._apply_rotation_model(matched)
 
             # Step 6: Classify linear systems (MCS/QLCS/bow echo)
             systems = self._detect_mcs_systems(matched, timestamp)
             self._tracked_systems = {s.system_id: s for s in systems}
+
+            # Step 6b: Phase 2 — Rear-Inflow Jet (requires bow echo from Step 6)
+            self._detect_rear_inflow_jet(radar, matched, systems)
 
             # Step 7: Generate forecast tracks
             self._generate_forecasts(matched)
@@ -337,6 +748,28 @@ class StormTrackingService:
             return float(radar.latitude["data"][0]), float(radar.longitude["data"][0])
         except Exception:
             return None, None
+
+    @staticmethod
+    def _get_nyquist(radar) -> float:
+        """Return the radar's Nyquist velocity in m/s.
+
+        Used to sanity-gate non-dealiased velocity: a single folded gate (e.g.
+        +30 m/s wrapping to -30) creates an apparent 60 m/s ΔV that masquerades
+        as extreme rotation.  Reject any Vrot > NYQ * 0.95 from raw velocity.
+        Falls back to a conservative WSR-88D default if instrument parameters
+        are unavailable.
+        """
+        try:
+            nv = radar.instrument_parameters.get("nyquist_velocity")
+            if nv is not None:
+                data = nv.get("data") if isinstance(nv, dict) else nv["data"]
+                arr = np.asarray(data, dtype=float)
+                arr = arr[~np.isnan(arr)]
+                if arr.size > 0:
+                    return float(np.nanmean(arr))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            pass
+        return 28.0  # Conservative WSR-88D legacy VCP default
 
     def _is_primary_radar_for_cell(
         self, rad_lat: float, rad_lon: float, cell: "TrackedStormCell"
@@ -411,106 +844,172 @@ class StormTrackingService:
             logger.warning(f"Could not extract grid coords: {e}")
 
     def _identify_cells(self, grid) -> list[_InternalCell]:
-        """Identify storm cells using reflectivity thresholding + connected components."""
+        """
+        SCIT multi-threshold feature core extraction (Johnson et al. 1998, WAF §2b).
+
+        The WSR-88D storm series algorithm used a single 30 dBZ threshold, causing
+        all cells in a squall line or cluster to merge into one large component.
+        SCIT fixes this by processing seven thresholds from 60→30 dBZ and applying
+        the core extraction rule:
+
+            If the centroid of a higher-threshold component falls within the area
+            of a lower-threshold component, the lower component is discarded.
+
+        This ensures that each distinct high-dBZ core (e.g., three 50 dBZ cores in
+        a squall line that all merge into one 35 dBZ blob) is tracked individually.
+        Only cells with no higher-threshold "parent" centroid survive each pass.
+
+        Implementation note: we work on the 2D Cartesian grid (single altitude level
+        from pyart.map.grid_from_radars), which is the Cartesian equivalent of SCIT's
+        per-elevation-angle 2D component step.  The 3D vertical association across
+        tilts is handled separately by _compute_cell_structure and _compute_rotation_profile.
+        """
         from scipy import ndimage
 
         if "reflectivity" not in grid.fields:
             return []
 
-        refl = grid.fields["reflectivity"]["data"][0]  # First vertical level
-        refl_filled = np.ma.filled(refl, -999)
+        refl = grid.fields["reflectivity"]["data"][0]
+        refl_filled = np.ma.filled(refl, -999.0).astype(np.float32)
 
-        # Binary threshold
-        binary = refl_filled >= CELL_DETECT_DBZ
-        if not np.any(binary):
-            return []
-
-        # Connected component labeling
-        labeled, num_features = ndimage.label(binary)
-        if num_features == 0:
-            return []
-
-        cells = []
         pixel_area_km2 = self._grid_res_km ** 2
 
-        for label_id in range(1, num_features + 1):
-            mask = labeled == label_id
-            area_km2 = np.sum(mask) * pixel_area_km2
+        # Centroids (y, x) identified at higher thresholds — used for core extraction.
+        # Each entry is the geometric centroid of a component that survived its pass.
+        identified_centroids: list[tuple[int, int]] = []
+        final_cells: list[_InternalCell] = []
 
-            # Filter small cells
-            if area_km2 < CELL_MIN_AREA_KM2:
+        for threshold in SCIT_THRESHOLDS:
+            binary = refl_filled >= threshold
+            if not np.any(binary):
                 continue
 
-            # Find centroid
-            ys, xs = np.where(mask)
-            cy = int(np.mean(ys))
-            cx = int(np.mean(xs))
-
-            # Max reflectivity in cell
-            cell_refl = refl_filled[mask]
-            max_dbz = float(np.nanmax(cell_refl))
-
-            # Get lat/lon using image-aligned coordinate system so that markers
-            # overlay the correct pixel in the Leaflet ImageOverlay.
-            try:
-                lat, lon = self._grid_to_image_latlon(cy, cx)
-            except (IndexError, TypeError, ValueError):
+            labeled, num_features = ndimage.label(binary)
+            if num_features == 0:
                 continue
 
-            # Bounding box
-            bbox = (int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max()))
+            for label_id in range(1, num_features + 1):
+                mask = labeled == label_id
 
-            # Multi-threshold structure analysis
-            dbz_50 = float(np.sum(refl_filled[mask] >= 50) * pixel_area_km2)
-            dbz_55 = float(np.sum(refl_filled[mask] >= 55) * pixel_area_km2)
-            dbz_60 = float(np.sum(refl_filled[mask] >= 60) * pixel_area_km2)
+                # Area filter — rejects sub-pixel noise and AP clutter specks
+                n_pixels = int(np.count_nonzero(mask))
+                area_km2 = n_pixels * pixel_area_km2
+                if area_km2 < CELL_MIN_AREA_KM2:
+                    continue
 
-            cells.append(_InternalCell(
-                centroid_y=cy,
-                centroid_x=cx,
-                lat=lat,
-                lon=lon,
-                max_dbz=max_dbz,
-                area_km2=area_km2,
-                pixel_mask=mask,
-                bbox=bbox,
-                dbz_50_area_km2=dbz_50,
-                dbz_55_area_km2=dbz_55,
-                dbz_60_area_km2=dbz_60,
-            ))
+                ys, xs = np.where(mask)
+                cy = int(round(float(ys.mean())))
+                cx = int(round(float(xs.mean())))
 
-        logger.debug(f"Identified {len(cells)} storm cells")
-        return cells
+                # ── Feature core extraction ───────────────────────────────────
+                # "If the centroid of a higher-reflectivity thresholded component
+                #  falls within the area of a lower-reflectivity thresholded
+                #  component, the latter component is discarded." (Johnson 1998)
+                #
+                # Because we process high→low, `identified_centroids` holds only
+                # centroids from thresholds ABOVE the current one.  A centroid
+                # from a 50 dBZ component will always lie inside the 35 dBZ blob
+                # that surrounds it, so the 35 dBZ blob is correctly discarded.
+                redundant = any(mask[pcy, pcx] for pcy, pcx in identified_centroids)
+                if redundant:
+                    continue
+
+                # This component is a new unique cell at this threshold
+                cell_refl = refl_filled[ys, xs]
+                max_dbz = float(np.nanmax(cell_refl))
+
+                try:
+                    lat, lon = self._grid_to_image_latlon(cy, cx)
+                except (IndexError, TypeError, ValueError):
+                    continue
+
+                bbox = (int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max()))
+
+                # Sub-area statistics used downstream for hail scoring
+                dbz_50_area = float(np.count_nonzero(cell_refl >= 50)) * pixel_area_km2
+                dbz_55_area = float(np.count_nonzero(cell_refl >= 55)) * pixel_area_km2
+                dbz_60_area = float(np.count_nonzero(cell_refl >= 60)) * pixel_area_km2
+
+                final_cells.append(_InternalCell(
+                    centroid_y=cy,
+                    centroid_x=cx,
+                    lat=lat,
+                    lon=lon,
+                    max_dbz=max_dbz,
+                    area_km2=area_km2,
+                    pixel_mask=mask,
+                    bbox=bbox,
+                    dbz_50_area_km2=dbz_50_area,
+                    dbz_55_area_km2=dbz_55_area,
+                    dbz_60_area_km2=dbz_60_area,
+                ))
+                identified_centroids.append((cy, cx))
+
+        logger.debug(
+            f"SCIT identified {len(final_cells)} storm cells "
+            f"across {len(SCIT_THRESHOLDS)} thresholds"
+        )
+        return final_cells
 
     def _analyze_dual_pol(self, grid, radar, cells: list[_InternalCell]):
-        """Analyze dual-pol products within each cell for hail/debris detection."""
-        has_cc = "cross_correlation_ratio" in grid.fields
+        """
+        Analyze dual-pol products within each cell.
+
+        Phase 3 upgrade: in addition to whole-cell mean CC/ZDR (used for the
+        legacy fallback hail check), performs a strict pixel-level co-location
+        test within the Z > 55 dBZ sub-region:
+            CC ∈ [HAIL_STRICT_CC_MIN, HAIL_STRICT_CC_MAX]  AND  |ZDR| ≤ HAIL_STRICT_ZDR_MAX
+        Pixels passing both gates are counted in `cell.hail_core_pixels`.
+        """
+        has_cc  = "cross_correlation_ratio" in grid.fields
         has_zdr = "differential_reflectivity" in grid.fields
+        has_ref = "reflectivity" in grid.fields
 
         if not has_cc and not has_zdr:
             return
 
-        cc_data = None
-        zdr_data = None
+        cc_data   = None
+        zdr_data  = None
+        refl_data = None
         if has_cc:
-            cc_data = np.ma.filled(grid.fields["cross_correlation_ratio"]["data"][0], np.nan)
+            cc_data   = np.ma.filled(grid.fields["cross_correlation_ratio"]["data"][0], np.nan)
         if has_zdr:
-            zdr_data = np.ma.filled(grid.fields["differential_reflectivity"]["data"][0], np.nan)
+            zdr_data  = np.ma.filled(grid.fields["differential_reflectivity"]["data"][0], np.nan)
+        if has_ref:
+            refl_data = np.ma.filled(grid.fields["reflectivity"]["data"][0], np.nan)
 
         for cell in cells:
             mask = cell.pixel_mask
+
+            # ── Whole-cell stats (legacy fallback) ────────────────────────────
             if cc_data is not None:
-                cc_vals = cc_data[mask]
+                cc_vals  = cc_data[mask]
                 cc_valid = cc_vals[~np.isnan(cc_vals)]
                 if len(cc_valid) > 0:
                     cell.mean_cc = float(np.nanmean(cc_valid))
-                    cell.min_cc = float(np.nanmin(cc_valid))
+                    cell.min_cc  = float(np.nanmin(cc_valid))
 
             if zdr_data is not None:
-                zdr_vals = zdr_data[mask]
+                zdr_vals  = zdr_data[mask]
                 zdr_valid = zdr_vals[~np.isnan(zdr_vals)]
                 if len(zdr_valid) > 0:
                     cell.mean_zdr = float(np.nanmean(zdr_valid))
+
+            # ── Phase 3: strict pixel-level co-location inside the Z > 55 sub-region ──
+            # Only possible when all three fields are available.
+            if refl_data is not None and cc_data is not None and zdr_data is not None:
+                high_dbz_mask = mask & (refl_data >= HAIL_REFLECTIVITY_DBZ)
+                if np.any(high_dbz_mask):
+                    cc_core  = cc_data[high_dbz_mask]
+                    zdr_core = zdr_data[high_dbz_mask]
+                    strict   = (
+                        (cc_core  >= HAIL_STRICT_CC_MIN)  &
+                        (cc_core  <= HAIL_STRICT_CC_MAX)  &
+                        (np.abs(zdr_core) <= HAIL_STRICT_ZDR_MAX) &
+                        ~np.isnan(cc_core) &
+                        ~np.isnan(zdr_core)
+                    )
+                    cell.hail_core_pixels = int(np.count_nonzero(strict))
 
     def _match_cells(self, new_cells: list[_InternalCell], timestamp: str) -> list[TrackedStormCell]:
         """Match new cells to existing tracked cells using centroid proximity."""
@@ -669,15 +1168,27 @@ class StormTrackingService:
         else:
             trend = "steady"
 
-        # Hail indicator from dual-pol
+        # Hail indicator from dual-pol (Phase 3 upgrade)
         hail = False
         if new.max_dbz >= HAIL_REFLECTIVITY_DBZ:
-            if new.mean_cc is not None and HAIL_CC_RANGE[0] <= new.mean_cc <= HAIL_CC_RANGE[1]:
+            # Primary path (Phase 3): strict pixel-level co-location of
+            # Z > 55 dBZ  +  |ZDR| ≤ 0.5 dB  +  CC ∈ [0.85, 0.95].
+            # Requires all three dual-pol fields present in the grid.
+            if new.hail_core_pixels >= HAIL_STRICT_MIN_PX:
                 hail = True
-            if new.mean_zdr is not None and abs(new.mean_zdr) <= HAIL_ZDR_THRESHOLD:
+            # Secondary: classic indicators (conjunction, not disjunction, to
+            # reduce false positives from pure-rain high-dBZ cells).
+            elif (
+                new.mean_cc is not None
+                and HAIL_STRICT_CC_MIN <= new.mean_cc <= HAIL_STRICT_CC_MAX
+                and new.mean_zdr is not None
+                and abs(new.mean_zdr) <= HAIL_ZDR_THRESHOLD
+            ):
                 hail = True
+            # Fallback: extreme reflectivity alone is a strong hail proxy
+            # when dual-pol data is unavailable or ambiguous.
             if new.max_dbz >= 60:
-                hail = True  # Very high reflectivity strongly suggests hail
+                hail = True
 
         # Track history
         history = old.track_history.copy()
@@ -702,6 +1213,8 @@ class StormTrackingService:
 
     def _detect_rotation(self, grid, radar, cells: list[TrackedStormCell]):
         """Detect rotation signatures (mesocyclones/TVS) in velocity data."""
+        from scipy.ndimage import uniform_filter
+
         # Check for velocity field
         vel_field = None
         for fname in ["velocity_dealiased", "velocity"]:
@@ -711,6 +1224,14 @@ class StormTrackingService:
 
         if vel_field is None:
             return
+
+        is_dealiased = vel_field == "velocity_dealiased"
+        nyq = self._get_nyquist(radar)
+        if not is_dealiased:
+            logger.debug(
+                f"Grid rotation: using non-dealiased velocity (Nyquist {nyq:.1f} m/s); "
+                "applying aliasing sanity gate"
+            )
 
         vel_data = np.ma.filled(grid.fields[vel_field]["data"][0], np.nan)
         refl_data = None
@@ -759,42 +1280,81 @@ class StormTrackingService:
             if np.sum(valid_mask) < 10:
                 continue
 
-            valid_vel = region_vel[valid_mask]
+            # NaN-aware 3×3 mean smoothing.  median_filter (the previous
+            # approach) does NOT ignore NaNs, so a single missing gate would
+            # propagate through the kernel and contaminate argmax/argmin.
+            # Here we compute mean = Σ(valid · v) / Σ(valid), restricted to
+            # windows where at least 5 of 9 neighbours are valid.
+            vel_zeroed = np.where(valid_mask, region_vel, 0.0).astype(np.float32)
+            mask_f = valid_mask.astype(np.float32)
+            count = uniform_filter(mask_f, size=3, mode="constant", cval=0.0)
+            sum_smooth = uniform_filter(vel_zeroed, size=3, mode="constant", cval=0.0)
+            smoothed_vel = np.full_like(vel_zeroed, np.nan, dtype=np.float32)
+            np.divide(
+                sum_smooth, count,
+                out=smoothed_vel,
+                where=count >= (5.0 / 9.0) - 1e-6,
+            )
 
-            # Outlier rejection (Tukey IQR method): a single aliased or
-            # range-folded gate at ±50 m/s can fake a 33 m/s "meso" by
-            # inflating the region max/min.  Remove gates beyond Q1−1.5·IQR
-            # and Q3+1.5·IQR before computing the couplet.
-            q1, q3 = np.percentile(valid_vel, 25), np.percentile(valid_vel, 75)
-            iqr = q3 - q1
-            if iqr > 0:
-                lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-                valid_vel = valid_vel[(valid_vel >= lo) & (valid_vel <= hi)]
-            if len(valid_vel) < 5:
+            if np.all(np.isnan(smoothed_vel)):
                 continue
 
-            # Find velocity couplet: max inbound (negative) and outbound (positive)
-            max_outbound = float(np.nanmax(valid_vel))
-            max_inbound = float(np.nanmin(valid_vel))
+            # Find extrema on the smoothed field
+            max_outbound = float(np.nanmax(smoothed_vel))
+            max_inbound  = float(np.nanmin(smoothed_vel))
 
             # Rotational velocity = (outbound - inbound) / 2
             rot_velocity = (max_outbound - max_inbound) / 2
 
+            # Aliasing sanity gate: a single folded gate produces an apparent
+            # ΔV of ~2·Nyquist.  When using raw (non-dealiased) velocity,
+            # reject Vrot beyond 0.95·Nyquist — physically real rotation that
+            # strong should arrive on the dealiased product.
+            if not is_dealiased and rot_velocity > nyq * 0.95:
+                logger.debug(
+                    f"Rotation rejected for {cell.cell_id}: Vrot={rot_velocity:.1f} m/s "
+                    f"near Nyquist ({nyq:.1f} m/s) on non-dealiased velocity — likely aliased"
+                )
+                continue
+
             # Check couplet diameter (distance between max inbound and outbound)
             if rot_velocity >= MESO_VELOCITY_THRESHOLD_MS:
                 outbound_pos = np.unravel_index(
-                    np.nanargmax(region_vel), region_vel.shape
+                    np.nanargmax(smoothed_vel), smoothed_vel.shape
                 )
                 inbound_pos = np.unravel_index(
-                    np.nanargmin(region_vel), region_vel.shape
+                    np.nanargmin(smoothed_vel), smoothed_vel.shape
                 )
-                couplet_dist_km = (
-                    math.sqrt(
-                        (outbound_pos[0] - inbound_pos[0]) ** 2
-                        + (outbound_pos[1] - inbound_pos[1]) ** 2
+                couplet_dist_px = math.sqrt(
+                    (outbound_pos[0] - inbound_pos[0]) ** 2
+                    + (outbound_pos[1] - inbound_pos[1]) ** 2
+                )
+                couplet_dist_km = couplet_dist_px * self._grid_res_km
+
+                # Minimum separation: a 1-pixel pair on adjacent gates is
+                # almost always noise, not a real couplet.
+                if couplet_dist_px < 2.0:
+                    continue
+
+                # Straddling check: the in/out extrema must be on OPPOSITE
+                # sides of the cell centroid.  Compute the midpoint of the
+                # extrema and require it lies within 40% of the couplet
+                # length from the cell centre.  Without this check, a pair
+                # of inbound + outbound peaks on the same flank (e.g. a
+                # sheared inflow notch) is mis-flagged as a meso.
+                center_y = cy - y_min
+                center_x = cx - x_min
+                mid_y = (outbound_pos[0] + inbound_pos[0]) / 2.0
+                mid_x = (outbound_pos[1] + inbound_pos[1]) / 2.0
+                mid_offset = math.sqrt(
+                    (mid_y - center_y) ** 2 + (mid_x - center_x) ** 2
+                )
+                if mid_offset > 0.4 * couplet_dist_px:
+                    logger.debug(
+                        f"Couplet rejected for {cell.cell_id}: extrema on same side of cell "
+                        f"(midpoint offset {mid_offset:.1f} px > 0.4 × couplet {couplet_dist_px:.1f} px)"
                     )
-                    * self._grid_res_km
-                )
+                    continue
 
                 if couplet_dist_km <= MESO_MAX_DIAMETER_KM:
                     cell.rotation_detected = True
@@ -804,37 +1364,24 @@ class StormTrackingService:
                     if rot_velocity >= TVS_VELOCITY_THRESHOLD_MS:
                         cell.tvs_detected = True
 
-                    # Debris signature check (NWS dual-pol TDS criteria):
-                    #   1. CC < 0.80 in the rotation region
+                    # Debris signature check — NWS dual-pol TDS criteria:
+                    #   1. CC < DEBRIS_CC_THRESHOLD and Z ≥ TDS_MIN_REFL_DBZ, co-located
                     #   2. Rotation ≥ TDS_MIN_ROTATION_MS (strong circulation required)
-                    #   3. Z ≥ TDS_MIN_REFL_DBZ in the same region (scatterers present)
-                    #   4. Beam height ≤ TDS_MAX_BEAM_HEIGHT_KM (near-surface beam)
-                    # A plain rain cell can have a weak couplet + slightly reduced CC
-                    # from ice aloft; that is NOT a TDS.  A hail core has low CC but
-                    # no rotation; that is also NOT a TDS.
-                    if cc_data is not None:
-                        rot_cc = cc_data[y_min:y_max, x_min:x_max]
-                        rot_cc_valid = rot_cc[~np.isnan(rot_cc)]
-                        if len(rot_cc_valid) > 0:
-                            min_cc = float(np.nanmin(rot_cc_valid))
+                    #   3. Beam height ≤ TDS_MAX_BEAM_HEIGHT_KM (near-surface beam)
+                    #   4. (Phase 3) TDS visible on ≥ TDS_MIN_TILT_COUNT successive
+                    #      low-level tilts — rules out clutter and roost scatter
+                    if cc_data is not None and refl_data is not None:
+                        rot_cc   = cc_data[y_min:y_max, x_min:x_max]
+                        rot_refl = refl_data[y_min:y_max, x_min:x_max]
+
+                        tds_mask = (rot_cc < DEBRIS_CC_THRESHOLD) & (rot_refl >= TDS_MIN_REFL_DBZ)
+                        if np.sum(tds_mask) >= 3:
                             rot_vel_for_tds = cell.rotation_velocity_ms or 0.0
-                            tds_candidate = (
-                                min_cc < DEBRIS_CC_THRESHOLD
-                                and rot_vel_for_tds >= TDS_MIN_ROTATION_MS
-                            )
-                            if tds_candidate:
-                                tds_allowed = True
+                            if rot_vel_for_tds >= TDS_MIN_ROTATION_MS:
+                                tds_candidate = True
 
-                                # Check minimum reflectivity in the region
-                                if refl_data is not None:
-                                    rot_refl = refl_data[y_min:y_max, x_min:x_max]
-                                    rot_refl_valid = rot_refl[~np.isnan(rot_refl)]
-                                    if len(rot_refl_valid) > 0:
-                                        if float(np.nanmax(rot_refl_valid)) < TDS_MIN_REFL_DBZ:
-                                            tds_allowed = False
-
-                                # Beam height guard
-                                if tds_allowed and rad_lat is not None:
+                                # Beam height guard (unchanged)
+                                if rad_lat is not None:
                                     try:
                                         dist_km, _ = self._latlon_to_polar(
                                             rad_lat, rad_lon, cell.lat, cell.lon
@@ -846,18 +1393,32 @@ class StormTrackingService:
                                             + r_m ** 2 / (2.0 * k_r * R_e)
                                         ) / 1000.0
                                         if h_km > TDS_MAX_BEAM_HEIGHT_KM:
-                                            tds_allowed = False
+                                            tds_candidate = False
                                             logger.debug(
                                                 f"TDS suppressed for {cell.cell_id}: "
                                                 f"lowest beam at {h_km:.2f} km AGL "
-                                                f"(>{TDS_MAX_BEAM_HEIGHT_KM} km) "
-                                                f"at {dist_km:.0f} km range"
+                                                f"(>{TDS_MAX_BEAM_HEIGHT_KM} km)"
                                             )
                                     except Exception:
                                         pass
 
-                                if tds_allowed:
-                                    cell.debris_signature = True
+                                if tds_candidate:
+                                    # Phase 3: multi-tilt depth / continuity check.
+                                    # Requires the low-CC / high-Z signature on ≥ 2
+                                    # successive low tilts; single-tilt matches are
+                                    # too easily caused by ground clutter or birds.
+                                    tilt_count = self._count_tds_tilts(
+                                        radar, cell, rad_lat, rad_lon
+                                    )
+                                    cell.tds_tilt_count = tilt_count
+                                    if tilt_count >= TDS_MIN_TILT_COUNT:
+                                        cell.debris_signature = True
+                                    else:
+                                        logger.debug(
+                                            f"TDS rejected for {cell.cell_id}: "
+                                            f"{tilt_count} confirming tilts "
+                                            f"(need ≥ {TDS_MIN_TILT_COUNT})"
+                                        )
                 else:
                     cell.rotation_detected = False
                     cell.rotation_velocity_ms = None
@@ -879,6 +1440,9 @@ class StormTrackingService:
                 break
         if vel_field is None:
             return
+
+        is_dealiased = vel_field == "velocity_dealiased"
+        nyq = self._get_nyquist(radar)
 
         vel_data = np.ma.filled(grid.fields[vel_field]["data"][0], np.nan)
 
@@ -925,6 +1489,14 @@ class StormTrackingService:
             if rot_vel < QLCS_MESO_VELOCITY_MS:
                 continue
 
+            # Aliasing sanity gate (raw velocity only)
+            if not is_dealiased and rot_vel > nyq * 0.95:
+                logger.debug(
+                    f"QLCS rotation rejected for {cell.cell_id}: Vrot={rot_vel:.1f} m/s "
+                    f"near Nyquist ({nyq:.1f} m/s) on non-dealiased velocity"
+                )
+                continue
+
             # Check couplet diameter
             out_pos = np.unravel_index(np.nanargmax(region), region.shape)
             in_pos  = np.unravel_index(np.nanargmin(region), region.shape)
@@ -960,6 +1532,7 @@ class StormTrackingService:
             cell.llsd_rotation_detected = False
             cell.llsd_max_shear = None
             cell.llsd_elevation_deg = None
+            cell.llsd_diagnostic = None
 
         # Find the lowest sweep that has velocity data
         vel_key = None
@@ -968,19 +1541,43 @@ class StormTrackingService:
                 vel_key = k
                 break
         if vel_key is None:
+            for cell in cells:
+                cell.llsd_diagnostic = "no velocity field in radar"
             return
+
+        is_dealiased = vel_key == "velocity_dealiased"
+        nyq = self._get_nyquist(radar)
 
         try:
             fixed_angles = radar.fixed_angle["data"]
         except Exception:
             return
 
-        # Pick the sweep with the smallest elevation ≤ LLSD_MAX_ELEVATION_DEG
-        candidate_sweeps = [
-            (i, float(a)) for i, a in enumerate(fixed_angles)
-            if float(a) <= LLSD_MAX_ELEVATION_DEG
-        ]
+        # Pick the lowest sweep that ACTUALLY HAS velocity data.  Modern NEXRAD
+        # VCPs interleave surveillance (reflectivity-only) and Doppler
+        # (velocity) cuts at the same elevation — sweep 0 is typically the
+        # 0.5° surveillance scan with no velocity, and sweep 1 is the matching
+        # 0.5° Doppler.  Selecting by elevation alone lands on the surveillance
+        # sweep, where the velocity field is fully masked and LLSD silently
+        # bails for every cell.  This filter requires meaningful velocity
+        # coverage before considering a sweep.
+        candidate_sweeps: list[tuple[int, float]] = []
+        for i in range(len(fixed_angles)):
+            elev_i = float(fixed_angles[i])
+            if elev_i > LLSD_MAX_ELEVATION_DEG:
+                continue
+            try:
+                s0 = int(radar.sweep_start_ray_index["data"][i])
+                s1 = int(radar.sweep_end_ray_index["data"][i])
+            except Exception:
+                continue
+            sweep_vel = radar.fields[vel_key]["data"][s0:s1 + 1]
+            n_valid = int(np.count_nonzero(~np.ma.getmaskarray(sweep_vel)))
+            if n_valid >= 500:  # arbitrary minimum; well below 1 full ray
+                candidate_sweeps.append((i, elev_i))
         if not candidate_sweeps:
+            for cell in cells:
+                cell.llsd_diagnostic = "no velocity sweep ≤ 1.2° with valid data"
             return
         sweep_idx, sweep_elev = min(candidate_sweeps, key=lambda x: x[1])
 
@@ -1016,6 +1613,13 @@ class StormTrackingService:
         dn = np.roll(vel, k, axis=0)
         dV = up - dn  # m/s
 
+        # Aliasing sanity gate: a single folded gate creates |dV| ≈ 2·Nyquist.
+        # When using raw (non-dealiased) velocity, mask gates where |dV| >
+        # 1.5·Nyquist — that's beyond any physically plausible azimuthal
+        # velocity gradient and indicates one side has wrapped.
+        if not is_dealiased:
+            dV = np.where(np.abs(dV) > nyq * 1.5, np.nan, dV)
+
         # Mean Δaz between up/down rays (degrees → radians), per row
         az_up = np.roll(azimuths, -k)
         az_dn = np.roll(azimuths, k)
@@ -1040,9 +1644,14 @@ class StormTrackingService:
                 rad_lat, rad_lon, cell.lat, cell.lon
             )
             dist_m = dist_km * 1000.0
-            if dist_m < 5_000 or dist_m > float(ranges_m[-1]):
+            if dist_m < 5_000:
+                cell.llsd_diagnostic = f"too close to radar ({dist_km:.0f} km < 5 km)"
                 continue
-            # Voronoi: only analyse cells owned by this radar
+            if dist_m > float(ranges_m[-1]):
+                cell.llsd_diagnostic = f"beyond Doppler range ({dist_km:.0f} km > {ranges_m[-1]/1000:.0f} km)"
+                continue
+            # Voronoi: only analyse cells owned by this radar.  Don't set a
+            # diagnostic here — another radar is responsible for this cell.
             if not self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
                 continue
 
@@ -1076,11 +1685,13 @@ class StormTrackingService:
 
             window = shear[np.ix_(ray_indices, np.arange(g_lo, g_hi))]
             if window.size == 0 or np.all(np.isnan(window)):
+                cell.llsd_diagnostic = "no valid velocity in 4 km window"
                 continue
 
             peak = float(np.nanmax(np.abs(window)))
             cell.llsd_max_shear = round(peak, 5)
             cell.llsd_elevation_deg = round(sweep_elev, 2)
+            cell.llsd_diagnostic = None  # successful run
             if peak >= LLSD_MESO_SHEAR:
                 cell.llsd_rotation_detected = True
 
@@ -1105,6 +1716,9 @@ class StormTrackingService:
         if vel_key is None:
             return
 
+        is_dealiased = vel_key == "velocity_dealiased"
+        nyq = self._get_nyquist(radar)
+
         try:
             rad_lat = float(radar.latitude["data"][0])
             rad_lon = float(radar.longitude["data"][0])
@@ -1127,7 +1741,9 @@ class StormTrackingService:
             cell.max_rot_velocity_ms = None
             cell.max_rot_height_km = None
             cell.rotation_depth_km = None
+            cell.rotation_base_km = None
             cell.rotation_profile = []
+        nyq_cap = nyq * 0.95
 
         # Candidate sweeps (low → mid level)
         candidate_sweeps = [
@@ -1191,6 +1807,15 @@ class StormTrackingService:
                 v_out = float(np.nanmax(valid))
                 v_in = float(np.nanmin(valid))
                 rot_vel = (v_out - v_in) / 2.0
+
+                # Aliasing sanity gate per-tilt
+                if not is_dealiased and rot_vel > nyq_cap:
+                    logger.debug(
+                        f"Profile tilt {elev_deg:.1f}° skipped for {cell.cell_id}: "
+                        f"Vrot={rot_vel:.1f} m/s near Nyquist ({nyq:.1f} m/s)"
+                    )
+                    continue
+
                 h_km = beam_height_km(dist_m, elev_deg)
                 profile.append({
                     "height_km": round(h_km, 2),
@@ -1210,6 +1835,9 @@ class StormTrackingService:
                     cell.max_rot_height_km = round(peak_height, 1)
             if meso_heights:
                 cell.rotation_depth_km = round(max(meso_heights) - min(meso_heights), 1)
+                # Lowest tilt with ≥ meso-class rotation — key for low-level
+                # vs mid-level classification.
+                cell.rotation_base_km = round(min(meso_heights), 2)
 
     def _compute_cell_structure(self, radar, cells: list[TrackedStormCell]):
         """
@@ -1249,6 +1877,18 @@ class StormTrackingService:
 
         # Sort sweeps ascending by elevation so profile is bottom-up
         sweep_order = sorted(range(n_sweeps), key=lambda i: float(fixed_angles[i]))
+
+        # Reset BWER + MESH fields per scan (Voronoi-gated so cells owned by
+        # another active radar keep that radar's detection).
+        for cell in cells:
+            if self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                cell.bwer_detected = False
+                cell.bwer_overhang_dbz = None
+                cell.mesh_mm = None
+                cell.shi_value = None
+
+        freezing_level_km = float(self._freezing_level_km)
+        minus_20c_km      = freezing_level_km + MESH_MINUS_20C_DELTA_KM
 
         for cell in cells:
             if cell.scan_count < 0:
@@ -1346,6 +1986,77 @@ class StormTrackingService:
                 vil = float(np.sum(avg_m * dh))
                 if np.isfinite(vil) and vil >= 0:
                     cell.vil_kg_m2 = round(vil, 1)
+
+            # --- BWER (Bounded Weak Echo Region) ---
+            # Search the column for a weak-echo "notch" (Z ≤ BWER_WEAK_DBZ) at
+            # mid-levels (3–8 km AGL) bounded above by strong overhang (Z ≥
+            # BWER_OVERHANG_DBZ) and below by moderate echo (Z ≥ BWER_BELOW_DBZ).
+            # Classic signature of a tilted supercell updraft.
+            if valid.sum() >= 3:
+                h_v = heights_arr[valid]
+                z_v = refls_arr[valid]
+                weak_band = (
+                    (z_v <= BWER_WEAK_DBZ)
+                    & (h_v >= BWER_MIN_WEAK_HEIGHT_KM)
+                    & (h_v <= BWER_MAX_WEAK_HEIGHT_KM)
+                )
+                if np.any(weak_band):
+                    weak_top = float(np.nanmax(h_v[weak_band]))
+                    weak_bot = float(np.nanmin(h_v[weak_band]))
+                    # Strong overhang above (≥ BWER_MIN_OVERHANG_KM separation)
+                    above_mask = h_v >= (weak_top + BWER_MIN_OVERHANG_KM)
+                    below_mask = h_v <= weak_bot
+                    if np.any(above_mask) and np.any(below_mask):
+                        z_above = float(np.nanmax(z_v[above_mask]))
+                        z_below = float(np.nanmax(z_v[below_mask]))
+                        if (z_above >= BWER_OVERHANG_DBZ
+                                and z_below >= BWER_BELOW_DBZ):
+                            cell.bwer_detected = True
+                            cell.bwer_overhang_dbz = round(z_above, 1)
+
+            # --- MESH / SHI (Maximum Estimated Size of Hail) ---
+            # Witt et al. 1998 Severe Hail Index.  Integrate hail kinetic
+            # energy flux above the freezing level, weighted by temperature
+            # band (full weight above −20°C, ramping from 0 at the 0°C level).
+            # E(Z) ≈ 5e-6 · 10^(0.084·Z) · W_T(Z),   MESH = 2.54·SHI^0.5  (mm)
+            if valid.sum() >= 2:
+                h_v = heights_arr[valid]
+                z_v = refls_arr[valid]
+
+                # Sort ascending for integration
+                order = np.argsort(h_v)
+                h_v = h_v[order]
+                z_v = z_v[order]
+
+                # Only integrate the portion above the freezing level
+                above_fl = h_v >= freezing_level_km
+                if np.sum(above_fl) >= 2:
+                    h_int = h_v[above_fl] * 1000.0  # metres
+                    z_int = np.clip(z_v[above_fl], 0.0, 75.0)  # cap for stability
+
+                    # Temperature weighting: 0 at freezing level, 1 at −20°C
+                    span = max(minus_20c_km - freezing_level_km, 0.1)
+                    w_t = np.clip(
+                        (h_v[above_fl] - freezing_level_km) / span, 0.0, 1.0
+                    )
+
+                    # Z weighting: 0 below MESH_Z_LOWER_DBZ, 1 above MESH_Z_UPPER
+                    w_z = np.clip(
+                        (z_int - MESH_Z_LOWER_DBZ)
+                        / max(MESH_Z_UPPER_DBZ - MESH_Z_LOWER_DBZ, 0.1),
+                        0.0, 1.0,
+                    )
+
+                    # Hail kinetic energy flux (Witt 1998)
+                    e_flux = 5.0e-6 * np.power(10.0, 0.084 * z_int) * w_z * w_t
+                    # SHI = 0.1 · ∫ e_flux dh (trapezoidal)
+                    dh_int = np.diff(h_int)
+                    avg_e  = 0.5 * (e_flux[:-1] + e_flux[1:])
+                    shi    = 0.1 * float(np.sum(avg_e * dh_int))
+                    if np.isfinite(shi) and shi > 0:
+                        mesh   = MESH_SHI_TO_MM_COEFF * math.sqrt(shi)
+                        cell.shi_value = round(shi, 1)
+                        cell.mesh_mm   = round(mesh, 1)
 
     @staticmethod
     def _latlon_to_polar(
@@ -1578,34 +2289,1012 @@ class StormTrackingService:
         south_rot = south_cell.rotation_detected or south_cell.qlcs_meso_detected
         return north_rot or south_rot
 
+    def _compute_trends(self, cells: list[TrackedStormCell], timestamp: str):
+        """Append the current scan's key features to each cell's history and
+        compute slope (per-scan rate of change) over the last TREND_WINDOW_SCANS.
+
+        Using a linear regression slope (rather than just current − previous)
+        gives a more stable estimate when scan timing is slightly irregular.
+        Pre-alert detection relies heavily on these trends — a storm going from
+        0 to 15 m/s rotation in 3 scans is far more dangerous than one that has
+        been steady at 12 m/s for 20 minutes.
+        """
+        for cell in cells:
+            if cell.scan_count < 0:
+                continue
+
+            # Append current snapshot
+            snap = {
+                "ts":         timestamp,
+                "llsd_shear": cell.llsd_max_shear,
+                "rot_vel":    cell.max_rot_velocity_ms,
+                "vil":        cell.vil_kg_m2,
+                "echo_top":   cell.cell_top_km,
+                "dbz":        cell.max_reflectivity_dbz,
+                "severity":   cell.severity_score,
+            }
+            cell.feature_history.append(snap)
+            if len(cell.feature_history) > TREND_HISTORY_MAX:
+                cell.feature_history = cell.feature_history[-TREND_HISTORY_MAX:]
+
+            n = min(len(cell.feature_history), TREND_WINDOW_SCANS)
+            if n < 2:
+                continue
+            recent = cell.feature_history[-n:]
+            x = list(range(n))  # [0, 1, 2] — scan index
+
+            # Linear least-squares slope for each field
+            def _slope(field: str) -> Optional[float]:
+                vals = [r[field] for r in recent if r[field] is not None]
+                if len(vals) < 2:
+                    return None
+                # Align x to the available samples (some may be None)
+                xi = [i for i, r in enumerate(recent) if r[field] is not None]
+                n_ = len(vals)
+                x_mean = sum(xi) / n_
+                y_mean = sum(vals) / n_
+                ss_xx = sum((xi_ - x_mean) ** 2 for xi_ in xi)
+                ss_xy = sum((xi_ - x_mean) * (y_ - y_mean)
+                            for xi_, y_ in zip(xi, vals))
+                if ss_xx == 0:
+                    return None
+                return round(ss_xy / ss_xx, 5)
+
+            cell.llsd_trend      = _slope("llsd_shear")
+            cell.rot_vel_trend   = _slope("rot_vel")
+            cell.vil_trend       = _slope("vil")
+            cell.echo_top_trend  = _slope("echo_top")
+            cell.dbz_trend       = _slope("dbz")
+
+    def _reconcile_rotation_flags(self, cells: list[TrackedStormCell]):
+        """Promote the best available rotation signal to the primary flags.
+
+        The analysis pipeline runs three rotation detectors in order:
+          1. Grid-based couplet  (_detect_rotation)       — noisy, Barnes2-blurred
+          2. LLSD azimuthal shear (_detect_llsd_rotation) — better, polar, lowest tilt
+          3. Multi-tilt profile  (_compute_rotation_profile) — best, polar, all tilts
+
+        Grid results are set first, but (3) and (2) are more physically accurate.
+        This method runs after all three and uses the strongest reliable signal.
+
+        Rules:
+        - If multi-tilt profile shows rotation ≥ MESO threshold → confirm rotation
+        - If multi-tilt profile explicitly shows < 80 % of threshold → clear grid flag
+        - LLSD ≥ MESO threshold alone is enough to confirm if profile is absent
+        - TVS is set only when multi-tilt peak or grid couplet (after outlier rejection)
+          meets the TVS threshold
+        """
+        for cell in cells:
+            if cell.scan_count < 0:
+                continue
+
+            # ── Multi-tilt profile (most authoritative) ───────────────────
+            profile_vel = cell.max_rot_velocity_ms  # peak across all tilts
+            if profile_vel is not None and profile_vel > 0:
+                if profile_vel >= MESO_VELOCITY_THRESHOLD_MS:
+                    peak_h  = cell.max_rot_height_km   # km AGL where peak rot occurs
+                    depth   = cell.rotation_depth_km    # km of vertical rotation extent
+
+                    # Height guard: rotation only above 8 km AGL is anvil-level
+                    # divergence or outflow, not a mesocyclone.
+                    too_high = (peak_h is not None and peak_h > MESO_MAX_CONFIRM_HEIGHT_KM)
+
+                    # Depth guard: 0 km means only a single tilt exceeded the
+                    # threshold — not enough vertical extent for a real meso.
+                    # LLSD confirmation can substitute (low-level surface shear).
+                    single_tilt = (depth is None or depth < MESO_MIN_DEPTH_FOR_CONFIRM_KM)
+                    llsd_ok = cell.llsd_rotation_detected
+
+                    if too_high:
+                        # Definitively not a mesocyclone — clear without mercy.
+                        if not llsd_ok:
+                            cell.rotation_detected = False
+                            cell.rotation_velocity_ms = None
+                            cell.tvs_detected = False
+                            logger.debug(
+                                f"Rotation cleared for {cell.cell_id}: "
+                                f"peak at {peak_h:.1f} km AGL > "
+                                f"{MESO_MAX_CONFIRM_HEIGHT_KM} km (anvil/outflow)"
+                            )
+                    elif single_tilt and not llsd_ok:
+                        # Single-tilt, low altitude, no LLSD — uncertain.
+                        # Don't promote, but don't clear either; keep grid result.
+                        pass
+                    else:
+                        # Multi-tilt OR LLSD-confirmed AND below height cap → real meso
+                        cell.rotation_detected = True
+                        cell.rotation_velocity_ms = round(profile_vel, 1)
+                        cell.tvs_detected = profile_vel >= TVS_VELOCITY_THRESHOLD_MS
+
+                elif profile_vel < MESO_VELOCITY_THRESHOLD_MS * 0.8:
+                    # Profile clearly below threshold — override any grid false positive
+                    # unless LLSD independently confirms it
+                    if not cell.llsd_rotation_detected:
+                        cell.rotation_detected = False
+                        cell.rotation_velocity_ms = None
+                        cell.tvs_detected = False
+                # If profile is in the 80–100 % grey zone, keep whatever the grid said
+
+            # ── LLSD (secondary; better than grid alone) ──────────────────
+            # If the profile didn't find rotation but LLSD at the surface confirms
+            # meso-class shear, trust that over the grid couplet.
+            elif cell.llsd_rotation_detected:
+                # LLSD meso-class shear confirmed; approximate Vrot from shear
+                # using a nominal couplet half-width of 2 km:  Vrot = shear × 2000 m
+                if cell.llsd_max_shear is not None:
+                    approx_vel = cell.llsd_max_shear * 2_000.0  # m/s
+                    if approx_vel >= MESO_VELOCITY_THRESHOLD_MS:
+                        cell.rotation_detected = True
+                        # Only override rotation_velocity_ms if the profile gave nothing
+                        if cell.rotation_velocity_ms is None:
+                            cell.rotation_velocity_ms = round(approx_vel, 1)
+                        cell.tvs_detected = (
+                            cell.tvs_detected
+                            or approx_vel >= TVS_VELOCITY_THRESHOLD_MS
+                        )
+
+            # ── Altitude classification ───────────────────────────────────
+            # Tornadogenesis correlates with rotation reaching the boundary
+            # layer; mid-level rotation alone is a normal supercell trait.
+            # A deep meso column can be both low- and mid-level.
+            if cell.rotation_detected:
+                base_h = cell.rotation_base_km
+                peak_h = cell.max_rot_height_km
+
+                cell.low_level_meso_detected = (
+                    cell.llsd_rotation_detected
+                    or (base_h is not None and base_h <= LOW_LEVEL_MESO_MAX_HEIGHT_KM)
+                )
+
+                # Mid-level: any portion of the rotation column sits in 2–6 km.
+                # Use both the peak height and the column extent so a meso
+                # whose peak is at 4 km AGL with a base at 1 km counts as
+                # both low- and mid-level (correctly, for a tornadic supercell).
+                mid_top    = cell.rotation_depth_km is not None and base_h is not None and (base_h + cell.rotation_depth_km) > LOW_LEVEL_MESO_MAX_HEIGHT_KM
+                peak_in_mid = (
+                    peak_h is not None
+                    and LOW_LEVEL_MESO_MAX_HEIGHT_KM < peak_h <= MID_LEVEL_MESO_MAX_HEIGHT_KM
+                )
+                cell.mid_level_meso_detected = bool(peak_in_mid or mid_top)
+            else:
+                cell.low_level_meso_detected = False
+                cell.mid_level_meso_detected = False
+
+    # =========================================================================
+    # Phase 3 — Enhanced Dual-Pol Detectors
+    # =========================================================================
+
+    def _count_tds_tilts(
+        self, radar, cell: "TrackedStormCell", rad_lat: float, rad_lon: float
+    ) -> int:
+        """
+        Count consecutive low-level tilts where the TDS signature is confirmed on
+        polar data: CC < DEBRIS_CC_THRESHOLD AND Z ≥ TDS_MIN_REFL_DBZ at the cell
+        location, with the beam centre ≤ TDS_MAX_TILT_HEIGHT_KM AGL.
+
+        Returns the count; caller compares against TDS_MIN_TILT_COUNT.
+        """
+        if "reflectivity" not in radar.fields or "cross_correlation_ratio" not in radar.fields:
+            return 0
+
+        try:
+            ranges_m     = np.asarray(radar.range["data"], dtype=float)
+            fixed_angles = radar.fixed_angle["data"]
+            n_sweeps     = len(fixed_angles)
+        except Exception:
+            return 0
+
+        R_e, k_r = 6_371_000.0, 4.0 / 3.0
+
+        dist_km, bearing_deg = self._latlon_to_polar(rad_lat, rad_lon, cell.lat, cell.lon)
+        dist_m = dist_km * 1_000.0
+        if dist_m < 2_000 or dist_m > float(ranges_m[-1]):
+            return 0
+
+        gate_spacing_m = float(ranges_m[1] - ranges_m[0]) if len(ranges_m) > 1 else 250.0
+        g_idx  = int(np.searchsorted(ranges_m, dist_m))
+        g_idx  = max(0, min(len(ranges_m) - 1, g_idx))
+        half_g = max(2, int(3_000.0 / gate_spacing_m))  # ±3 km search window
+
+        confirm_count = 0
+
+        for sw in range(n_sweeps):
+            elev_deg = float(fixed_angles[sw])
+            elev_rad = math.radians(elev_deg)
+            h_km     = (
+                dist_m * math.sin(elev_rad) + dist_m ** 2 / (2.0 * k_r * R_e)
+            ) / 1_000.0
+
+            if h_km > TDS_MAX_TILT_HEIGHT_KM:
+                continue  # Beam is above the debris column ceiling
+
+            try:
+                ss = int(radar.sweep_start_ray_index["data"][sw])
+                se = int(radar.sweep_end_ray_index["data"][sw])
+            except Exception:
+                continue
+
+            az   = np.asarray(radar.azimuth["data"][ss:se + 1], dtype=float)
+            refl = np.ma.filled(radar.fields["reflectivity"]["data"][ss:se + 1], np.nan)
+            cc   = np.ma.filled(
+                radar.fields["cross_correlation_ratio"]["data"][ss:se + 1], np.nan
+            )
+            if refl.shape[0] < 2:
+                continue
+
+            diffs = (az - bearing_deg + 540.0) % 360.0 - 180.0
+            r_idx = int(np.argmin(np.abs(diffs)))
+            r_lo  = max(0, r_idx - 1)
+            r_hi  = min(refl.shape[0], r_idx + 2)
+            g_lo  = max(0, g_idx - half_g)
+            g_hi  = min(refl.shape[1], g_idx + half_g + 1)
+
+            refl_w = refl[r_lo:r_hi, g_lo:g_hi]
+            cc_w   = cc[r_lo:r_hi, g_lo:g_hi]
+
+            if refl_w.size == 0:
+                continue
+
+            tds_px = (
+                (cc_w < DEBRIS_CC_THRESHOLD)
+                & (refl_w >= TDS_MIN_REFL_DBZ)
+                & ~np.isnan(cc_w)
+                & ~np.isnan(refl_w)
+            )
+            if int(np.count_nonzero(tds_px)) >= 2:
+                confirm_count += 1
+
+        return confirm_count
+
+    def _check_tbss_signatures(self, radar, cells: list["TrackedStormCell"]):
+        """
+        Detect Three-Body Scatter Spikes (TBSS) behind confirmed hail cores.
+
+        Physics: radar energy → hail → ground → hail → radar.  The extra ground-
+        bounce path adds ≈ 2× the hail range of travel time, so the return appears
+        at 1.3–2× the hail's true range on the same azimuth, with moderate
+        reflectivity (TBSS_SPIKE_DBZ_MIN–MAX) and anomalously low CC.
+
+        Only evaluated for cells where `hail_indicated = True` and range exceeds
+        TBSS_MIN_RANGE_KM (< 40 km, the spike would fall within or near the storm
+        and be indistinguishable from real echoes).
+        """
+        if radar is None:
+            return
+        if "reflectivity" not in radar.fields:
+            return
+
+        has_cc = "cross_correlation_ratio" in radar.fields
+
+        try:
+            rad_lat      = float(radar.latitude["data"][0])
+            rad_lon      = float(radar.longitude["data"][0])
+            ranges_m     = np.asarray(radar.range["data"], dtype=float)
+            fixed_angles = radar.fixed_angle["data"]
+        except Exception:
+            return
+
+        # Voronoi-gated reset: only clear flags for cells whose primary radar
+        # is THIS one. Cells owned by another active radar keep the flag set
+        # by that radar's last analysis.
+        for cell in cells:
+            if self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                cell.tbss_detected = False
+
+        # Lowest tilt ≤ 1.5° — TBSS is most pronounced at the lowest elevation
+        candidates = [
+            (i, float(a)) for i, a in enumerate(fixed_angles) if float(a) <= 1.5
+        ]
+        if not candidates:
+            return
+        sweep_idx, _ = min(candidates, key=lambda x: x[1])
+
+        try:
+            ss = int(radar.sweep_start_ray_index["data"][sweep_idx])
+            se = int(radar.sweep_end_ray_index["data"][sweep_idx])
+        except Exception:
+            return
+
+        azimuths = np.asarray(radar.azimuth["data"][ss:se + 1], dtype=float)
+        refl     = np.ma.filled(radar.fields["reflectivity"]["data"][ss:se + 1], np.nan)
+        cc       = (
+            np.ma.filled(
+                radar.fields["cross_correlation_ratio"]["data"][ss:se + 1], np.nan
+            ) if has_cc else None
+        )
+        gate_spacing_m = float(ranges_m[1] - ranges_m[0]) if len(ranges_m) > 1 else 250.0
+
+        for cell in cells:
+            if cell.scan_count < 0 or not cell.hail_indicated:
+                continue
+            if not self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                continue
+
+            dist_km, bearing_deg = self._latlon_to_polar(rad_lat, rad_lon, cell.lat, cell.lon)
+            dist_m = dist_km * 1_000.0
+
+            if dist_km < TBSS_MIN_RANGE_KM:
+                continue  # Too close: spike falls within the storm itself
+
+            # Gate window for the TBSS spike region
+            spike_min_m = dist_m * TBSS_RANGE_FACTOR_MIN
+            spike_max_m = dist_m * TBSS_RANGE_FACTOR_MAX
+            if spike_max_m > float(ranges_m[-1]):
+                continue  # Spike would be beyond max range
+
+            g_spike_lo = int(np.searchsorted(ranges_m, spike_min_m))
+            g_spike_hi = int(np.searchsorted(ranges_m, spike_max_m))
+            g_spike_lo = max(0, min(len(ranges_m) - 1, g_spike_lo))
+            g_spike_hi = max(g_spike_lo + 1, min(refl.shape[1], g_spike_hi))
+
+            # Nearest ray (TBSS is tightly azimuth-aligned with the hail core)
+            diffs = (azimuths - bearing_deg + 540.0) % 360.0 - 180.0
+            r_idx = int(np.argmin(np.abs(diffs)))
+            r_lo  = max(0, r_idx - 1)
+            r_hi  = min(refl.shape[0], r_idx + 2)
+
+            spike_refl = refl[r_lo:r_hi, g_spike_lo:g_spike_hi]
+            if spike_refl.size == 0 or np.all(np.isnan(spike_refl)):
+                continue
+
+            valid_spike = spike_refl[~np.isnan(spike_refl)]
+            if valid_spike.size == 0:
+                continue
+
+            # Reflectivity in spike zone must be moderate — significantly lower
+            # than the actual hail core but above noise floor
+            n_spike_px = int(np.count_nonzero(
+                (valid_spike >= TBSS_SPIKE_DBZ_MIN) & (valid_spike <= TBSS_SPIKE_DBZ_MAX)
+            ))
+            if n_spike_px < TBSS_MIN_SPIKE_PIXELS:
+                continue
+
+            # Low CC guard: genuine meteorological echoes have CC > 0.85.
+            # A TBSS return is non-meteorological and should be lower.
+            if cc is not None:
+                spike_cc = cc[r_lo:r_hi, g_spike_lo:g_spike_hi]
+                valid_cc = spike_cc[~np.isnan(spike_cc)]
+                if valid_cc.size > 0 and float(np.nanmean(valid_cc)) > TBSS_SPIKE_CC_MAX:
+                    continue  # CC too high — this is a real echo, not TBSS
+
+            cell.tbss_detected = True
+            logger.debug(
+                f"TBSS: {cell.cell_id}  hail_range={dist_km:.0f} km  "
+                f"spike={spike_min_m/1000:.0f}–{spike_max_m/1000:.0f} km  "
+                f"n_px={n_spike_px}"
+            )
+
+    # =========================================================================
+    # Phase 2 — Kinematic Wind Signature Detectors
+    # =========================================================================
+
+    def _detect_downburst_signatures(self, radar, cells: list[TrackedStormCell]):
+        """
+        Detect microburst / downburst signatures on the lowest radar tilt.
+
+        Physical signature: compact radial divergence where near-radar gates
+        show strong inbound velocity (surface outflow rushing toward the radar)
+        and far-radar gates show strong outbound (outflow rushing away).  The
+        entire pattern must fit within DOWNBURST_MAX_DIAMETER_KM to exclude
+        ordinary storm-scale Doppler motion.
+
+        ΔV = V_far_peak − V_near_peak  (always positive for true divergence).
+        Flag when ΔV ≥ DOWNBURST_DELTA_V_MS and both components exceed their
+        floor thresholds.
+        """
+        if radar is None:
+            return
+
+        vel_key = None
+        for k in ("velocity_dealiased", "velocity"):
+            if k in radar.fields:
+                vel_key = k
+                break
+        if vel_key is None:
+            return
+
+        try:
+            rad_lat      = float(radar.latitude["data"][0])
+            rad_lon      = float(radar.longitude["data"][0])
+            ranges_m     = np.asarray(radar.range["data"], dtype=float)
+            fixed_angles = radar.fixed_angle["data"]
+        except Exception:
+            return
+
+        # Voronoi-gated reset
+        for cell in cells:
+            if self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                cell.downburst_detected   = False
+                cell.downburst_delta_v_ms = None
+
+        # Lowest tilt ≤ 1.5°
+        candidates = [
+            (i, float(a)) for i, a in enumerate(fixed_angles) if float(a) <= 1.5
+        ]
+        if not candidates:
+            return
+        sweep_idx, sweep_elev = min(candidates, key=lambda x: x[1])
+
+        try:
+            s_start = int(radar.sweep_start_ray_index["data"][sweep_idx])
+            s_end   = int(radar.sweep_end_ray_index["data"][sweep_idx])
+        except Exception:
+            return
+
+        azimuths = np.asarray(radar.azimuth["data"][s_start:s_end + 1], dtype=float)
+        vel      = np.ma.filled(radar.fields[vel_key]["data"][s_start:s_end + 1], np.nan)
+        n_rays, n_gates = vel.shape
+        gate_spacing_m  = float(ranges_m[1] - ranges_m[0]) if n_gates > 1 else 250.0
+
+        for cell in cells:
+            if cell.scan_count < 0:
+                continue
+            if not self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                continue
+
+            dist_km, bearing_deg = self._latlon_to_polar(rad_lat, rad_lon, cell.lat, cell.lon)
+            dist_m = dist_km * 1_000.0
+            if dist_m < 5_000 or dist_m > float(ranges_m[-1]):
+                continue
+
+            g_idx = int(np.searchsorted(ranges_m, dist_m))
+            g_idx = max(2, min(n_gates - 3, g_idx))
+
+            diffs = (azimuths - bearing_deg + 540.0) % 360.0 - 180.0
+            r_idx = int(np.argmin(np.abs(diffs)))
+
+            # Narrow azimuthal window (±2 rays) — stays close to the same radial
+            r_lo = max(0, r_idx - 2)
+            r_hi = min(n_rays, r_idx + 3)
+
+            # Range window: ±5 km around the cell gate, split at the cell gate
+            half_g      = max(4, int(5_000.0 / gate_spacing_m))
+            g_near_lo   = max(0, g_idx - half_g)
+            g_far_hi    = min(n_gates, g_idx + half_g + 1)
+
+            near_region = vel[r_lo:r_hi, g_near_lo:g_idx]   # radar-side of cell
+            far_region  = vel[r_lo:r_hi, g_idx:g_far_hi]    # distal side of cell
+
+            if near_region.size < 3 or far_region.size < 3:
+                continue
+            if np.all(np.isnan(near_region)) or np.all(np.isnan(far_region)):
+                continue
+
+            V_near_min = float(np.nanmin(near_region))  # Most inbound on near side
+            V_far_max  = float(np.nanmax(far_region))   # Most outbound on distal side
+
+            # Both divergence components must clear their floor thresholds
+            if V_near_min >= DOWNBURST_INBOUND_FLOOR_MS:
+                continue
+            if V_far_max  <= DOWNBURST_OUTBOUND_FLOOR_MS:
+                continue
+
+            delta_v = V_far_max - V_near_min
+            if delta_v < DOWNBURST_DELTA_V_MS:
+                continue
+
+            # Compact-size check: gate distance between the two extrema
+            near_flat      = int(np.nanargmin(near_region))
+            far_flat       = int(np.nanargmax(far_region))
+            near_gate_col  = near_flat % max(near_region.shape[1], 1)
+            far_gate_col   = far_flat  % max(far_region.shape[1], 1)
+            g_min_abs      = g_near_lo + near_gate_col
+            g_max_abs      = g_idx     + far_gate_col
+            gate_sep_km    = abs(g_max_abs - g_min_abs) * gate_spacing_m / 1_000.0
+
+            if gate_sep_km > DOWNBURST_MAX_DIAMETER_KM:
+                continue  # Too wide — storm-scale motion, not a localised downburst
+
+            cell.downburst_detected   = True
+            cell.downburst_delta_v_ms = round(delta_v, 1)
+            logger.debug(
+                f"Downburst: {cell.cell_id}  ΔV={delta_v:.1f} m/s  "
+                f"diam={gate_sep_km:.1f} km  elev={sweep_elev:.1f}°"
+            )
+
+    def _detect_marc_signatures(self, radar, cells: list[TrackedStormCell]):
+        """
+        Detect Mid-Altitude Radial Convergence (MARC) at 3–9 km AGL.
+
+        MARC is produced by the storm's primary updraft drawing air inward at
+        mid-levels.  Strong inbound velocity (< MARC_CONVERGENCE_MS) at 3–9 km
+        AGL directly above a high-dBZ low-level core is a recognised precursor
+        to large hail and tornado development in supercells.
+
+        Only evaluated for cells whose low-level reflectivity already exceeds
+        MARC_REFL_FLOOR_DBZ to suppress false positives in stratiform rain.
+        """
+        if radar is None:
+            return
+
+        vel_key = None
+        for k in ("velocity_dealiased", "velocity"):
+            if k in radar.fields:
+                vel_key = k
+                break
+        if vel_key is None:
+            return
+
+        try:
+            rad_lat      = float(radar.latitude["data"][0])
+            rad_lon      = float(radar.longitude["data"][0])
+            ranges_m     = np.asarray(radar.range["data"], dtype=float)
+            fixed_angles = radar.fixed_angle["data"]
+            n_sweeps     = len(fixed_angles)
+        except Exception:
+            return
+
+        # Voronoi-gated reset
+        for cell in cells:
+            if self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                cell.marc_signature_detected = False
+                cell.marc_convergence_ms     = None
+
+        R_e    = 6_371_000.0
+        k_refr = 4.0 / 3.0
+
+        def _beam_h_km(r_m: float, elev_deg: float) -> float:
+            er = math.radians(elev_deg)
+            return (r_m * math.sin(er) + r_m ** 2 / (2.0 * k_refr * R_e)) / 1_000.0
+
+        gate_spacing_m = float(ranges_m[1] - ranges_m[0]) if len(ranges_m) > 1 else 250.0
+
+        for cell in cells:
+            if cell.scan_count < 0:
+                continue
+            if cell.max_reflectivity_dbz < MARC_REFL_FLOOR_DBZ:
+                continue  # Only look above high-dBZ cores
+            if not self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                continue
+
+            dist_km, bearing_deg = self._latlon_to_polar(rad_lat, rad_lon, cell.lat, cell.lon)
+            dist_m = dist_km * 1_000.0
+            if dist_m < 5_000 or dist_m > float(ranges_m[-1]):
+                continue
+
+            g_idx          = int(np.searchsorted(ranges_m, dist_m))
+            g_idx          = max(0, min(len(ranges_m) - 1, g_idx))
+            half_g         = max(2, int(3_000.0 / gate_spacing_m))   # ±3 km in range
+            half_angle_deg = math.degrees(3_000.0 / max(dist_m, 1.0))  # ±3 km tangentially
+
+            peak_convergence = 0.0  # track the most negative value found
+
+            for sw in range(n_sweeps):
+                elev_deg = float(fixed_angles[sw])
+                h_km     = _beam_h_km(dist_m, elev_deg)
+
+                if not (MARC_MIN_HEIGHT_KM <= h_km <= MARC_MAX_HEIGHT_KM):
+                    continue
+
+                try:
+                    ss = int(radar.sweep_start_ray_index["data"][sw])
+                    se = int(radar.sweep_end_ray_index["data"][sw])
+                except Exception:
+                    continue
+
+                az  = np.asarray(radar.azimuth["data"][ss:se + 1], dtype=float)
+                vel = np.ma.filled(radar.fields[vel_key]["data"][ss:se + 1], np.nan)
+                if vel.shape[0] < 3:
+                    continue
+
+                diffs    = (az - bearing_deg + 540.0) % 360.0 - 180.0
+                ray_mask = np.abs(diffs) <= half_angle_deg
+                if np.sum(ray_mask) < 2:
+                    continue
+
+                g_lo   = max(0, g_idx - half_g)
+                g_hi   = min(vel.shape[1], g_idx + half_g + 1)
+                region = vel[np.ix_(np.where(ray_mask)[0], np.arange(g_lo, g_hi))]
+
+                if region.size == 0 or np.all(np.isnan(region)):
+                    continue
+
+                v_min = float(np.nanmin(region))
+                if v_min < peak_convergence:
+                    peak_convergence = v_min
+
+            if peak_convergence <= MARC_CONVERGENCE_MS:
+                cell.marc_signature_detected = True
+                cell.marc_convergence_ms     = round(peak_convergence, 1)
+                logger.debug(
+                    f"MARC: {cell.cell_id}  convergence={peak_convergence:.1f} m/s  "
+                    f"at {dist_km:.0f} km range"
+                )
+
+    def _detect_straight_line_winds(self, radar, cells: list[TrackedStormCell]):
+        """
+        Identify broad areas of damaging straight-line winds (≥ 50 kts / 25.7 m/s)
+        at the lowest radar tilt.
+
+        A large spatial footprint of severe-threshold outbound velocity distinguishes
+        straight-line wind damage from the compact signatures of rotation couplets and
+        microbursts.  The severe-velocity swath must exceed SLW_MIN_SWATH_KM2 to be
+        flagged.  Stores the peak outbound velocity in `max_wind_velocity_ms`.
+        """
+        if radar is None:
+            return
+
+        vel_key = None
+        for k in ("velocity_dealiased", "velocity"):
+            if k in radar.fields:
+                vel_key = k
+                break
+        if vel_key is None:
+            return
+
+        try:
+            rad_lat      = float(radar.latitude["data"][0])
+            rad_lon      = float(radar.longitude["data"][0])
+            ranges_m     = np.asarray(radar.range["data"], dtype=float)
+            fixed_angles = radar.fixed_angle["data"]
+        except Exception:
+            return
+
+        # Voronoi-gated reset
+        for cell in cells:
+            if self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                cell.straight_line_wind_detected = False
+                cell.strong_wind_detected         = False
+                cell.strong_wind_swath_km2        = None
+                cell.max_wind_velocity_ms         = None
+
+        # Lowest tilt ≤ 1.5°
+        candidates = [
+            (i, float(a)) for i, a in enumerate(fixed_angles) if float(a) <= 1.5
+        ]
+        if not candidates:
+            return
+        sweep_idx, _ = min(candidates, key=lambda x: x[1])
+
+        try:
+            s_start = int(radar.sweep_start_ray_index["data"][sweep_idx])
+            s_end   = int(radar.sweep_end_ray_index["data"][sweep_idx])
+        except Exception:
+            return
+
+        azimuths = np.asarray(radar.azimuth["data"][s_start:s_end + 1], dtype=float)
+        vel      = np.ma.filled(radar.fields[vel_key]["data"][s_start:s_end + 1], np.nan)
+        n_rays   = vel.shape[0]
+        n_gates  = vel.shape[1]
+        gate_spacing_m = float(ranges_m[1] - ranges_m[0]) if n_gates > 1 else 250.0
+
+        # Mean azimuthal spacing (radians) for area estimation
+        daz_rad = math.radians(360.0 / max(n_rays, 1))
+
+        for cell in cells:
+            if cell.scan_count < 0:
+                continue
+            if not self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                continue
+
+            dist_km, bearing_deg = self._latlon_to_polar(rad_lat, rad_lon, cell.lat, cell.lon)
+            dist_m = dist_km * 1_000.0
+            if dist_m < 5_000 or dist_m > float(ranges_m[-1]):
+                continue
+
+            g_idx = int(np.searchsorted(ranges_m, dist_m))
+            g_idx = max(0, min(n_gates - 1, g_idx))
+
+            # Broad window: SLW_SEARCH_RADIUS_KM in both range and azimuth
+            half_g         = int(SLW_SEARCH_RADIUS_KM * 1_000.0 / gate_spacing_m)
+            g_lo           = max(0, g_idx - half_g)
+            g_hi           = min(n_gates, g_idx + half_g + 1)
+            half_angle_deg = math.degrees(SLW_SEARCH_RADIUS_KM * 1_000.0 / max(dist_m, 1.0))
+
+            diffs      = (azimuths - bearing_deg + 540.0) % 360.0 - 180.0
+            ray_mask   = np.abs(diffs) <= half_angle_deg
+            ray_indices = np.where(ray_mask)[0]
+
+            if len(ray_indices) < 3:
+                continue
+
+            region = vel[np.ix_(ray_indices, np.arange(g_lo, g_hi))]
+            if region.size == 0 or np.all(np.isnan(region)):
+                continue
+
+            v_max = float(np.nanmax(region))
+            # Bail only if even the sub-severe threshold isn't met.  Catching
+            # the strong tier (35-50 kt) is the whole point of this lower
+            # check — developing squall lines often sit in that band before
+            # any 50+ kt gusts appear.
+            if v_max < SLW_STRONG_MS:
+                continue
+
+            cell.max_wind_velocity_ms = round(v_max, 1)
+
+            # Per-cell area on the polar grid (gate × ray) at this range
+            mid_range_m       = float(ranges_m[min(g_idx, len(ranges_m) - 1)])
+            area_per_cell_km2 = (gate_spacing_m / 1_000.0) * (mid_range_m * daz_rad / 1_000.0)
+
+            # Strong tier: ≥ SLW_STRONG_MS over ≥ SLW_STRONG_MIN_SWATH_KM2
+            n_strong = int(np.sum((region >= SLW_STRONG_MS) & ~np.isnan(region)))
+            strong_area_km2 = n_strong * area_per_cell_km2
+
+            # Severe tier: ≥ SLW_SEVERE_MS over ≥ SLW_MIN_SWATH_KM2 (existing rule)
+            n_severe = int(np.sum((region >= SLW_SEVERE_MS) & ~np.isnan(region)))
+            severe_area_km2 = n_severe * area_per_cell_km2
+
+            if strong_area_km2 >= SLW_STRONG_MIN_SWATH_KM2:
+                cell.strong_wind_detected = True
+                cell.strong_wind_swath_km2 = round(strong_area_km2, 1)
+
+            if severe_area_km2 >= SLW_MIN_SWATH_KM2:
+                cell.straight_line_wind_detected = True
+                logger.debug(
+                    f"SLW SEVERE: {cell.cell_id}  V_max={v_max:.1f} m/s  "
+                    f"swath={severe_area_km2:.0f} km²"
+                )
+            elif cell.strong_wind_detected:
+                logger.debug(
+                    f"SLW STRONG: {cell.cell_id}  V_max={v_max:.1f} m/s  "
+                    f"swath={strong_area_km2:.0f} km²"
+                )
+
+    def _detect_rear_inflow_jet(
+        self, radar, cells: list[TrackedStormCell], systems: list
+    ):
+        """
+        Detect Rear-Inflow Jets (RIJ) in confirmed bow echo MCS systems.
+
+        A RIJ is a channel of strong mid-level inbound air (1–4 km AGL) that
+        descends into the rear flank of a bow echo, dramatically accelerating
+        surface wind damage at the bow apex.  Only executes when at least one
+        MCS system has `bow_echo_detected = True`.
+
+        The search targets a point displaced AGAINST the storm motion vector by
+        25 % of the system length behind the system centroid — the canonical
+        rear-inflow entry point.  Flags `rij_detected` on all member cells of
+        the bow echo system when a strong inbound channel is found.
+        """
+        if radar is None or not systems:
+            return
+
+        bow_systems = [s for s in systems if s.bow_echo_detected]
+        if not bow_systems:
+            return
+
+        vel_key = None
+        for k in ("velocity_dealiased", "velocity"):
+            if k in radar.fields:
+                vel_key = k
+                break
+        if vel_key is None:
+            return
+
+        try:
+            rad_lat      = float(radar.latitude["data"][0])
+            rad_lon      = float(radar.longitude["data"][0])
+            ranges_m     = np.asarray(radar.range["data"], dtype=float)
+            fixed_angles = radar.fixed_angle["data"]
+            n_sweeps     = len(fixed_angles)
+        except Exception:
+            return
+
+        # Voronoi-gated reset: only clear flags for cells whose primary radar
+        # is THIS one. A bow echo straddling two radar Voronoi regions should
+        # not lose its RIJ flag just because the non-primary radar processed.
+        for cell in cells:
+            if self._is_primary_radar_for_cell(rad_lat, rad_lon, cell):
+                cell.rij_detected = False
+
+        R_e    = 6_371_000.0
+        k_refr = 4.0 / 3.0
+
+        def _beam_h_km(r_m: float, elev_deg: float) -> float:
+            er = math.radians(elev_deg)
+            return (r_m * math.sin(er) + r_m ** 2 / (2.0 * k_refr * R_e)) / 1_000.0
+
+        gate_spacing_m = float(ranges_m[1] - ranges_m[0]) if len(ranges_m) > 1 else 250.0
+        cell_lookup    = {c.cell_id: c for c in cells}
+
+        for system in bow_systems:
+            # Rear search point: displace centroid 25 % of system length AGAINST motion
+            rear_fraction  = 0.25
+            rear_dist_km   = system.length_km * rear_fraction
+            motion_rad     = math.radians(system.motion_direction_deg)
+            cos_lat        = math.cos(math.radians(system.centroid_lat))
+            rear_lat = system.centroid_lat - rear_dist_km * math.cos(motion_rad) / 111.0
+            rear_lon = system.centroid_lon - rear_dist_km * math.sin(motion_rad) / (111.0 * max(cos_lat, 0.01))
+
+            rear_dist_km_r, rear_bearing = self._latlon_to_polar(
+                rad_lat, rad_lon, rear_lat, rear_lon
+            )
+            rear_dist_m = rear_dist_km_r * 1_000.0
+            if rear_dist_m < 5_000 or rear_dist_m > float(ranges_m[-1]):
+                continue
+
+            g_idx = int(np.searchsorted(ranges_m, rear_dist_m))
+            g_idx = max(0, min(len(ranges_m) - 1, g_idx))
+            half_g         = max(3, int(5_000.0 / gate_spacing_m))     # ±5 km in range
+            half_angle_deg = math.degrees(10_000.0 / max(rear_dist_m, 1.0))  # ±10 km tangential
+
+            rij_found = False
+
+            for sw in range(n_sweeps):
+                elev_deg = float(fixed_angles[sw])
+                h_km     = _beam_h_km(rear_dist_m, elev_deg)
+
+                if not (RIJ_HEIGHT_MIN_KM <= h_km <= RIJ_HEIGHT_MAX_KM):
+                    continue
+
+                try:
+                    ss = int(radar.sweep_start_ray_index["data"][sw])
+                    se = int(radar.sweep_end_ray_index["data"][sw])
+                except Exception:
+                    continue
+
+                az  = np.asarray(radar.azimuth["data"][ss:se + 1], dtype=float)
+                vel = np.ma.filled(radar.fields[vel_key]["data"][ss:se + 1], np.nan)
+                if vel.shape[0] < 3:
+                    continue
+
+                diffs    = (az - rear_bearing + 540.0) % 360.0 - 180.0
+                ray_mask = np.abs(diffs) <= half_angle_deg
+                if np.sum(ray_mask) < 2:
+                    continue
+
+                g_lo   = max(0, g_idx - half_g)
+                g_hi   = min(vel.shape[1], g_idx + half_g + 1)
+                region = vel[np.ix_(np.where(ray_mask)[0], np.arange(g_lo, g_hi))]
+
+                if region.size == 0 or np.all(np.isnan(region)):
+                    continue
+
+                if float(np.nanmin(region)) <= RIJ_INBOUND_MS:
+                    rij_found = True
+                    logger.debug(
+                        f"RIJ: system {system.system_id}  "
+                        f"V_in={float(np.nanmin(region)):.1f} m/s  "
+                        f"h={h_km:.1f} km AGL"
+                    )
+                    break  # One confirming tilt is sufficient
+
+            if rij_found:
+                for cid in system.cell_ids:
+                    c = cell_lookup.get(cid)
+                    if c is not None:
+                        c.rij_detected = True
+
     def _score_cells(self, cells: list[TrackedStormCell], timestamp: str):
-        """Calculate severity scores for all cells."""
+        """
+        Calculate severity scores for all cells using the Phase 4 11-factor matrix.
+
+        Each factor is scored 0-100 independently, then combined via SCORE_WEIGHTS
+        (which must sum to 100) to produce a composite 0-100 severity score.
+        LLSD is now a dedicated factor (was folded into "rotation"); three new
+        kinematic wind factors cover downburst/MARC, straight-line winds, and (via
+        the straight-line factor) rear-inflow jets.
+        """
         for cell in cells:
             if cell.scan_count < 0:
                 cell.severity_score = max(0, cell.severity_score - 10)
                 cell.threat_level = self._score_to_threat(cell.severity_score)
                 continue
 
-            breakdown = {}
+            breakdown: dict[str, int] = {}
 
-            # 1. Reflectivity score (0-100, linear from 35 to 70 dBZ)
-            refl_score = np.clip(
+            # ── 1. Reflectivity Core ─────────────────────────────────────────
+            # Linear 35→70 dBZ.  The SCIT multi-threshold ensures this is the
+            # detection-threshold dBZ of the actual cell core, not a merged blob.
+            refl_score = int(np.clip(
                 (cell.max_reflectivity_dbz - 35) / (70 - 35) * 100, 0, 100
-            )
-            breakdown["reflectivity"] = round(float(refl_score))
+            ))
+            breakdown["reflectivity"] = refl_score
 
-            # 2. Growth trend score
-            trend_score = 50  # Default: steady
+            # ── 2. Intensification (Growth Trend) ───────────────────────────
+            # Linear-regression slopes from TREND_WINDOW_SCANS scans (≈ 25 min).
+            # Rapid intensification — especially of LLSD and rotation velocity —
+            # is the strongest pre-warning signal available per TorNet/WAF 2023.
+            # Each slope contributes proportionally to its operational threshold;
+            # LLSD trend dominates by design.
+            def _t_contrib(val, scale, max_pts):
+                if val is None or val <= 0:
+                    return 0
+                return int(min(max_pts, (val / scale) * max_pts))
+
+            trend_score = 50  # neutral baseline
             if cell.trend == "strengthening":
-                trend_score = 80
+                trend_score = 60
             elif cell.trend == "weakening":
                 trend_score = 20
-            # Boost if consistently strong
-            if cell.scan_count > 3 and cell.max_reflectivity_dbz > 55:
-                trend_score = min(100, trend_score + 20)
-            breakdown["growth_trend"] = trend_score
 
-            # 3. Hail score
+            # Quantitative slopes — primary contributors
+            trend_score += _t_contrib(cell.llsd_trend,     0.002, 25)
+            trend_score += _t_contrib(cell.rot_vel_trend,  2.0,   15)
+            trend_score += _t_contrib(cell.echo_top_trend, 0.3,   10)
+            trend_score += _t_contrib(cell.vil_trend,      1.5,    8)
+            trend_score += _t_contrib(cell.dbz_trend,      1.5,    7)
+
+            # Decay term for clearly weakening storms (negative trends)
+            if cell.llsd_trend is not None and cell.llsd_trend < -0.001:
+                trend_score -= 10
+            if cell.rot_vel_trend is not None and cell.rot_vel_trend < -1.0:
+                trend_score -= 8
+
+            # Sustained mature severe convection — small recognition bonus
+            if cell.scan_count > 3 and cell.max_reflectivity_dbz > 55:
+                trend_score += 5
+
+            breakdown["growth_trend"] = max(0, min(100, trend_score))
+
+            # ── 3. Rotation (Mesocyclone / TVS) ─────────────────────────────
+            # Velocity couplet from grid-based and multi-tilt polar detectors.
+            # LLSD is now its own separate factor (see factor 4); no LLSD
+            # contribution here to avoid double-counting.
+            #
+            # Altitude gating (Phase 5):
+            #   - Mid-level rotation with NO low-level component is a normal
+            #     supercell trait, NOT a tornado precursor — cap at 50.
+            #   - Low-level mesocyclone or TVS is unconstrained.
+            #   - Depth bonus only applies when the rotation column extends
+            #     into the boundary layer (base ≤ 1.5 km AGL).
+            rotation_score = 0
+            mid_only = cell.mid_level_meso_detected and not cell.low_level_meso_detected
+            if cell.rotation_detected and cell.rotation_velocity_ms:
+                rotation_score = int(np.clip(
+                    (cell.rotation_velocity_ms - 10) / (25 - 10) * 100, 0, 100
+                ))
+                if cell.tvs_detected and not mid_only:
+                    rotation_score = 100
+            elif cell.qlcs_meso_detected and cell.qlcs_meso_velocity_ms:
+                # QLCS meso: capped at 60 — shorter-lived than supercell mesos
+                rotation_score = int(np.clip(
+                    (cell.qlcs_meso_velocity_ms - 8) / (20 - 8) * 60, 0, 60
+                ))
+            # Multi-tilt profile peak can exceed grid-based couplet estimate
+            if cell.max_rot_velocity_ms is not None:
+                profile_score = int(np.clip(
+                    (cell.max_rot_velocity_ms - 10) / (25 - 10) * 100, 0, 100
+                ))
+                rotation_score = max(rotation_score, profile_score)
+            # Mid-level-only cap: the circulation hasn't reached the boundary
+            # layer, so tornado risk is materially lower.  LLSD-confirmed cells
+            # bypass this because LLSD measures near-surface shear directly.
+            if mid_only:
+                rotation_score = min(rotation_score, 50)
+            # Depth bonus: requires both deep column AND boundary-layer reach.
+            # A 3 km deep rotation centred at 5 km AGL is less dangerous than
+            # a 3 km deep rotation centred at 1.5 km AGL.
+            if (cell.rotation_depth_km is not None
+                    and cell.rotation_depth_km >= 3.0
+                    and cell.rotation_base_km is not None
+                    and cell.rotation_base_km <= LOW_LEVEL_ROT_DEPTH_BONUS_BASE_KM):
+                rotation_score = min(100, rotation_score + 10)
+            # BWER bonus: a bounded weak echo region indicates an intense,
+            # tilted updraft — strongly correlated with tornadogenesis when
+            # combined with rotation.  Add modest boost only when rotation is
+            # already detected (BWER alone without rotation is not tornadic).
+            if cell.bwer_detected and cell.rotation_detected:
+                rotation_score = min(100, rotation_score + 8)
+            breakdown["rotation"] = rotation_score
+
+            # ── 4. LLSD (Low-Level Azimuthal Shear) ─────────────────────────
+            # Piecewise linear across the four operational shear thresholds.
+            # This factor now carries the full weight of near-surface rotation
+            # that was previously embedded in the rotation score.  LLSD trend
+            # contributes via the growth_trend factor — do not double-count.
+            llsd_score = 0
+            if cell.llsd_max_shear is not None:
+                s = cell.llsd_max_shear
+                if s >= LLSD_TORNADIC_SHEAR:
+                    llsd_score = 100
+                elif s >= LLSD_STRONG_SHEAR:
+                    llsd_score = int(80 + (s - LLSD_STRONG_SHEAR)
+                                     / (LLSD_TORNADIC_SHEAR - LLSD_STRONG_SHEAR) * 20)
+                elif s >= LLSD_MESO_SHEAR:
+                    llsd_score = int(50 + (s - LLSD_MESO_SHEAR)
+                                     / (LLSD_STRONG_SHEAR - LLSD_MESO_SHEAR) * 30)
+                elif s >= LLSD_WEAK_SHEAR:
+                    llsd_score = int(20 + (s - LLSD_WEAK_SHEAR)
+                                     / (LLSD_MESO_SHEAR - LLSD_WEAK_SHEAR) * 30)
+            breakdown["llsd"] = llsd_score
+
+            # ── 5. Hail Core Intensity ───────────────────────────────────────
+            # Phase 3 upgrade: strict dual-pol co-location (hail_core_pixels)
+            # and TBSS physical confirmation both elevate the score ceiling.
+            # Phase 5: MESH (Witt 1998) from vertical Z integration drives the
+            # primary score when available — direct size estimate beats the
+            # qualitative dBZ-only fallback.
             hail_score = 0
             if cell.hail_indicated:
                 hail_score = 60
@@ -1614,54 +3303,88 @@ class StormTrackingService:
                 if cell.max_reflectivity_dbz >= 65:
                     hail_score = 100
             elif cell.max_reflectivity_dbz >= HAIL_REFLECTIVITY_DBZ:
-                hail_score = 30  # Possible but not confirmed by dual-pol
+                hail_score = 30  # Possible but dual-pol unavailable or ambiguous
+            # MESH-based score (preferred when available)
+            if cell.mesh_mm is not None:
+                m = cell.mesh_mm
+                if m >= MESH_GIANT_HAIL_MM:
+                    mesh_score = 100
+                elif m >= MESH_LARGE_HAIL_MM:
+                    mesh_score = int(80 + (m - MESH_LARGE_HAIL_MM)
+                                     / (MESH_GIANT_HAIL_MM - MESH_LARGE_HAIL_MM) * 20)
+                elif m >= MESH_SIG_HAIL_MM:
+                    mesh_score = int(50 + (m - MESH_SIG_HAIL_MM)
+                                     / (MESH_LARGE_HAIL_MM - MESH_SIG_HAIL_MM) * 30)
+                else:
+                    mesh_score = int((m / MESH_SIG_HAIL_MM) * 40)
+                hail_score = max(hail_score, mesh_score)
+            # TBSS physically confirms large hail (not just inference from Z/ZDR/CC)
+            if cell.tbss_detected:
+                hail_score = max(hail_score, 90)
             breakdown["hail"] = hail_score
 
-            # 4. Rotation score — supercell meso takes priority; QLCS meso gives partial credit
-            rotation_score = 0
-            if cell.rotation_detected and cell.rotation_velocity_ms:
-                # Supercell mesocyclone: scale 15→25 m/s = 50→100
-                rotation_score = np.clip(
-                    (cell.rotation_velocity_ms - 10) / (25 - 10) * 100, 0, 100
-                )
-                if cell.tvs_detected:
-                    rotation_score = 100
-            elif cell.qlcs_meso_detected and cell.qlcs_meso_velocity_ms:
-                # QLCS meso: capped at 60 — dangerous but shorter-lived than supercell mesos
-                rotation_score = np.clip(
-                    (cell.qlcs_meso_velocity_ms - 8) / (20 - 8) * 60, 0, 60
-                )
+            # ── 6. Downburst / MARC Potential ───────────────────────────────
+            # Downburst ΔV is an active surface wind threat (scales continuously).
+            # MARC is a mid-level precursor — important but less immediate (cap 60).
+            downburst_marc_score = 0
+            if cell.downburst_detected and cell.downburst_delta_v_ms is not None:
+                # 20 m/s = 30 (floor), 40+ m/s = 100
+                downburst_marc_score = int(np.clip(
+                    (cell.downburst_delta_v_ms - 20) / 20 * 70 + 30, 30, 100
+                ))
+            if cell.marc_signature_detected and cell.marc_convergence_ms is not None:
+                # -12 m/s = 20, -25+ m/s = 60
+                marc_score = int(np.clip(
+                    (abs(cell.marc_convergence_ms) - 12) / 13 * 40 + 20, 20, 60
+                ))
+                downburst_marc_score = max(downburst_marc_score, marc_score)
+            breakdown["downburst_marc"] = downburst_marc_score
 
-            # LLSD (low-level azimuthal shear) — can override above if tornadic-class,
-            # otherwise augments the rotation score.  Low-level shear is what actually
-            # kills people, so we weight it heavily.
-            if cell.llsd_max_shear is not None:
-                s = cell.llsd_max_shear
-                if s >= LLSD_TORNADIC_SHEAR:
-                    rotation_score = 100
-                elif s >= LLSD_STRONG_SHEAR:
-                    # Strong LLSD alone is worth ~85 regardless of mid-level couplet
-                    rotation_score = max(rotation_score, 85)
-                elif s >= LLSD_MESO_SHEAR:
-                    # Weak meso-class low-level shear: floor at 50
-                    rotation_score = max(rotation_score, 50)
-                elif s >= LLSD_WEAK_SHEAR:
-                    rotation_score = max(rotation_score, 25)
-            breakdown["rotation"] = round(float(rotation_score))
+            # ── 7. Straight-Line Wind Intensity ─────────────────────────────
+            # Two-tier wind signature:
+            #   strong (35-50 kt sub-severe): partial credit 10-35
+            #   severe (50+ kt, broad swath): main credit 20-100
+            # Plus RIJ floor for confirmed bow-echo rear inflow.
+            slw_score = 0
+            v = cell.max_wind_velocity_ms
+            if v is not None:
+                if v >= SLW_SEVERE_MS:
+                    slw_score = int(np.clip(
+                        (v - SLW_SEVERE_MS) / (50 - SLW_SEVERE_MS) * 80 + 20,
+                        20, 100,
+                    ))
+                elif v >= SLW_STRONG_MS:
+                    # 18 m/s → 10, 25.7 m/s → 35
+                    slw_score = int(np.clip(
+                        (v - SLW_STRONG_MS) / (SLW_SEVERE_MS - SLW_STRONG_MS) * 25 + 10,
+                        10, 35,
+                    ))
+            if cell.straight_line_wind_detected:
+                slw_score = max(slw_score, 40)
+            elif cell.strong_wind_detected:
+                slw_score = max(slw_score, 20)
+            if cell.rij_detected:
+                slw_score = max(slw_score, 70)
+            breakdown["straight_line"] = slw_score
 
-            # 5. Debris signature score
+            # ── 8. Debris Signature (TDS) ────────────────────────────────────
+            # Phase 3: graduated by confirmed tilt depth — deeper column means
+            # larger/more intense tornado, not just a brief debris loft.
             debris_score = 0
             if cell.debris_signature:
-                debris_score = 100  # Binary: confirmed TDS is always max severity
+                debris_score = 90
+                if cell.tds_tilt_count >= 3:
+                    debris_score = 100  # Deep debris column = highest confidence
             breakdown["debris"] = debris_score
 
-            # 6. VIL score — use true multi-tilt integrated VIL when available.
-            # NSSL thresholds: <15 = weak, 15-30 = moderate, 30-50 = high, 50+ = severe
+            # ── 9. VIL ───────────────────────────────────────────────────────
+            # Cell-based multi-tilt VIL (NSSL formula).  Fallback to reflectivity
+            # proxy when the vertical profile failed (e.g. nearby radar / low
+            # coverage).
             vil_score = 0
             if cell.vil_kg_m2 is not None:
                 vil_score = int(np.clip((cell.vil_kg_m2 - 10.0) / (55.0 - 10.0) * 100, 0, 100))
             else:
-                # Fallback — reflectivity proxy if vertical profile failed
                 if cell.max_reflectivity_dbz >= 50:
                     vil_score = 30
                 if cell.max_reflectivity_dbz >= 55:
@@ -1672,11 +3395,11 @@ class StormTrackingService:
                     vil_score = 100
             breakdown["vil"] = vil_score
 
-            # 7. Cell top height — from real multi-tilt 18 dBZ echo-top when available,
-            # otherwise approximate from max reflectivity intensity.
+            # ── 10. Cell Top / Overshooting Top ──────────────────────────────
+            # Multi-tilt 18 dBZ echo top (real beam height).  6 km = ordinary
+            # convection, 14+ km = severe overshooting top.
             top_score = 0
             if cell.cell_top_km is not None:
-                # 6 km = pedestrian convection, 12+ km = severe overshooting top
                 top_score = int(np.clip((cell.cell_top_km - 6.0) / (14.0 - 6.0) * 100, 0, 100))
             else:
                 if cell.max_reflectivity_dbz >= 45:
@@ -1689,8 +3412,8 @@ class StormTrackingService:
                     top_score = 100
             breakdown["cell_top"] = top_score
 
-            # 8. Lightning flash rate (GLM, flashes/min within 25 km over last 5 min)
-            # 0 flashes/min = 0, 1 = 30, 5 = 70, 10+ = 100
+            # ── 11. Lightning Flash Rate (GLM) ────────────────────────────────
+            # Flashes/min within 25 km over the last 5 minutes.
             lightning_score = 0
             if self._glm_service is not None:
                 try:
@@ -1702,7 +3425,7 @@ class StormTrackingService:
                     pass
             breakdown["lightning"] = lightning_score
 
-            # Weighted composite score
+            # ── Weighted composite ────────────────────────────────────────────
             total = sum(
                 breakdown.get(factor, 0) * weight / 100
                 for factor, weight in SCORE_WEIGHTS.items()
@@ -1710,9 +3433,9 @@ class StormTrackingService:
             severity = round(min(100, max(0, total)))
 
             cell.severity_score = severity
-            cell.threat_level = self._score_to_threat(severity)
+            cell.threat_level   = self._score_to_threat(severity)
             cell.score_breakdown = breakdown
-            cell.last_updated = timestamp
+            cell.last_updated   = timestamp
 
     def _generate_forecasts(self, cells: list[TrackedStormCell]):
         """Generate forecast tracks by linear extrapolation."""
@@ -1871,6 +3594,11 @@ async def start_storm_tracking_service() -> bool:
 
     _service = StormTrackingService()
     _service._running = True
+    # Best-effort load of trained ML rotation model — inert if not present.
+    try:
+        _service.load_rotation_model()
+    except Exception as e:
+        logger.warning(f"Rotation model loader raised: {e}")
     logger.info("Storm tracking service started")
     return True
 

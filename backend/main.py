@@ -54,6 +54,7 @@ try:
     from .services.storm_tracking_service import get_storm_tracking_service, start_storm_tracking_service, stop_storm_tracking_service
     from .services.nexrad_sites import NEXRAD_SITES, get_nearest_sites
     from .services.glm_service import get_glm_service, start_glm_service, stop_glm_service
+    from .services.mrms_service import get_mrms_service, start_mrms_service, stop_mrms_service
 except ImportError:
     # Direct execution: python backend/main.py
     import sys
@@ -87,6 +88,7 @@ except ImportError:
     from backend.services.storm_tracking_service import get_storm_tracking_service, start_storm_tracking_service, stop_storm_tracking_service
     from backend.services.nexrad_sites import NEXRAD_SITES, get_nearest_sites
     from backend.services.glm_service import get_glm_service, start_glm_service, stop_glm_service
+    from backend.services.mrms_service import get_mrms_service, start_mrms_service, stop_mrms_service
 
 logger = logging.getLogger(__name__)
 
@@ -269,34 +271,79 @@ async def startup_services():
                 # Wire radar frame broadcasts
                 async def on_radar_frames(frames):
                     for frame in frames:
+                        # Binary frame for WebGL clients
+                        if frame.binary_data:
+                            await broker.broadcast_radar_frame_binary(frame.binary_data)
+                        # JSON metadata for status pill / non-binary clients
                         await broker.broadcast_radar_frame(frame.to_dict())
 
-                # Wire storm cell broadcasts + proactive analyst
-                from .services.storm_analyst_service import create_storm_analyst_service
-                from .services.agent_service import get_agent_service as _get_agent_svc
-                analyst = create_storm_analyst_service()
+                # ── Optional extras: proactive analyst, agent LLM, live QA ──
+                # Best-effort.  A failure constructing or wiring any of these
+                # must NOT prevent the core storm-cell tracking + broadcast
+                # wiring below from running — otherwise `on_volume_ready` is
+                # never set, the gridder never spawns, and the dashboard shows
+                # zero storm cells even with severe weather on the radar.
+                analyst = None
+                live_qa = None
+                try:
+                    from .services.storm_analyst_service import create_storm_analyst_service
+                    from .services.agent_service import get_agent_service as _get_agent_svc
+                    from .services.live_qa_service import create_live_qa_reporter
+                    analyst = create_storm_analyst_service()
 
-                # Give the analyst a callback to reach the agent LLM
-                _agent_svc = _get_agent_svc()
-                if _agent_svc is not None:
-                    async def _agent_analyze(cells):
-                        return await _agent_svc.analyze_storm_cells(cells)
-                    analyst.set_agent_callback(_agent_analyze)
+                    # Live QA reporter — in-process per-scan QA log + optional
+                    # training-data collection.  Auto-starts when live_qa_enabled.
+                    if settings.live_qa_enabled:
+                        from pathlib import Path as _Path
+                        log_file = (
+                            _Path(settings.data_dir) / "training_data.jsonl"
+                            if settings.live_qa_log_training_data else None
+                        )
+                        live_qa = create_live_qa_reporter(
+                            log_file=log_file,
+                            min_score=settings.live_qa_min_score,
+                            verbose=settings.live_qa_verbose,
+                        )
 
-                # Give the analyst a callback to broadcast via WebSocket
-                async def _broadcast_notification(content, cells, notification_id, timestamp):
-                    await broker.broadcast_agent_notification({
-                        "id": notification_id,
-                        "content": content,
-                        "cells": cells,
-                        "timestamp": timestamp,
-                    })
-                analyst.set_broadcast_callback(_broadcast_notification)
+                    # Give the analyst a callback to reach the agent LLM
+                    _agent_svc = _get_agent_svc()
+                    if _agent_svc is not None:
+                        async def _agent_analyze(cells):
+                            return await _agent_svc.analyze_storm_cells(cells)
+                        analyst.set_agent_callback(_agent_analyze)
+
+                    # Give the analyst a callback to broadcast via WebSocket
+                    async def _broadcast_notification(content, cells, notification_id, timestamp):
+                        await broker.broadcast_agent_notification({
+                            "id": notification_id,
+                            "content": content,
+                            "cells": cells,
+                            "timestamp": timestamp,
+                        })
+                    analyst.set_broadcast_callback(_broadcast_notification)
+                except Exception as e:
+                    analyst = None
+                    live_qa = None
+                    logger.error(
+                        "Storm analyst / live-QA extras failed to initialize — "
+                        "storm cell tracking will still run, analyst disabled: "
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
 
                 async def on_cells_updated(cells):
                     await broker.broadcast_storm_cells([c.to_dict() for c in cells])
-                    await analyst.process_cells(cells)
-                    analyst.cleanup_stale({c.cell_id for c in cells})
+                    if analyst is not None:
+                        try:
+                            await analyst.process_cells(cells)
+                            analyst.cleanup_stale({c.cell_id for c in cells})
+                        except Exception as e:
+                            logger.warning(f"Storm analyst processing failed: {e}")
+                    if live_qa is not None:
+                        try:
+                            await live_qa.on_cells(cells)
+                        except Exception as e:
+                            logger.warning(f"Live QA on_cells failed: {e}")
 
                 async def on_systems_updated(systems):
                     await broker.broadcast_mcs_systems([s.to_dict() for s in systems])
@@ -305,11 +352,18 @@ async def startup_services():
                 async def on_radar_status(status):
                     await broker.broadcast_radar_status(status.to_dict())
 
+                # ── Critical wiring — always runs (independent of extras) ──
                 nexrad_svc.on_frame_ready = on_radar_frames
                 nexrad_svc.on_volume_ready = storm_svc.process_volume
                 nexrad_svc.on_status_change = on_radar_status
                 storm_svc.on_cells_updated = on_cells_updated
                 storm_svc.on_systems_updated = on_systems_updated
+
+                # Push mean storm motion to the renderer so the SRV product
+                # can subtract the storm's radial component at each ray.
+                async def on_motion_update(direction_deg, speed_kph):
+                    nexrad_svc.set_storm_motion(direction_deg, speed_kph)
+                storm_svc.on_motion_update = on_motion_update
 
                 logger.info("Storm tracking service started and wired to radar")
 
@@ -336,6 +390,24 @@ async def startup_services():
                         logger.info("GLM lightning service not available (boto3/netCDF4 not installed)")
                 except Exception as e:
                     logger.error(f"GLM lightning service failed to start: {e}", exc_info=True)
+
+                # Optional near-real-time chunks-bucket ingestion path.
+                # Runs alongside the archive-bucket pipeline; gated behind
+                # `nexrad_chunks_enabled` setting (default OFF).
+                if settings.nexrad_chunks_enabled:
+                    try:
+                        from .services.nexrad_chunks_service import (
+                            start_nexrad_chunks_service,
+                        )
+                        chunks_svc = await start_nexrad_chunks_service(
+                            nexrad_svc, settings
+                        )
+                        if chunks_svc:
+                            logger.info("NEXRAD chunks-bucket service running alongside archive")
+                    except Exception as e:
+                        logger.error(
+                            f"NEXRAD chunks service failed to start: {e}", exc_info=True
+                        )
             else:
                 logger.warning("Storm tracking service failed to start")
         else:
@@ -343,7 +415,39 @@ async def startup_services():
     else:
         logger.info("NEXRAD radar disabled (set NEXRAD_ENABLED=true to enable)")
 
+    # Start MRMS composite reflectivity (independent of NEXRAD; requires pygrib)
+    try:
+        logger.info("Starting MRMS composite reflectivity service...")
+        await start_mrms_service()
+        mrms_svc = get_mrms_service()
+        if mrms_svc and mrms_svc.available:
+            logger.info("MRMS service started")
+        else:
+            logger.info("MRMS service disabled (install pygrib via conda to enable)")
+    except Exception as e:
+        logger.error(f"MRMS service failed to start: {e}", exc_info=True)
+
+    # Start MRMS rotation tracks + azimuthal shear ingester — feeds the
+    # rotation classifier with multi-radar fused rotation values per cell.
+    # Safe to skip silently if eccodes isn't installed.
+    try:
+        from .services.mrms_rotation_service import start_mrms_rotation_service
+        logger.info("Starting MRMS rotation tracks service...")
+        rot_svc = await start_mrms_rotation_service()
+        if rot_svc and rot_svc.available:
+            logger.info("MRMS rotation service started")
+        else:
+            logger.info("MRMS rotation service disabled (eccodes unavailable)")
+    except Exception as e:
+        logger.error(
+            f"MRMS rotation service failed to start: {e}", exc_info=True,
+        )
+
     logger.info("All services started successfully")
+
+    # Backfill broadcast graphics for any active alerts that were restored from
+    # disk (load_from_file doesn't fire on_alert_added, so they'd be missed).
+    asyncio.create_task(_backfill_broadcast_graphics())
 
 
 async def shutdown_services():
@@ -351,7 +455,18 @@ async def shutdown_services():
     logger.info("Shutting down services...")
 
     # Stop in reverse order
+    try:
+        from .services.mrms_rotation_service import stop_mrms_rotation_service
+        await stop_mrms_rotation_service()
+    except Exception:
+        pass
+    await stop_mrms_service()
     await stop_glm_service()
+    try:
+        from .services.nexrad_chunks_service import stop_nexrad_chunks_service
+        await stop_nexrad_chunks_service()
+    except Exception:
+        pass
     await stop_storm_tracking_service()
     await stop_nexrad_service()
     await stop_social_media_service()
@@ -372,6 +487,283 @@ async def shutdown_services():
     logger.info("All services stopped")
 
 
+async def _fetch_zone_polygons_for_alert(alert) -> "list[list[list[float]]] | None":
+    """
+    For zone/county-based alerts (no precise polygon), fetch county geometries
+    from the zone_geometry_service and return a flat list of polygon rings.
+    """
+    if alert.polygon and len(alert.polygon) >= 3:
+        # Distinguish a genuine flat polygon ([[lat,lon], ...]) from the nested
+        # county-ring structure populate_alert_geometry stores in alert.polygon
+        # ([[ring1_pts], [ring2_pts], ...]). In the flat case, alert.polygon[0][0]
+        # is a float (latitude). In the nested case it's a list (a coord pair).
+        first = alert.polygon[0]
+        if first and isinstance(first[0], (int, float)):
+            return None   # genuine precise polygon — no need for zone geoms
+        # Nested zone structure — return it directly as zone_polygons
+        return alert.polygon  # type: ignore[return-value]
+    if not getattr(alert, "affected_areas", None):
+        return None
+    try:
+        from backend.services.zone_geometry_service import get_zone_geometry_service
+        zone_svc = get_zone_geometry_service()
+        result = await zone_svc.fetch_multiple_zones(alert.affected_areas)
+        flat: list[list[list[float]]] = []
+        for zone_polys in result.values():
+            if zone_polys:
+                flat.extend(zone_polys)
+        return flat or None
+    except Exception as e:
+        logger.debug(f"Zone geometry fetch failed for {alert.product_id}: {e}")
+        return None
+
+
+def _prune_stale_broadcast_graphics(active_ids: set[str]) -> int:
+    """Delete saved broadcast graphics whose alert is no longer active.
+
+    Files are named <safe_product_id>.png / .json (plus an optional
+    <safe_product_id>_confirmed.png for PDS/confirmed tornado graphics).  Any
+    file whose base id isn't in ``active_ids`` is removed.
+    """
+    import re as _re
+    if not _GRAPHICS_DIR.exists():
+        return 0
+    removed = 0
+    for f in _GRAPHICS_DIR.iterdir():
+        if not f.is_file():
+            continue
+        stem = f.stem
+        if stem.endswith("_confirmed"):
+            stem = stem[: -len("_confirmed")]
+        if stem not in active_ids:
+            try:
+                f.unlink()
+                removed += 1
+            except OSError as e:
+                logger.debug(f"Could not prune stale graphic {f.name}: {e}")
+    if removed:
+        logger.info(f"Pruned {removed} stale broadcast graphic file(s) on startup")
+    return removed
+
+
+async def _backfill_broadcast_graphics():
+    """On startup, prune stale graphics then generate any missing for active alerts."""
+    await asyncio.sleep(5)  # let services finish initialising
+    import re as _re
+    alert_mgr = get_alert_manager()
+
+    # Prune graphics for alerts that are no longer active before backfilling.
+    active_ids = {
+        _re.sub(r"[^\w\-.]", "_", a.product_id)
+        for a in alert_mgr.get_all_alerts() if a.is_active
+    }
+    _prune_stale_broadcast_graphics(active_ids)
+
+    graphic_phenomena = {"TO", "SV", "FF", "FA", "FL", "BZ", "WS", "IS", "EW", "HW"}
+    for alert in alert_mgr.get_all_alerts():
+        if not alert.is_active or alert.phenomenon not in graphic_phenomena:
+            continue
+        import re as _re
+        safe_id = _re.sub(r"[^\w\-.]", "_", alert.product_id)
+        img_path = _GRAPHICS_DIR / f"{safe_id}.png"
+        if img_path.exists():
+            continue  # already have one
+        logger.info(f"Backfilling broadcast graphic for {alert.product_id}")
+        asyncio.create_task(_auto_generate_broadcast_graphic(alert))
+
+
+async def _auto_generate_broadcast_graphic(alert: Alert):
+    """Background task: generate + save a broadcast graphic for a new alert."""
+    try:
+        import math as _math_ag
+        settings = get_settings()
+        brand = get_brand_config(settings.brand)
+
+        # Resolve best radar frame (same cascade as the API endpoint)
+        radar_frame = None
+        nexrad_svc_ag = None
+        centroid_ag = None
+        nearest_site_ag = None
+        try:
+            nexrad_svc_ag = get_nexrad_service()
+            from backend.services.nexrad_sites import NEXRAD_SITES as _NS_ag
+            sender = getattr(alert, "sender_office", "").upper().lstrip("K")
+            centroid_ag = getattr(alert, "centroid", None)
+            candidate = "K" + sender if sender else ""
+            if candidate not in _NS_ag and centroid_ag:
+                best_id, best_d = "", float("inf")
+                for sid, info in _NS_ag.items():
+                    dlat = info["lat"] - centroid_ag[0]
+                    dlon = (info["lon"] - centroid_ag[1]) * _math_ag.cos(_math_ag.radians(centroid_ag[0]))
+                    d = dlat * dlat + dlon * dlon
+                    if d < best_d:
+                        best_d, best_id = d, sid
+                candidate = best_id
+            nearest_site_ag = candidate
+
+            # Tier 1a: cached frame for the WFO/nearest site
+            if candidate:
+                hist = nexrad_svc_ag.get_frame_history("reflectivity", count=1, site=candidate)
+                if hist:
+                    radar_frame = hist[-1]
+                    logger.info(f"Auto graphic: using cached {candidate} frame")
+
+            # Tier 1b: active site if within ~250 km
+            if radar_frame is None and centroid_ag:
+                frames = nexrad_svc_ag.get_latest_frames()
+                cframe = frames.get("reflectivity") or frames.get("Reflectivity")
+                if cframe:
+                    asite = nexrad_svc_ag.active_site
+                    sinfo = _NS_ag.get(asite, {})
+                    if sinfo:
+                        dlat = sinfo["lat"] - centroid_ag[0]
+                        dlon = (sinfo["lon"] - centroid_ag[1]) * _math_ag.cos(_math_ag.radians(centroid_ag[0]))
+                        if _math_ag.sqrt(dlat * dlat + dlon * dlon) < 2.25:
+                            radar_frame = cframe
+                            logger.info(f"Auto graphic: using active-site {asite} frame")
+        except Exception:
+            pass
+
+        # Live/cached frames carry raw binary polar data (RDRF) with no image_path,
+        # which the Pillow map renderer can't overlay — so it would silently fall back
+        # to public composite tiles.  Rasterize OUR binary frame to a PNG so the
+        # graphic uses our Level-2 radar.
+        if radar_frame is not None and getattr(radar_frame, "image_path", None) is None \
+                and getattr(radar_frame, "binary_data", None) and nexrad_svc_ag:
+            try:
+                loop_bin = asyncio.get_event_loop()
+                rendered = await loop_bin.run_in_executor(
+                    None, lambda: nexrad_svc_ag.render_binary_frame_to_image(radar_frame)
+                )
+                if rendered is not None:
+                    radar_frame = rendered
+                    logger.info("Auto graphic: rasterized cached binary frame for overlay")
+                else:
+                    logger.info("Auto graphic: binary rasterize returned None; will try oneshot/tiles")
+                    radar_frame = None
+            except Exception as _e_bin:
+                logger.debug(f"Auto graphic binary rasterize failed: {_e_bin}")
+                radar_frame = None
+
+        # Tier 1c: one-off Level-2 download from nearest NEXRAD site
+        if radar_frame is None and centroid_ag and nexrad_svc_ag and nearest_site_ag:
+            try:
+                loop_ag = asyncio.get_event_loop()
+                site_to_fetch = nearest_site_ag
+                logger.info(f"Auto graphic: oneshot download from {site_to_fetch}")
+                radar_frame = await loop_ag.run_in_executor(
+                    None, lambda: nexrad_svc_ag.oneshot_frame(site_to_fetch)
+                )
+                if radar_frame:
+                    logger.info(f"Auto graphic: oneshot {site_to_fetch} succeeded")
+                else:
+                    logger.info(f"Auto graphic: oneshot {site_to_fetch} returned None, falling back to tiles")
+            except Exception as _e_ag:
+                logger.debug(f"Auto graphic oneshot failed: {_e_ag}")
+
+        try:
+            from .services.alert_broadcast_graphic_service import (
+                generate_alert_broadcast_graphic as _gen,
+                generate_tornado_confirmed_graphic as _gen_tor,
+            )
+        except ImportError:
+            from backend.services.alert_broadcast_graphic_service import (
+                generate_alert_broadcast_graphic as _gen,
+                generate_tornado_confirmed_graphic as _gen_tor,
+            )
+
+        meteorologist = getattr(brand, "meteorologist_name", None) or ""
+        zone_polys = await _fetch_zone_polygons_for_alert(alert)
+
+        loop = asyncio.get_event_loop()
+        png_bytes = await loop.run_in_executor(
+            None,
+            lambda: _gen(
+                alert=alert,
+                radar_frame=radar_frame,
+                zone_polygons=zone_polys,
+                brand_name=brand.name,
+                meteorologist_name=meteorologist,
+            )
+        )
+
+        import re as _re, json as _json
+        _GRAPHICS_DIR.mkdir(parents=True, exist_ok=True)
+        safe_id = _re.sub(r"[^\w\-.]", "_", alert.product_id)
+        img_path = _GRAPHICS_DIR / f"{safe_id}.png"
+        img_path.write_bytes(png_bytes)
+        meta_path = _GRAPHICS_DIR / f"{safe_id}.json"
+        meta_path.write_text(_json.dumps({
+            "product_id": alert.product_id,
+            "event_name": alert.event_name,
+        }))
+        logger.info(f"Auto-generated broadcast graphic for {alert.product_id} -> {safe_id}.png")
+
+        # Also generate the confirmed/PDS tornado graphic for qualifying warnings
+        threat_ag = getattr(alert, "threat", None)
+        tor_det_ag = (getattr(threat_ag, "tornado_detection", None) or "").upper()
+        dmg_ag = (getattr(threat_ag, "tornado_damage_threat", None) or "").upper()
+        is_confirmed = (
+            alert.phenomenon == "TO" and (
+                tor_det_ag == "OBSERVED" or
+                dmg_ag in ("CONSIDERABLE", "CATASTROPHIC") or
+                "particularly dangerous" in (getattr(alert, "description", "") or "").lower()
+            )
+        )
+        if is_confirmed:
+            logger.info(f"Generating confirmed tornado graphic for {alert.product_id}")
+            try:
+                tor_bytes = await loop.run_in_executor(
+                    None,
+                    lambda: _gen_tor(
+                        alert=alert,
+                        radar_frame=radar_frame,
+                        zone_polygons=zone_polys,
+                        brand_name=brand.name,
+                        meteorologist_name=meteorologist,
+                    )
+                )
+                tor_path = _GRAPHICS_DIR / f"{safe_id}_confirmed.png"
+                tor_path.write_bytes(tor_bytes)
+                logger.info(f"Saved confirmed tornado graphic: {safe_id}_confirmed.png")
+            except Exception as _e_tor:
+                logger.warning(f"Confirmed tornado graphic failed: {_e_tor}")
+
+    except Exception as e:
+        logger.exception(f"Auto broadcast graphic failed for {alert.product_id}: {e}")
+
+
+_zone_broadcast_task: "Optional[asyncio.Task]" = None
+
+
+def _schedule_zone_broadcast(delay: float = 0.4):
+    """
+    Debounced rebuild + WebSocket broadcast of the full map-zone payload.
+
+    A single alert change can fan out into many callbacks in quick succession
+    (e.g. a Watch County Notification touching a dozen counties). Coalesce them
+    into one zone rebuild so we resolve geometry and broadcast `alert_zones`
+    just once per burst. The short delay also lets just-issued alerts finish
+    resolving their zone geometry before we build the payload.
+    """
+    global _zone_broadcast_task
+    broker = get_message_broker()
+
+    async def _run():
+        try:
+            await asyncio.sleep(delay)
+            payload = await build_map_zones()
+            await broker.broadcast_alert_zones(payload)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Zone broadcast failed: {e}")
+
+    if _zone_broadcast_task and not _zone_broadcast_task.done():
+        _zone_broadcast_task.cancel()
+    _zone_broadcast_task = asyncio.create_task(_run())
+
+
 def wire_alert_callbacks():
     """Connect Alert Manager events to WebSocket broadcasts and notifications."""
     alert_manager = get_alert_manager()
@@ -388,14 +780,40 @@ def wire_alert_callbacks():
     async def on_alert_added(alert: Alert):
         # Broadcast to WebSocket clients
         await broker.broadcast_alert_new(alert)
+        # Push refreshed zone geometry so zone-fill alerts (esp. watches, which
+        # have no storm polygon) render on maps immediately, not at next poll.
+        _schedule_zone_broadcast()
         # Send Google Chat notification (only for new alerts, not updates)
         await google_chat_service.notify_new_alert(alert)
+        # Auto-generate broadcast graphic for warnings
+        if alert.phenomenon in ("TO", "SV", "FF", "FA", "FL", "BZ", "WS", "IS", "EW", "HW"):
+            asyncio.create_task(_auto_generate_broadcast_graphic(alert))
 
     async def on_alert_updated(alert: Alert):
         await broker.broadcast_alert_update(alert)
+        # A watch's per-county areas often arrive via an update (WCN) shortly
+        # after the initial product — rebroadcast zones so they appear at once.
+        _schedule_zone_broadcast()
+        # Regenerate graphic on update so it reflects the latest threat info
+        # (e.g. radar-indicated → observed upgrade, new radar frame, etc.)
+        if alert.phenomenon in ("TO", "SV", "FF", "FA", "FL", "BZ", "WS", "IS", "EW", "HW"):
+            asyncio.create_task(_auto_generate_broadcast_graphic(alert))
 
     async def on_alert_removed(alert: Alert):
         await broker.broadcast_alert_remove(alert)
+        # Clear the zone fill for the removed alert right away.
+        _schedule_zone_broadcast()
+        # Delete saved graphics for this alert so the gallery doesn't fill up
+        import re as _re2
+        safe_id = _re2.sub(r"[^\w\-.]", "_", alert.product_id)
+        for suffix in ("", "_confirmed"):
+            for ext in (".png", ".json"):
+                p = _GRAPHICS_DIR / f"{safe_id}{suffix}{ext}"
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        logger.debug(f"Deleted graphics for expired alert {alert.product_id}")
 
     # Wrap async callbacks for sync AlertManager
     def sync_added(alert: Alert):
@@ -481,7 +899,7 @@ async def _check_polygon_and_capture(
 
         point = Point(lon, lat)  # Shapely uses (x, y) = (lon, lat)
         alert_manager = get_alert_manager()
-        alerts = alert_manager.get_active_alerts()
+        alerts = alert_manager.get_all_alerts()
 
         for alert in alerts:
             if not alert.polygon or len(alert.polygon) < 3:
@@ -574,10 +992,15 @@ app = FastAPI(
 )
 
 # CORS configuration
+# Regex covers: localhost on any port, 127.0.0.1 on any port,
+# and any 192.168.x.x address (LAN) on any port.
+# allow_credentials=False is required when using a wildcard/regex origin
+# (the CORS spec forbids credentials=True with non-specific origins).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
+    allow_origins=[],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?|http://192\.168\.\d+\.\d+(:\d+)?",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -721,6 +1144,62 @@ async def get_alert(product_id: str):
     return alert.to_dict()
 
 
+@app.post("/api/alerts/{product_id}/impact-scan")
+async def scan_alert_impact(product_id: str, push: bool = True, force: bool = False):
+    """Scan a warning polygon for at-risk places via OpenStreetMap/Overpass.
+
+    Returns the categorized impacted places (towns, mobile home parks, schools,
+    hospitals/care). When ``push`` is true and the scan found anything, the
+    result is also broadcast to the on-stream impact widget.
+    """
+    alert_manager = get_alert_manager()
+    alert = alert_manager.get_alert(product_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if not alert.polygon or len(alert.polygon) < 3:
+        raise HTTPException(status_code=422, detail="Alert has no polygon to scan")
+
+    try:
+        from .services.osm_impact_service import get_osm_impact_service
+    except ImportError:
+        from backend.services.osm_impact_service import get_osm_impact_service
+
+    service = get_osm_impact_service()
+    result = await service.scan(
+        product_id, alert.polygon, event_name=alert.event_name, force=force
+    )
+
+    if push and result.get("total", 0) > 0:
+        broker = get_message_broker()
+        await broker.broadcast_impact_places(result)
+
+    return result
+
+
+@app.post("/api/impact/clear")
+async def clear_impact_overlay():
+    """Hide the impact panel on all stream widgets."""
+    broker = get_message_broker()
+    await broker.broadcast_impact_clear()
+    return {"success": True}
+
+
+@app.post("/api/alerts/{product_id}/focus")
+async def focus_alert_on_map(product_id: str):
+    """Tell map clients (the radar app) to zoom to and flash this alert.
+
+    Broadcasts the full alert dict so clients have the polygon, centroid, and
+    detail fields without another lookup.
+    """
+    alert_manager = get_alert_manager()
+    alert = alert_manager.get_alert(product_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    broker = get_message_broker()
+    await broker.broadcast_focus_alert(alert.to_dict())
+    return {"success": True}
+
+
 @app.delete("/api/alerts/{product_id}")
 async def clear_alert_manual(product_id: str):
     """Manually clear an alert by product ID."""
@@ -740,8 +1219,8 @@ async def get_stats():
 
 
 @app.get("/api/event-stats")
-async def get_event_stats():
-    """Get cumulative event statistics for the current monitoring session."""
+async def get_event_stats(window: str = "session"):
+    """Get event statistics. window: 'session' | '24h' | '7d'"""
     try:
         from .services.event_stats_service import get_event_stats_service
     except ImportError:
@@ -752,16 +1231,14 @@ async def get_event_stats():
         from backend.services.lsr_service import get_lsr_service
 
     event_stats = get_event_stats_service()
-
-    # Pull LSR stats from the LSR service
     lsr_svc = get_lsr_service()
-    lsr_stats_raw = lsr_svc.get_statistics() if hasattr(lsr_svc, "get_statistics") else {}
 
-    # Summarize LSR by type
+    lsr_hours = 168 if window == "7d" else 24
+
     try:
         settings = get_settings()
         all_reports = await lsr_svc.fetch_reports(
-            states=settings.filter_states, hours=24
+            states=settings.filter_states, hours=lsr_hours
         )
         lsr_by_type: dict[str, int] = {}
         max_hail_lsr: Optional[float] = None
@@ -769,7 +1246,6 @@ async def get_event_stats():
         for r in all_reports:
             rtype = getattr(r, "report_type", "") or ""
             lsr_by_type[rtype] = lsr_by_type.get(rtype, 0) + 1
-            # Max hail
             if "hail" in rtype.lower():
                 mag = getattr(r, "magnitude", None)
                 if mag:
@@ -779,7 +1255,6 @@ async def get_event_stats():
                             max_hail_lsr = v
                     except (ValueError, TypeError):
                         pass
-            # Max wind
             if "wind" in rtype.lower():
                 mag = getattr(r, "magnitude", None)
                 if mag:
@@ -789,7 +1264,6 @@ async def get_event_stats():
                             max_wind_lsr = v
                     except (ValueError, TypeError):
                         pass
-
         lsr_summary = {
             "total": len(all_reports),
             "by_type": lsr_by_type,
@@ -803,7 +1277,12 @@ async def get_event_stats():
         logger.warning(f"Could not fetch LSR stats: {e}")
         lsr_summary = {}
 
-    return event_stats.get_stats(lsr_stats=lsr_summary)
+    if window == "24h":
+        return event_stats.compute_historical_stats(24, lsr_stats=lsr_summary)
+    elif window == "7d":
+        return event_stats.compute_historical_stats(168, lsr_stats=lsr_summary)
+    else:
+        return event_stats.get_stats(lsr_stats=lsr_summary)
 
 
 @app.post("/api/event-stats/reset")
@@ -819,23 +1298,22 @@ async def reset_event_stats():
     return {"success": True, "message": "Event session reset", "session_start": event_stats.session_start.isoformat()}
 
 
-@app.get("/api/map/zones")
-async def get_map_zones():
+async def build_map_zones() -> dict:
     """
-    Get zone-based map data for rendering.
+    Build zone-based map data for rendering.
 
     Returns individual zone geometries with their highest priority alert,
     allowing the map to render each zone only once with the correct color.
+
+    Shared by the GET /api/map/zones endpoint (polling) and the WebSocket
+    `alert_zones` push (broadcast the instant an alert changes), so both paths
+    produce an identical payload.
     """
     from .services.zone_geometry_service import get_zone_geometry_service
 
     alert_manager = get_alert_manager()
     zone_service = get_zone_geometry_service()
     alerts = alert_manager.get_alerts_sorted(by_priority=True)
-
-    # Polygon-based phenomena that should NOT render zone fills
-    # These are storm-based warnings that use polygon geometry instead of county/zone fills
-    POLYGON_ALERT_PHENOMENA = {'TO', 'SV', 'FF', 'SQ', 'SPS'}
 
     # Priority for significance (lower = higher priority)
     SIGNIFICANCE_PRIORITY = {
@@ -865,12 +1343,13 @@ async def get_map_zones():
         if not alert.affected_areas:
             continue
 
-        # Polygon-based alert types (TOR, SVR, FFW, SPS, etc.) render as polygon overlays
-        # on the frontend, NOT as zone fills. Skip them entirely from zone rendering to
-        # prevent visual overlap with watches/advisories that share the same geography.
-        # Exception: Watches (significance A) always use zone fills.
+        # Any alert with its own polygon (storm-based warnings: TOR, SVR, FFW, FL.W
+        # with LAT...LON, SPS, etc.) renders as a polygon overlay on the frontend
+        # — skip it from zone fills to prevent visual overlap with the broader
+        # county/zone shape. Watches (significance A) always use zone fills because
+        # their "polygon" is a convective outline box, not a precise warning area.
         sig = alert.significance.value if hasattr(alert.significance, 'value') else alert.significance
-        if alert.phenomenon in POLYGON_ALERT_PHENOMENA and sig != 'A':
+        if alert.polygon and sig != 'A':
             continue
 
         priority = get_alert_priority(alert)
@@ -934,6 +1413,35 @@ async def get_map_zones():
         "alert_types": list(alert_types.values()),
         "total_zones": len(zones),
     }
+
+
+@app.get("/api/map/zones")
+async def get_map_zones():
+    """Get zone-based map data for rendering (polling endpoint)."""
+    return await build_map_zones()
+
+
+# Current on-air radar product, shown by the stream's upper-third overlay.
+# Driven by the AutoHotkey passthrough hotkeys (same keys that switch the radar
+# app), so the label always matches what's on screen.
+_current_radar_product = "reflectivity"
+
+
+@app.get("/api/stream/radar-product")
+async def stream_radar_product(value: Optional[str] = Query(None, alias="set")):
+    """
+    Get or set the on-air radar product label for the stream overlay.
+
+    - `GET /api/stream/radar-product`            → current product
+    - `GET /api/stream/radar-product?set=velocity` → set it + broadcast to overlays
+
+    GET-to-set keeps it trivial to call from AutoHotkey / curl on localhost.
+    """
+    global _current_radar_product
+    if value is not None:
+        _current_radar_product = value.strip().lower()
+        await get_message_broker().broadcast_radar_product(_current_radar_product)
+    return {"product": _current_radar_product}
 
 
 @app.get("/api/recent")
@@ -1045,6 +1553,38 @@ async def get_lsr_types():
         "types": list(LSR_TYPE_COLORS.keys()),
         "colors": LSR_TYPE_COLORS,
     }
+
+
+@app.get("/api/proxy/spc-image")
+async def proxy_spc_image(
+    url: str = Query(..., description="Full SPC image URL"),
+):
+    """Proxy generic SPC images (like day1otlk.gif) to bypass hotlink protection."""
+    from fastapi.responses import Response
+    
+    if not url.startswith("https://www.spc.noaa.gov/"):
+        raise HTTPException(status_code=400, detail="Only spc.noaa.gov URLs allowed")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=15),
+                headers={
+                    "Referer": "https://www.spc.noaa.gov/",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                },
+            ) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail=f"SPC returned {resp.status}")
+                data = await resp.read()
+                content_type = resp.headers.get("Content-Type", "image/gif")
+        return Response(content=data, media_type=content_type, headers={"Cache-Control": "public, max-age=300"})
+    except Exception as e:
+        logger.error(f"SPC image proxy fetch failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch from SPC: {e}")
+
+
 
 
 @app.get("/api/proxy/mesoanalysis")
@@ -2637,6 +3177,132 @@ async def get_radar_status():
     return svc.status.to_dict()
 
 
+@app.get("/api/radar/chunks/diagnostic")
+async def get_radar_chunks_diagnostic():
+    """Per-site chunks-bucket pipeline diagnostics.
+
+    Empty diagnostics block if the chunks path is disabled — no error.
+    """
+    settings = get_settings()
+    if not settings.nexrad_chunks_enabled:
+        return {
+            "enabled": False,
+            "reason": "nexrad_chunks_enabled = false",
+            "diagnostics": {},
+        }
+    try:
+        from .services.nexrad_chunks_service import get_nexrad_chunks_service
+        svc = get_nexrad_chunks_service()
+    except Exception as e:
+        return {"enabled": False, "reason": f"load error: {e}", "diagnostics": {}}
+    if svc is None:
+        return {"enabled": False, "reason": "service not started", "diagnostics": {}}
+    return {
+        "enabled":        True,
+        "poll_interval_s": svc._poll_interval,
+        "min_partial":    svc._min_partial,
+        "render_on_complete": svc._render_on_complete,
+        "now_utc":        datetime.now(timezone.utc).isoformat(),
+        "diagnostics":    svc.diagnostics,
+    }
+
+
+@app.get("/api/radar/diagnostic")
+async def get_radar_diagnostic():
+    """Per-site pipeline diagnostics for latency debugging.
+
+    Returns, per active site, the latest scan we're showing, the latest scan
+    available on S3, and a breakdown of stage timings (list/download/parse/
+    dealias/render/grid).  When complaints come in like "the scan is 12 min
+    old" this endpoint tells you whether the upstream is slow, the network
+    is slow, or our pipeline is slow.
+    """
+    settings = get_settings()
+    if not settings.nexrad_enabled:
+        return {"enabled": False, "active_sites": [], "diagnostics": {}}
+    svc = get_nexrad_service()
+    if not svc:
+        return {"enabled": False, "active_sites": [], "diagnostics": {}}
+
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+
+    # VCP-duration estimates from NEXRAD VCP catalog.  Used to compute the
+    # archive-bucket "irreducible floor": you cannot show a scan before the
+    # last tilt has been collected.  Tilt count is a coarse proxy because
+    # SAILS/MRLE inject extra low-level passes, but it's good enough to tell
+    # the user whether their lag is pipeline-induced or VCP-induced.
+    def _vcp_duration_seconds(tilt_count):
+        if not tilt_count or tilt_count <= 0:
+            return None
+        if tilt_count <= 5:   return 600   # VCP 31/32 clear-air (10 min)
+        if tilt_count <= 7:   return 420   # VCP 35 clear-air (7 min)
+        if tilt_count <= 9:   return 360   # VCP 21/121 (6 min)
+        if tilt_count <= 14:  return 270   # VCP 12/211/212 base (4.5 min)
+        if tilt_count <= 15:  return 360   # VCP 215 (6 min)
+        if tilt_count <= 17:  return 300   # 212/215 + SAILSx3 (~5 min)
+        return 360                          # severe + SAILS + MRLE, ~6 min
+
+    diag_out = {}
+    for site, d in svc.diagnostics.items():
+        entry = dict(d)
+        # Recompute "live" ages so they reflect now, not when diag was written
+        showing = entry.get("showing_scan_ts")
+        if showing:
+            try:
+                entry["showing_age_s_live"] = round(
+                    (now - _dt.fromisoformat(showing)).total_seconds(), 1
+                )
+            except (ValueError, TypeError):
+                pass
+        s3_ts = entry.get("latest_available_ts")
+        if s3_ts:
+            try:
+                entry["latest_available_age_s_live"] = round(
+                    (now - _dt.fromisoformat(s3_ts)).total_seconds(), 1
+                )
+            except (ValueError, TypeError):
+                pass
+
+        # Latency budget breakdown — surfaces whether the user's pipeline
+        # overhead is meaningful relative to the unavoidable VCP duration.
+        tilts = entry.get("last_tilt_count")
+        vcp_s = _vcp_duration_seconds(tilts)
+        if vcp_s is not None:
+            entry["vcp_estimated_duration_s"] = vcp_s
+            # Archive floor ≈ VCP duration + S3 propagation (30s) + poll discovery
+            poll_int = getattr(svc, "_poll_interval", 10) or 10
+            entry["archive_bucket_floor_s"] = vcp_s + 30 + poll_int
+            # How much we add on top of the floor
+            stage_sum = sum(
+                float(entry.get(k, 0) or 0)
+                for k in (
+                    "last_list_duration_s",
+                    "last_download_duration_s",
+                    "last_parse_duration_s",
+                    "last_dealias_duration_s",
+                    "last_render_duration_s",
+                )
+            )
+            entry["pipeline_overhead_s"] = round(stage_sum, 2)
+            # Headline number: if showing_age_s_live ≈ archive_bucket_floor_s,
+            # the lag is the radar, not us.  If it's much higher, we've got
+            # work to do.
+            if "showing_age_s_live" in entry:
+                entry["excess_over_archive_floor_s"] = round(
+                    entry["showing_age_s_live"] - entry["archive_bucket_floor_s"], 1
+                )
+
+        diag_out[site] = entry
+    return {
+        "enabled":        True,
+        "active_sites":   svc.active_sites,
+        "poll_interval_s": getattr(svc, "_poll_interval", None),
+        "now_utc":        now.isoformat(),
+        "diagnostics":    diag_out,
+    }
+
+
 @app.get("/api/radar/sites")
 async def get_radar_sites(lat: Optional[float] = None, lon: Optional[float] = None):
     """Get list of NEXRAD radar sites, optionally sorted by distance from a point."""
@@ -2663,7 +3329,8 @@ async def get_radar_frame(product: str):
     if not svc:
         raise HTTPException(status_code=503, detail="Radar service not enabled")
 
-    if product not in ("reflectivity", "velocity", "cross_correlation_ratio"):
+    from .services.nexrad_service import RADAR_PRODUCTS as _RP
+    if product not in _RP:
         raise HTTPException(status_code=400, detail=f"Unknown product: {product}")
 
     frames = svc.get_latest_frames_for_product(product)
@@ -2677,7 +3344,8 @@ async def get_radar_frame_history(product: str, count: int = 10, site: str | Non
     if not svc:
         raise HTTPException(status_code=503, detail="Radar service not enabled")
 
-    if product not in ("reflectivity", "velocity", "cross_correlation_ratio"):
+    from .services.nexrad_service import RADAR_PRODUCTS as _RP
+    if product not in _RP:
         raise HTTPException(status_code=400, detail=f"Unknown product: {product}")
 
     frames = svc.get_frame_history(product, count, site=site)
@@ -2757,10 +3425,10 @@ async def get_storm_cell(cell_id: str):
     return cell.to_dict()
 
 
-# Serve radar images as static files
+# Serve radar images as static files (legacy oneshot_frame / social graphics)
 @app.get("/api/radar/images/{site}/{filename}")
 async def serve_radar_image(site: str, filename: str):
-    """Serve rendered radar images (WebP or PNG)."""
+    """Serve rendered radar images (WebP or PNG) — used by social graphic pipeline."""
     settings = get_settings()
     image_path = Path(settings.data_dir) / "radar" / site / filename
     if not image_path.exists():
@@ -2770,6 +3438,136 @@ async def serve_radar_image(site: str, filename: str):
         str(image_path),
         media_type=media_type,
         headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/api/radar/cached/{site}")
+async def get_cached_radar_frame(site: str):
+    """Return the latest cached reflectivity binary for any NEXRAD site.
+
+    Returns 404 if the site has never been loaded this session.  The frontend
+    uses this to show a stale-but-instant frame when switching sites while
+    the fresh download runs in the background.
+    """
+    from fastapi.responses import Response as FastResponse
+    svc = get_nexrad_service()
+    if not svc:
+        raise HTTPException(status_code=503, detail="Radar service not running")
+    binary = svc.get_cached_frame(site)
+    if not binary:
+        raise HTTPException(status_code=404, detail="No cached frame for this site")
+    return FastResponse(
+        content=binary,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/radar/binary/{site}/{product}/{frame_id}")
+async def get_radar_binary_frame(site: str, product: str, frame_id: str):
+    """Return a cached binary radar frame by ID (RDRF wire format) for history scrubber."""
+    from fastapi.responses import Response as FastResponse
+    svc = get_nexrad_service()
+    if not svc:
+        raise HTTPException(status_code=503, detail="Radar service not running")
+    frame = svc.get_frame_by_id(site, product, frame_id)
+    if not frame or not frame.binary_data:
+        raise HTTPException(status_code=404, detail="Frame not found")
+    return FastResponse(
+        content=frame.binary_data,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/api/mrms/status")
+async def get_mrms_status():
+    """MRMS service status — also tells the frontend whether pygrib is available."""
+    svc = get_mrms_service()
+    if not svc:
+        return {"available": False, "reason": "service not started"}
+    return {
+        "available": svc.available,
+        "has_data":  svc.latest_png is not None,
+        "timestamp": svc.latest_timestamp,
+        "reason":    None if svc.available else "install pygrib via: conda install -c conda-forge eccodes pygrib",
+    }
+
+
+@app.get("/api/mrms/frames")
+async def list_mrms_frames():
+    """List all cached MRMS frames (oldest first, up to 30 = ~60 min)."""
+    svc = get_mrms_service()
+    if not svc or not svc.available:
+        raise HTTPException(status_code=503, detail="MRMS service not available")
+    return svc.get_frame_list()
+
+
+@app.get("/api/mrms/frame/{ts}")
+async def get_mrms_frame_by_ts(ts: str):
+    """Return a specific MRMS frame binary by timestamp (YYYYMMDD-HHMMSS)."""
+    from fastapi.responses import Response as FastResponse
+    svc = get_mrms_service()
+    if not svc or not svc.available:
+        raise HTTPException(status_code=503, detail="MRMS service not available")
+    binary = svc.get_frame_binary(ts)
+    if not binary:
+        raise HTTPException(status_code=404, detail=f"Frame {ts} not in cache")
+    return FastResponse(
+        content=binary,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/api/mrms/binary")
+async def get_mrms_binary():
+    """Return the latest MRMS grid as a compact binary for the WebGL custom layer."""
+    from fastapi.responses import Response as FastResponse
+    svc = get_mrms_service()
+    if not svc or not svc.available or svc.latest_binary is None:
+        raise HTTPException(status_code=503, detail="MRMS binary not available")
+    return FastResponse(
+        content=svc.latest_binary,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/mrms/latest.png")
+async def get_mrms_png():
+    """Latest MRMS composite reflectivity as a RGBA PNG (CONUS, ~1.5 MB)."""
+    from fastapi.responses import Response as FastResponse
+    svc = get_mrms_service()
+    if not svc or not svc.available or svc.latest_png is None:
+        raise HTTPException(status_code=503, detail="MRMS data not available")
+    return FastResponse(
+        content=svc.latest_png,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/hrrr/sounding.png")
+async def get_hrrr_sounding(lat: float, lon: float):
+    """Full SHARPpy/SounderPy HRRR F00 point sounding (nearest BUFKIT site) as PNG.
+
+    Heavy (~30 s first render for a site; cached per-site after) — the radar app
+    shows an instant quick-look while this builds.
+    """
+    from fastapi.responses import Response as FastResponse
+    from .services.hrrr_service import get_hrrr_service
+
+    svc = get_hrrr_service()
+    loop = asyncio.get_event_loop()
+    try:
+        png, station = await loop.run_in_executor(None, svc.get_sounding_png, lat, lon)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"HRRR sounding unavailable: {e}")
+    return FastResponse(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store", "X-Bufkit-Station": station},
     )
 
 
@@ -3235,6 +4033,108 @@ async def reset_states_settings():
     }
 
 
+# ==================== County Filter ====================
+
+
+class CountiesSettingsUpdate(BaseModel):
+    """Request model for updating per-state county filters."""
+    filter_counties: dict[str, list[str]] = Field(
+        ..., description="Map of state code -> list of county UGC codes to keep ([] = all)"
+    )
+
+
+@app.get("/api/settings/counties")
+async def get_counties_settings():
+    """List counties for each monitored state and the user's current selection.
+
+    For a state with no selection (empty list), all of its counties are active.
+    """
+    try:
+        from .config.settings import _load_user_overrides
+        from .services.ugc_service import get_counties_for_state
+    except ImportError:
+        from backend.config.settings import _load_user_overrides
+        from backend.services.ugc_service import get_counties_for_state
+
+    settings = get_settings()
+    overrides = _load_user_overrides()
+    filter_counties = settings.filter_counties or {}
+
+    states_out: dict[str, dict] = {}
+    for state in sorted(settings.filter_states):
+        st = state.upper()
+        selected = set(filter_counties.get(st) or [])
+        counties = [
+            {"code": c["code"], "name": c["name"], "enabled": c["code"] in selected}
+            for c in get_counties_for_state(st)
+        ]
+        states_out[st] = {
+            "state_name": _ALL_STATES.get(st, st),
+            "counties": counties,
+            # No explicit selection => every county is active (no narrowing).
+            "all_selected": len(selected) == 0,
+        }
+
+    return {
+        "states": states_out,
+        "using_overrides": "filter_counties" in overrides,
+    }
+
+
+@app.post("/api/settings/counties")
+async def update_counties_settings(update: CountiesSettingsUpdate):
+    """Update the per-state county filter. Saves to user_settings.json and reloads."""
+    try:
+        from .config.settings import _load_user_overrides, _save_user_overrides, reload_settings
+    except ImportError:
+        from backend.config.settings import _load_user_overrides, _save_user_overrides, reload_settings
+
+    # Normalize and drop states whose selection is empty (empty = all counties).
+    normalized: dict[str, list[str]] = {}
+    for state, codes in update.filter_counties.items():
+        cleaned = [c.strip().upper() for c in codes if c and c.strip()]
+        if cleaned:
+            normalized[state.upper()] = sorted(set(cleaned))
+
+    overrides = _load_user_overrides()
+    if normalized:
+        overrides["filter_counties"] = normalized
+    else:
+        overrides.pop("filter_counties", None)
+    _save_user_overrides(overrides)
+    new_settings = reload_settings()
+
+    total = sum(len(v) for v in new_settings.filter_counties.values())
+    logger.info(f"County filter updated: {len(new_settings.filter_counties)} state(s), {total} counties")
+    return {
+        "success": True,
+        "filter_counties": new_settings.filter_counties,
+        "message": (
+            f"County filter active for {len(new_settings.filter_counties)} state(s)"
+            if new_settings.filter_counties else "County filter cleared (all counties)"
+        ),
+    }
+
+
+@app.post("/api/settings/counties/reset")
+async def reset_counties_settings():
+    """Clear the county filter (monitor all counties in each state)."""
+    try:
+        from .config.settings import _load_user_overrides, _save_user_overrides, reload_settings, _USER_SETTINGS_FILE
+    except ImportError:
+        from backend.config.settings import _load_user_overrides, _save_user_overrides, reload_settings, _USER_SETTINGS_FILE
+
+    overrides = _load_user_overrides()
+    overrides.pop("filter_counties", None)
+    if overrides:
+        _save_user_overrides(overrides)
+    elif _USER_SETTINGS_FILE.exists():
+        _USER_SETTINGS_FILE.unlink()
+    reload_settings()
+
+    return {"success": True, "message": "County filter cleared (all counties)"}
+
+
 # ==================== General Settings ====================
 
 
@@ -3601,7 +4501,7 @@ async def get_chase_log_geojson(date: str):
 # Alert Graphics
 # =============================================================================
 
-_GRAPHICS_DIR = Path("data/alert_graphics")
+_GRAPHICS_DIR = Path(__file__).parent.parent / "data" / "alert_graphics"
 
 
 @app.post("/api/alert-graphics/save")
@@ -3785,6 +4685,305 @@ async def get_headline_event_types():
             for k, v in PHENOMENON_STYLES.items()
         ]
     }
+
+
+# =============================================================================
+# Alert Broadcast Graphic Endpoints
+# =============================================================================
+
+@app.get("/api/graphics/alert/{product_id}")
+async def generate_alert_broadcast_graphic(
+    product_id: str,
+    save: bool = Query(False, description="Save to alert graphics gallery"),
+):
+    """
+    Generate a broadcast-quality 1920x1080 alert graphic for the given alert.
+
+    Returns a PNG image stream and optionally saves it to the gallery.
+    """
+    from fastapi.responses import StreamingResponse
+    import io as _io
+    import asyncio as _asyncio
+
+    alert_mgr = get_alert_manager()
+    alert = None
+    for a in alert_mgr.get_all_alerts():
+        if a.product_id == product_id:
+            alert = a
+            break
+    if alert is None:
+        raise HTTPException(status_code=404, detail=f"Alert '{product_id}' not found")
+
+    settings = get_settings()
+    brand = get_brand_config(settings.brand)
+
+    # ── Radar frame resolution (cascading) ────────────────────────────────────
+    # Tier 1a: check if the WFO's nearest NEXRAD site is already cached locally.
+    # Most WFO codes map directly to "K" + code (e.g. IND→KIND). For any that
+    # don't, we find the nearest site by great-circle distance to the centroid.
+    radar_frame = None
+    try:
+        import math as _math
+        nexrad_svc = get_nexrad_service()
+        from backend.services.nexrad_sites import NEXRAD_SITES as _NS
+
+        sender = getattr(alert, "sender_office", "").upper().lstrip("K")  # strip leading K if present
+        centroid = getattr(alert, "centroid", None)
+
+        def _nearest_nexrad_site(lat: float, lon: float) -> str:
+            """Return the NEXRAD site ID closest to (lat, lon)."""
+            best_id, best_d = "", float("inf")
+            for sid, info in _NS.items():
+                dlat = info["lat"] - lat
+                dlon = (info["lon"] - lon) * _math.cos(_math.radians(lat))
+                d = dlat * dlat + dlon * dlon
+                if d < best_d:
+                    best_d, best_id = d, sid
+            return best_id
+
+        # Try "K" + WFO first (covers ~90 % of WFOs)
+        candidate = "K" + sender if sender else ""
+        if candidate not in _NS and centroid:
+            candidate = _nearest_nexrad_site(centroid[0], centroid[1])
+
+        # Tier 1a: already in the service cache for the correct site
+        if candidate:
+            history = nexrad_svc.get_frame_history("reflectivity", count=1, site=candidate)
+            if history:
+                radar_frame = history[-1]
+                logger.info(f"Broadcast graphic using cached {candidate} radar frame")
+
+        # Tier 1b: active site — only if it's within ~250 km of the alert centroid.
+        # A distant radar gives poor coverage and IEM composite is better in that case.
+        if radar_frame is None and centroid:
+            frames = nexrad_svc.get_latest_frames()
+            candidate_frame = frames.get("reflectivity") or frames.get("Reflectivity")
+            if candidate_frame:
+                active_site = nexrad_svc.active_site
+                site_info = _NS.get(active_site, {})
+                if site_info:
+                    dlat = site_info["lat"] - centroid[0]
+                    dlon = (site_info["lon"] - centroid[1]) * _math.cos(_math.radians(centroid[0]))
+                    dist_deg = _math.sqrt(dlat * dlat + dlon * dlon)
+                    if dist_deg < 2.25:  # ~250 km
+                        radar_frame = candidate_frame
+                        logger.info(f"Broadcast graphic using active-site {active_site} ({dist_deg:.1f}° away)")
+                    else:
+                        logger.info(f"Active site {active_site} is {dist_deg:.1f}° away — using tile radar instead")
+
+    except Exception as _e:
+        logger.debug(f"Radar frame lookup failed, will use tile fallback: {_e}")
+
+    # Live/cached frames are binary-only (no image_path); rasterize OUR binary
+    # frame so the Pillow renderer overlays our Level-2 radar instead of tiles.
+    if radar_frame is not None and getattr(radar_frame, "image_path", None) is None \
+            and getattr(radar_frame, "binary_data", None):
+        try:
+            nexrad_svc_b = get_nexrad_service()
+            loop_b = _asyncio.get_event_loop()
+            rendered_b = await loop_b.run_in_executor(
+                None, lambda: nexrad_svc_b.render_binary_frame_to_image(radar_frame)
+            )
+            radar_frame = rendered_b  # None falls through to oneshot/tiles below
+            if rendered_b is not None:
+                logger.info("Broadcast graphic: rasterized cached binary frame for overlay")
+        except Exception as _eb:
+            logger.debug(f"Binary frame rasterize failed: {_eb}")
+            radar_frame = None
+
+    # Tier 1c: one-off Level-2 download from the nearest NEXRAD site.
+    # This runs if no cached frame was close enough — downloads fresh data from AWS (~15-30s).
+    if radar_frame is None and centroid:
+        try:
+            import asyncio as _asyncio2
+            nearest_site = _nearest_nexrad_site(centroid[0], centroid[1])
+            if nearest_site:
+                logger.info(f"Broadcast graphic: oneshot download from {nearest_site}")
+                loop2 = _asyncio2.get_event_loop()
+                radar_frame = await loop2.run_in_executor(
+                    None, lambda: nexrad_svc.oneshot_frame(nearest_site)
+                )
+                if radar_frame:
+                    logger.info(f"Broadcast graphic: oneshot {nearest_site} succeeded")
+                else:
+                    logger.info(f"Broadcast graphic: oneshot {nearest_site} returned no frame, falling back to tiles")
+        except Exception as _e2:
+            logger.debug(f"Oneshot radar download failed: {_e2}")
+
+    # If radar_frame is still None here, _render_map_panel will automatically
+    # fall back to IEM composite tiles → RainViewer.
+
+    try:
+        from .services.alert_broadcast_graphic_service import generate_alert_broadcast_graphic as _gen
+    except ImportError:
+        from backend.services.alert_broadcast_graphic_service import generate_alert_broadcast_graphic as _gen
+
+    meteorologist = getattr(brand, "meteorologist_name", None) or ""
+    zone_polys = await _fetch_zone_polygons_for_alert(alert)
+
+    try:
+        loop = _asyncio.get_event_loop()
+        png_bytes = await loop.run_in_executor(
+            None,
+            lambda: _gen(
+                alert=alert,
+                radar_frame=radar_frame,
+                zone_polygons=zone_polys,
+                brand_name=brand.name,
+                meteorologist_name=meteorologist,
+            )
+        )
+    except Exception as e:
+        logger.exception(f"Alert broadcast graphic failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Graphic generation failed: {e}")
+
+    if save:
+        import re as _re
+        import json as _json
+        _GRAPHICS_DIR.mkdir(parents=True, exist_ok=True)
+        safe_id = _re.sub(r"[^\w\-.]", "_", product_id)
+        img_path = _GRAPHICS_DIR / f"{safe_id}.png"
+        img_path.write_bytes(png_bytes)
+        meta_path = _GRAPHICS_DIR / f"{safe_id}.json"
+        meta_path.write_text(_json.dumps({
+            "product_id": product_id,
+            "event_name": alert.event_name,
+        }))
+        logger.info(f"Saved broadcast graphic: {safe_id}.png")
+
+    return StreamingResponse(
+        _io.BytesIO(png_bytes),
+        media_type="image/png",
+        headers={"Content-Disposition": f'inline; filename="{product_id}.png"'},
+    )
+
+
+@app.get("/api/graphics/alert/{product_id}/save")
+async def save_alert_broadcast_graphic(product_id: str):
+    """Generate and save a broadcast graphic for the alert, return gallery metadata."""
+    from fastapi.responses import JSONResponse
+    import re as _re
+    import json as _json
+    import io as _io
+    import asyncio as _asyncio
+
+    alert_mgr = get_alert_manager()
+    alert = None
+    for a in alert_mgr.get_all_alerts():
+        if a.product_id == product_id:
+            alert = a
+            break
+    if alert is None:
+        raise HTTPException(status_code=404, detail=f"Alert '{product_id}' not found")
+
+    settings = get_settings()
+    brand = get_brand_config(settings.brand)
+
+    radar_frame = None
+    try:
+        nexrad_svc = get_nexrad_service()
+        from backend.services.nexrad_sites import NEXRAD_SITES as _NS2
+        sender2 = getattr(alert, "sender_office", "").upper().lstrip("K")
+        centroid2 = getattr(alert, "centroid", None)
+        candidate2 = "K" + sender2 if sender2 else ""
+        if candidate2 not in _NS2 and centroid2:
+            import math as _math2
+            best_id2, best_d2 = "", float("inf")
+            for sid, info in _NS2.items():
+                dlat = info["lat"] - centroid2[0]
+                dlon = (info["lon"] - centroid2[1]) * _math2.cos(_math2.radians(centroid2[0]))
+                d = dlat * dlat + dlon * dlon
+                if d < best_d2:
+                    best_d2, best_id2 = d, sid
+            candidate2 = best_id2
+        if candidate2:
+            hist2 = nexrad_svc.get_frame_history("reflectivity", count=1, site=candidate2)
+            if hist2:
+                radar_frame = hist2[-1]
+        if radar_frame is None and centroid2:
+            frames2 = nexrad_svc.get_latest_frames()
+            cframe2 = frames2.get("reflectivity") or frames2.get("Reflectivity")
+            if cframe2:
+                import math as _math3
+                asite2 = nexrad_svc.active_site
+                sinfo2 = _NS2.get(asite2, {})
+                if sinfo2:
+                    dlat2 = sinfo2["lat"] - centroid2[0]
+                    dlon2 = (sinfo2["lon"] - centroid2[1]) * _math3.cos(_math3.radians(centroid2[0]))
+                    if _math3.sqrt(dlat2*dlat2 + dlon2*dlon2) < 2.25:
+                        radar_frame = cframe2
+    except Exception:
+        pass
+
+    # Rasterize OUR binary frame to a PNG so the graphic overlays Level-2 radar
+    # instead of falling back to composite tiles.
+    if radar_frame is not None and getattr(radar_frame, "image_path", None) is None \
+            and getattr(radar_frame, "binary_data", None):
+        try:
+            loop_bs = _asyncio.get_event_loop()
+            radar_frame = await loop_bs.run_in_executor(
+                None, lambda: get_nexrad_service().render_binary_frame_to_image(radar_frame)
+            )
+        except Exception:
+            radar_frame = None
+
+    # Tier 1c: one-off Level-2 download from the nearest NEXRAD site
+    if radar_frame is None and centroid2:
+        try:
+            import asyncio as _asyncio3
+            import math as _math4
+            nexrad_svc2 = get_nexrad_service()
+            from backend.services.nexrad_sites import NEXRAD_SITES as _NS3
+            best3, bd3 = "", float("inf")
+            for sid3, info3 in _NS3.items():
+                dlat3 = info3["lat"] - centroid2[0]
+                dlon3 = (info3["lon"] - centroid2[1]) * _math4.cos(_math4.radians(centroid2[0]))
+                d3 = dlat3*dlat3 + dlon3*dlon3
+                if d3 < bd3:
+                    bd3, best3 = d3, sid3
+            if best3:
+                logger.info(f"Save endpoint: oneshot download from {best3}")
+                loop3 = _asyncio3.get_event_loop()
+                radar_frame = await loop3.run_in_executor(
+                    None, lambda: nexrad_svc2.oneshot_frame(best3)
+                )
+                if radar_frame:
+                    logger.info(f"Save endpoint: oneshot {best3} succeeded")
+        except Exception:
+            pass
+
+    try:
+        from .services.alert_broadcast_graphic_service import generate_alert_broadcast_graphic as _gen
+    except ImportError:
+        from backend.services.alert_broadcast_graphic_service import generate_alert_broadcast_graphic as _gen
+
+    meteorologist = getattr(brand, "meteorologist_name", None) or ""
+    zone_polys2 = await _fetch_zone_polygons_for_alert(alert)
+
+    loop = _asyncio.get_event_loop()
+    png_bytes = await loop.run_in_executor(
+        None,
+        lambda: _gen(
+            alert=alert,
+            radar_frame=radar_frame,
+            zone_polygons=zone_polys2,
+            brand_name=brand.name,
+            meteorologist_name=meteorologist,
+        )
+    )
+
+    _GRAPHICS_DIR.mkdir(parents=True, exist_ok=True)
+    safe_id = _re.sub(r"[^\w\-.]", "_", product_id)
+    img_path = _GRAPHICS_DIR / f"{safe_id}.png"
+    img_path.write_bytes(png_bytes)
+    meta_path = _GRAPHICS_DIR / f"{safe_id}.json"
+    meta_path.write_text(_json.dumps({
+        "product_id": product_id,
+        "event_name": alert.event_name,
+    }))
+
+    return {"status": "saved", "product_id": product_id,
+            "url": f"/api/alert-graphics/image/{safe_id}.png"}
 
 
 # =============================================================================
