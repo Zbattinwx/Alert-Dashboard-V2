@@ -997,13 +997,15 @@ app = FastAPI(
 
 # CORS configuration
 # Regex covers: localhost on any port, 127.0.0.1 on any port,
-# and any 192.168.x.x address (LAN) on any port.
+# any 192.168.x.x address (LAN) on any port, and the Tauri desktop app origin
+# (https://tauri.localhost on Windows WebView2, tauri://localhost elsewhere) —
+# without it the bundled radar app's fetches (cameras, MRMS) are CORS-blocked.
 # allow_credentials=False is required when using a wildcard/regex origin
 # (the CORS spec forbids credentials=True with non-specific origins).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?|http://192\.168\.\d+\.\d+(:\d+)?",
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?|http://192\.168\.\d+\.\d+(:\d+)?|https?://tauri\.localhost|tauri://localhost",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
