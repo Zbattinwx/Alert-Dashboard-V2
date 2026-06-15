@@ -1,0 +1,47 @@
+{
+  "name": "Central Ohio Weather",
+  "short_name": "COWx",
+  "tagline": "Central Ohio Weather",
+  "logo": "cowx_logo.png",
+  "logo_dark": null,
+  "logo_is_wordmark": true,
+  "favicon": "favicon.ico",
+  "og_image": null,
+  "colors": {
+    "primary": "#1c84d6",
+    "secondary": "#5b9bd5",
+    "accent": "#2e9bd6",
+    "background": "#0c1726",
+    "surface": "#152439",
+    "text": "#f3f8ff",
+    "text_secondary": "#9fb6d4",
+    "success": "#22c55e",
+    "warning": "#f59e0b",
+    "error": "#ef4444",
+    "tornado_warning": "#dc2626",
+    "severe_thunderstorm": "#f97316",
+    "flash_flood": "#991b1b",
+    "winter_storm": "#ec4899"
+  },
+  "fonts": {
+    "heading": "Inter",
+    "body": "Inter",
+    "monospace": "JetBrains Mono",
+    "heading_weight": "600",
+    "body_weight": "400"
+  },
+  "ticker": {
+    "show_logo": true,
+    "logo_position": "left",
+    "sponsor_logo": null,
+    "scroll_speed_ms": 12000,
+    "background_color": null,
+    "text_color": null
+  },
+  "website_url": null,
+  "social_twitter": null,
+  "social_facebook": null,
+  "social_youtube": null,
+  "copyright_text": "Central Ohio Weather",
+  "powered_by_text": "Powered by Alert Dashboard V2"
+}

@@ -63,6 +63,7 @@ class BrandConfig(BaseModel):
     # Assets
     logo: str = Field(default="logo.png", description="Main logo filename")
     logo_dark: Optional[str] = Field(default=None, description="Dark mode logo")
+    logo_is_wordmark: bool = Field(default=False, description="Logo already includes the brand name (clients show the logo alone, no separate name text)")
     favicon: str = Field(default="favicon.ico", description="Favicon filename")
     og_image: Optional[str] = Field(default=None, description="OpenGraph image")
 

@@ -1495,7 +1495,7 @@ async def get_system_status():
 
 @app.get("/api/brand")
 async def get_brand():
-    """Get active brand configuration for the frontend."""
+    """Get active brand configuration for the frontend + radar app (white-label)."""
     settings = get_settings()
     brand = get_brand_config(settings.brand)
     return {
@@ -1503,10 +1503,27 @@ async def get_brand():
         "short_name": brand.short_name,
         "tagline": brand.tagline,
         "logo": brand.logo,
+        "logo_url": "/api/brand/logo",  # the radar app loads the active brand logo here
+        "logo_is_wordmark": brand.logo_is_wordmark,
+        "colors": brand.colors.model_dump(),  # semantic palette; clients map to their own CSS vars
         "website_url": brand.website_url,
         "social_twitter": brand.social_twitter,
         "css_overrides": brand.css_overrides,
     }
+
+
+@app.get("/api/brand/logo")
+async def get_brand_logo():
+    """Serve the active brand's logo (white-label), with default/TBF fallback."""
+    settings = get_settings()
+    brand = get_brand_config(settings.brand)
+    path = brand.get_asset_path(brand.logo, Path("config/brands"))
+    if path.exists():
+        return FileResponse(path)
+    fallback = FRONTEND_DIR / "tbf_logo.png"
+    if fallback.exists():
+        return FileResponse(fallback, media_type="image/png")
+    raise HTTPException(status_code=404, detail="Brand logo not found")
 
 
 # =============================================================================
