@@ -46,7 +46,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="sidebar">
       <div className="sidebar-header" style={{ flexDirection: 'column', gap: '8px' }}>
         <img
-          src={`${import.meta.env.BASE_URL}${brandLogo}`}
+          src={/^(https?:)?\//.test(brandLogo) ? brandLogo : `${import.meta.env.BASE_URL}${brandLogo}`}
           alt={brandName}
           style={{
             maxWidth: '160px',

@@ -151,7 +151,7 @@ const Dashboard: React.FC = () => {
         if (!data) return;
         setBrand({
           name: data.name,
-          logo: data.logo,
+          logo: data.logo_url || data.logo,
           website_url: data.website_url,
         });
         if (data.css_overrides) {

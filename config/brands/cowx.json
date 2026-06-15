@@ -23,6 +23,18 @@
     "flash_flood": "#991b1b",
     "winter_storm": "#ec4899"
   },
+  "css_overrides": {
+    "--accent-blue": "#1c84d6",
+    "--accent-cyan": "#2e9bd6",
+    "--accent-indigo": "#5b9bd5",
+    "--primary-color": "#1c84d6",
+    "--primary-light": "#5b9bd5",
+    "--primary-dark": "#0e5a99",
+    "--secondary-color": "#2e9bd6",
+    "--tbf-gradient": "linear-gradient(135deg, #1c84d6 0%, #2e9bd6 50%, #5b9bd5 100%)",
+    "--tbf-gradient-subtle": "linear-gradient(135deg, rgba(28,132,214,0.15) 0%, rgba(46,155,214,0.10) 50%, rgba(91,155,213,0.15) 100%)",
+    "--storm-gradient": "linear-gradient(135deg, #1c84d6 0%, #2e9bd6 50%, #5b9bd5 100%)"
+  },
   "fonts": {
     "heading": "Inter",
     "body": "Inter",
