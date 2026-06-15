@@ -37,6 +37,8 @@ try:
         load_ugc_map,
         get_lsr_service, start_lsr_service, stop_lsr_service, LSR_TYPE_COLORS, StormReport,
         get_odot_service, start_odot_service, stop_odot_service,
+        get_511_service,
+        get_cars_service,
         get_spc_service, start_spc_service, stop_spc_service, RISK_COLORS, RISK_NAMES,
         get_wind_gusts_service, start_wind_gusts_service, stop_wind_gusts_service,
         GUST_THRESHOLD_SIGNIFICANT, GUST_THRESHOLD_SEVERE, GUST_THRESHOLD_ADVISORY,
@@ -71,6 +73,8 @@ except ImportError:
         load_ugc_map,
         get_lsr_service, start_lsr_service, stop_lsr_service, LSR_TYPE_COLORS, StormReport,
         get_odot_service, start_odot_service, stop_odot_service,
+        get_511_service,
+        get_cars_service,
         get_spc_service, start_spc_service, stop_spc_service, RISK_COLORS, RISK_NAMES,
         get_wind_gusts_service, start_wind_gusts_service, stop_wind_gusts_service,
         GUST_THRESHOLD_SIGNIFICANT, GUST_THRESHOLD_SEVERE, GUST_THRESHOLD_ADVISORY,
@@ -1942,6 +1946,50 @@ async def submit_website_report(report: WebsiteReportSubmission, request: Reques
         "message": "Storm report submitted successfully",
         "report_id": storm_report.id,
     }
+
+
+# =============================================================================
+# Unified traffic cameras (OHGO snapshots + 511-family live HLS)
+# =============================================================================
+
+@app.get("/api/cameras")
+async def get_all_cameras(
+    refresh: bool = Query(False, description="Force refresh from upstream APIs"),
+):
+    """
+    Unified traffic-camera list for the radar app.
+
+    Merges OHGO (Ohio, 5s JPEG snapshots), the 511-family states, and the CARS
+    GraphQL states (CO/IN/IA/KS/MA/MN/NE) — both with live HLS video. Each camera
+    carries image_url and/or video_url so the app can show a refreshing snapshot
+    or play the live stream (hls.js) directly.
+    """
+    odot_service = get_odot_service()
+    svc_511 = get_511_service()
+    svc_cars = get_cars_service()
+    odot_cams, cams_511, cams_cars = await asyncio.gather(
+        odot_service.fetch_cameras(force_refresh=refresh),
+        svc_511.fetch_all(force_refresh=refresh),
+        svc_cars.fetch_all(force_refresh=refresh),
+    )
+
+    cameras: list[dict] = []
+    for c in odot_cams:
+        cameras.append({
+            "id": f"oh-{c.id}",
+            "source": "OHGO",
+            "state": "OH",
+            "location": c.location,
+            "latitude": c.latitude,
+            "longitude": c.longitude,
+            "image_url": c.image_url,
+            "video_url": "",
+            "description": c.description,
+        })
+    cameras.extend(c.to_dict() for c in cams_511)
+    cameras.extend(c.to_dict() for c in cams_cars)
+
+    return {"count": len(cameras), "cameras": cameras}
 
 
 # =============================================================================

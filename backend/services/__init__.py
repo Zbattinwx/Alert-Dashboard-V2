@@ -53,6 +53,16 @@ from .odot_service import (
     start_odot_service,
     stop_odot_service,
 )
+from .cameras_511_service import (
+    Cameras511Service,
+    Camera511,
+    get_511_service,
+)
+from .cameras_cars_service import (
+    CamerasCARSService,
+    CameraCARS,
+    get_cars_service,
+)
 from .spc_service import (
     SPCService,
     OutlookData,
@@ -198,6 +208,14 @@ __all__ = [
     "get_odot_service",
     "start_odot_service",
     "stop_odot_service",
+    # 511 cameras service
+    "Cameras511Service",
+    "Camera511",
+    "get_511_service",
+    # CARS GraphQL cameras service
+    "CamerasCARSService",
+    "CameraCARS",
+    "get_cars_service",
     # SPC Service
     "SPCService",
     "OutlookData",
