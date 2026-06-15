@@ -44,6 +44,7 @@ ROOT_WIN="$(pwd -W 2>/dev/null || pwd)"
   --add-data "$ROOT_WIN/backend/data;backend/data" \
   --add-data "$ROOT_WIN/frontend/dist;frontend/dist" \
   --add-data "$ROOT_WIN/widgets;widgets" \
+  --add-data "$ROOT_WIN/config/brands;config/brands" \
   packaging/run_backend.py
 
 echo "Built: packaging/dist/dashboard-backend/"

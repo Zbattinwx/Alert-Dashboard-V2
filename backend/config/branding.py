@@ -4,12 +4,22 @@ Allows switching between different brand configurations (ONW, Battin Front, etc.
 """
 
 import json
+import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+
+def brands_dir() -> Path:
+    """Directory holding brand JSONs + per-brand asset folders. Frozen-aware:
+    PyInstaller bundles config/brands under _MEIPASS, while a normal run reads it
+    relative to the working directory."""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", ".")) / "config" / "brands"
+    return Path("config/brands")
 
 
 class ColorScheme(BaseModel):
@@ -259,7 +269,7 @@ def get_brand_config(brand_name: str = "default", config_dir: Optional[Path] = N
     """
     # Try loading from file first
     if config_dir is None:
-        config_dir = Path("config/brands")
+        config_dir = brands_dir()
 
     brand_file = config_dir / f"{brand_name}.json"
     if brand_file.exists():

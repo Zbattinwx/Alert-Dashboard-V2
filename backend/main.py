@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 # Handle both direct execution and module execution
 try:
-    from .config import get_settings, Settings, get_brand_config
+    from .config import get_settings, Settings, get_brand_config, brands_dir
     from .models.alert import Alert
     from .services import (
         get_alert_manager, start_alert_manager, stop_alert_manager,
@@ -62,7 +62,7 @@ except ImportError:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    from backend.config import get_settings, Settings, get_brand_config
+    from backend.config import get_settings, Settings, get_brand_config, brands_dir
     from backend.models.alert import Alert
     from backend.services import (
         get_alert_manager, start_alert_manager, stop_alert_manager,
@@ -1517,7 +1517,7 @@ async def get_brand_logo():
     """Serve the active brand's logo (white-label), with default/TBF fallback."""
     settings = get_settings()
     brand = get_brand_config(settings.brand)
-    path = brand.get_asset_path(brand.logo, Path("config/brands"))
+    path = brand.get_asset_path(brand.logo, brands_dir())
     if path.exists():
         return FileResponse(path)
     fallback = FRONTEND_DIR / "tbf_logo.png"
