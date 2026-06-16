@@ -149,7 +149,12 @@ class HRRRFieldService:
         try:
             data = self._build_field(run, param, fhour)
         except Exception as e:
-            logger.warning("HRRR field %s failed: %s", ck, e)
+            # A not-yet-produced forecast hour (fresh run still uploading) is
+            # expected — log it quietly, not as a warning.
+            if "NoSuchKey" in str(e) or "Not Found" in str(e):
+                logger.debug("HRRR field %s not available yet", ck)
+            else:
+                logger.warning("HRRR field %s failed: %s", ck, e)
             return None
         if data is None:
             return None
