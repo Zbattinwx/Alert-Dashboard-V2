@@ -80,6 +80,7 @@ HRRR_FIELDS: dict[str, dict] = {
     "uh25_3h":  {"timeagg": ("max", 3),     "base": "uh25", "label": "2–5 km UH (3 h max)", "vmin": 0.0, "vmax": 600.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
     "uh25_run": {"timeagg": ("max", "run"), "base": "uh25", "label": "2–5 km UH (run max)", "vmin": 0.0, "vmax": 800.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
     "uh03_run": {"timeagg": ("max", "run"), "base": "uh03", "label": "0–3 km UH (run max)", "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "refc_uh":  {"idx": ":REFC:entire atmosphere:", "label": "Reflectivity + UH>75", "conv": None, "vmin": -20.0, "vmax": 80.0, "units": "dBZ", "lut": "reflectivity", "group": "Convective", "nodata_below": 5.0, "uh_contour": "uh25"},
 
     # ── Upper Air (height / temp / wind / moisture) ──
     "t850":    {"idx": ":TMP:850 mb:",  "label": "850 mb Temp",  "conv": "k2c", "vmin": -30.0, "vmax": 30.0,  "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
@@ -234,7 +235,8 @@ class HRRRFieldService:
         return [
             {"id": k, "label": v["label"], "units": v["units"], "lut": v["lut"],
              "vmin": v["vmin"], "vmax": v["vmax"], "group": v.get("group", "Other"),
-             "barbs": (v.get("derive") or (None,))[0] == "mag"}
+             "barbs": (v.get("derive") or (None,))[0] == "mag",
+             "uh_contour": v.get("uh_contour")}
             for k, v in HRRR_FIELDS.items()
         ]
 
@@ -421,6 +423,35 @@ class HRRRFieldService:
                     "type": "Feature",
                     "geometry": {"type": "LineString", "coordinates": coords},
                     "properties": {"p": int(level), "bold": 1 if level % 20 == 0 else 0},
+                })
+        return {"type": "FeatureCollection", "features": feats, "fhour": fhour}
+
+    def get_contours(self, run: str, param: str, fhour: int, levels: list[float]) -> Optional[dict]:
+        """Contour a registered field at the given levels → GeoJSON LineStrings
+        (level in `v`). Used for the updraft-helicity overlay on reflectivity."""
+        if param not in HRRR_FIELDS:
+            return None
+        grid = self._field_grid(run, param, fhour)
+        if grid is None:
+            return {"type": "FeatureCollection", "features": [], "fhour": fhour}
+        from scipy.ndimage import gaussian_filter
+        from contourpy import contour_generator, LineType
+        step = 2
+        g = gaussian_filter(np.nan_to_num(grid[::step, ::step], nan=0.0), sigma=0.8)
+        xs = T_W + (np.arange(0, T_NI, step) + 0.5) * T_RES
+        ys = (T_N - (np.arange(0, T_NJ, step) + 0.5) * T_RES)[::-1]
+        g = g[::-1, :]
+        cg = contour_generator(xs, ys, g, line_type=LineType.Separate)
+        feats = []
+        for lv in levels:
+            for arr in cg.lines(float(lv)):
+                if len(arr) < 3:
+                    continue
+                coords = [[round(float(x), 3), round(float(y), 3)] for x, y in arr]
+                feats.append({
+                    "type": "Feature",
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                    "properties": {"v": float(lv)},
                 })
         return {"type": "FeatureCollection", "features": feats, "fhour": fhour}
 

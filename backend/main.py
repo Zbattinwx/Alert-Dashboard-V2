@@ -3712,6 +3712,23 @@ async def get_hrrr_isobars(run: str, fhour: int = 0):
     return data
 
 
+@app.get("/api/hrrr/contours")
+async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = "75,150"):
+    """Contour a registered HRRR field at `levels` (GeoJSON; for the UH overlay)."""
+    try:
+        from .services.hrrr_field_service import get_hrrr_field_service
+    except ImportError:
+        from backend.services.hrrr_field_service import get_hrrr_field_service
+    svc = get_hrrr_field_service()
+    if not svc.available:
+        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
+    lv = [float(x) for x in levels.split(",") if x.strip()]
+    data = await asyncio.to_thread(svc.get_contours, run, param, fhour, lv)
+    if data is None:
+        raise HTTPException(status_code=404, detail="HRRR contours not available")
+    return data
+
+
 @app.get("/api/glm/status")
 async def get_glm_status():
     """Debug endpoint: check GLM lightning service and probe S3 directly."""
