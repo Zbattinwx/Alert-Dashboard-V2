@@ -233,7 +233,8 @@ class HRRRFieldService:
     def fields(self) -> list[dict]:
         return [
             {"id": k, "label": v["label"], "units": v["units"], "lut": v["lut"],
-             "vmin": v["vmin"], "vmax": v["vmax"], "group": v.get("group", "Other")}
+             "vmin": v["vmin"], "vmax": v["vmax"], "group": v.get("group", "Other"),
+             "barbs": (v.get("derive") or (None,))[0] == "mag"}
             for k, v in HRRR_FIELDS.items()
         ]
 
@@ -355,6 +356,37 @@ class HRRRFieldService:
         out = vmin + (b - 1.0) / 254.0 * (vmax - vmin)
         out[b == 0] = 0.0
         return out.reshape(T_NJ, T_NI)
+
+    def get_barbs(self, run: str, param: str, fhour: int, stride: int = 14) -> Optional[dict]:
+        """Downsampled wind vectors for a `mag` wind field → barb plotting data.
+        Returns compact [lon, lat, speed_kt, from_dir_deg] rows."""
+        spec = HRRR_FIELDS.get(param)
+        if not spec or spec.get("derive", (None,))[0] != "mag":
+            return None
+        _, u_idx, v_idx = spec["derive"]
+        date, hh = run[:8], int(run[8:10])
+        key = self._key(date, hh, fhour, spec.get("file", "sfc"))
+        lines = self._read_idx(key)
+        gu = self._range_get(key, lines, u_idx)
+        gv = self._range_get(key, lines, v_idx)
+        if gu is None or gv is None:
+            return None
+        u, lats, lons, _, _ = self._decode(gu)
+        v, _, _, _, _ = self._decode(gv)
+        self._ensure_mapping(lats, lons)
+        ug = u[self._mapping].reshape(T_NJ, T_NI)
+        vg = v[self._mapping].reshape(T_NJ, T_NI)
+        rs = np.arange(stride // 2, T_NJ, stride)
+        cs = np.arange(stride // 2, T_NI, stride)
+        U = ug[np.ix_(rs, cs)]
+        V = vg[np.ix_(rs, cs)]
+        spd = np.sqrt(U ** 2 + V ** 2) * 1.94384  # kt
+        drc = (270.0 - np.degrees(np.arctan2(V, U))) % 360.0  # meteorological FROM dir
+        latg = (T_N - (rs + 0.5) * T_RES)[:, None] * np.ones((1, cs.size))
+        long = (T_W + (cs + 0.5) * T_RES)[None, :] * np.ones((rs.size, 1))
+        mask = np.isfinite(spd) & (spd >= 2.0)
+        pts = np.stack([long[mask].round(3), latg[mask].round(3), spd[mask].round(), drc[mask].round()], axis=1)
+        return {"param": param, "fhour": fhour, "points": pts.tolist()}
 
     def _read_idx(self, key: str) -> list[str]:
         s3 = self._get_s3()

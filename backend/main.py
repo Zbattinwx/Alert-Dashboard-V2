@@ -3680,6 +3680,22 @@ async def get_hrrr_field(run: str, param: str, fhour: int = 0):
     )
 
 
+@app.get("/api/hrrr/barbs")
+async def get_hrrr_barbs(run: str, param: str, fhour: int = 0):
+    """Downsampled wind vectors for a wind field → barb plotting ([lon,lat,kt,dir])."""
+    try:
+        from .services.hrrr_field_service import get_hrrr_field_service
+    except ImportError:
+        from backend.services.hrrr_field_service import get_hrrr_field_service
+    svc = get_hrrr_field_service()
+    if not svc.available:
+        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
+    data = await asyncio.to_thread(svc.get_barbs, run, param, fhour)
+    if data is None:
+        raise HTTPException(status_code=404, detail="HRRR barbs not available")
+    return data
+
+
 @app.get("/api/glm/status")
 async def get_glm_status():
     """Debug endpoint: check GLM lightning service and probe S3 directly."""
