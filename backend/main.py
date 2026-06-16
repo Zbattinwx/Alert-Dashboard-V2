@@ -3638,6 +3638,44 @@ async def get_hrrr_sounding(lat: float, lon: float):
     )
 
 
+@app.get("/api/hrrr/runs")
+async def get_hrrr_runs():
+    """Manifest for the HRRR model field overlays: the last ~10 runs (with each
+    run's max forecast hour) + the available fields. Lazy/cached — see
+    hrrr_field_service."""
+    try:
+        from .services.hrrr_field_service import get_hrrr_field_service
+    except ImportError:
+        from backend.services.hrrr_field_service import get_hrrr_field_service
+    svc = get_hrrr_field_service()
+    if not svc.available:
+        raise HTTPException(status_code=503, detail="HRRR fields unavailable (eccodes/scipy missing)")
+    runs = await asyncio.to_thread(svc.list_runs, 10)
+    return {"runs": runs, "fields": svc.fields()}
+
+
+@app.get("/api/hrrr/field")
+async def get_hrrr_field(run: str, param: str, fhour: int = 0):
+    """One HRRR field as a compact lat/lon binary grid (magic 'HRRR') for the
+    app's WebGL layer. run=YYYYMMDDHH, param in the field registry, fhour int."""
+    try:
+        from .services.hrrr_field_service import get_hrrr_field_service
+    except ImportError:
+        from backend.services.hrrr_field_service import get_hrrr_field_service
+    from fastapi.responses import Response as FastResponse
+    svc = get_hrrr_field_service()
+    if not svc.available:
+        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
+    data = await asyncio.to_thread(svc.get_field, run, param, fhour)
+    if data is None:
+        raise HTTPException(status_code=404, detail="HRRR field not available")
+    return FastResponse(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @app.get("/api/glm/status")
 async def get_glm_status():
     """Debug endpoint: check GLM lightning service and probe S3 directly."""
