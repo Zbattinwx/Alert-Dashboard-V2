@@ -3730,6 +3730,18 @@ async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = 
     return data
 
 
+@app.get("/api/glm/flashes")
+async def get_glm_flashes(minutes: int = 60):
+    """Snapshot of recent GLM lightning flashes ([lat, lon, epoch_ms]) for the
+    radar app's initial load; live updates continue over the lightning_strikes WS."""
+    svc = get_glm_service()
+    if not svc:
+        return {"flashes": []}
+    mins = max(1, min(int(minutes), 60))
+    rows = [[round(f.lat, 4), round(f.lon, 4), int(f.epoch * 1000)] for f in svc.get_recent_flashes(mins)]
+    return {"flashes": rows, "minutes": mins}
+
+
 @app.get("/api/glm/status")
 async def get_glm_status():
     """Debug endpoint: check GLM lightning service and probe S3 directly."""

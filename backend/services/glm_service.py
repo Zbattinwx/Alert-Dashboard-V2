@@ -24,8 +24,11 @@ logger = logging.getLogger(__name__)
 GLM_BUCKET = "noaa-goes18"
 GLM_PREFIX = "GLM-L2-LCFA"   # Lightning Cluster-Filter Algorithm Level 2
 
-# How many minutes of flashes to keep in the rolling window
-FLASH_WINDOW_MINUTES = 15
+# How many minutes of flashes to keep in the rolling window. 60 so the radar
+# app's snapshot + "fade over 1 hr" / loop-with-radar options have history.
+FLASH_WINDOW_MINUTES = 60
+# Hard cap on retained flashes (bounds memory in extreme convection ~24 MB).
+FLASH_MAX = 400_000
 
 # Poll interval (GLM files are ~20s cadence, we poll every 30s)
 POLL_INTERVAL_SECONDS = 30
@@ -51,7 +54,7 @@ class GLMService:
     """
 
     def __init__(self):
-        self._flashes: deque[LightningFlash] = deque()
+        self._flashes: deque[LightningFlash] = deque(maxlen=FLASH_MAX)
         self._last_file_key: Optional[str] = None
         self._running = False
         self._task: Optional[asyncio.Task] = None
