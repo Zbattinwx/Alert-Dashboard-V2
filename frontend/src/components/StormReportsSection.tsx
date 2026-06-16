@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
-import { MapContainer, TileLayer, CircleMarker, Popup, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, CircleMarker, Marker, Popup, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import type { StormReport, LSRResponse, ViewerReportSubmission } from '../types/lsr';
 import { LSR_TYPE_COLORS, getTextColorForBackground } from '../types/lsr';
@@ -71,6 +71,27 @@ const REPORT_TYPES = [
 
 // Viewer report color
 const VIEWER_REPORT_COLOR = '#bb9af7';
+
+// Font Awesome icon per LSR type, so map markers show what the report actually is
+// (instead of a plain colored dot that reads like a storm-cell marker).
+const ICON_BY_TYPE: Record<string, string> = {
+  'TORNADO': 'fa-tornado', 'FUNNEL CLOUD': 'fa-tornado', 'WALL CLOUD': 'fa-cloud',
+  'HAIL': 'fa-cloud-meatball',
+  'TSTM WND GST': 'fa-wind', 'TSTM WND DMG': 'fa-house-crack',
+  'NON-TSTM WND GST': 'fa-wind', 'NON-TSTM WND DMG': 'fa-house-crack',
+  'FLOOD': 'fa-water', 'FLASH FLOOD': 'fa-house-flood-water', 'HEAVY RAIN': 'fa-cloud-showers-heavy',
+  'LIGHTNING': 'fa-bolt', 'SNOW': 'fa-snowflake', 'HEAVY SNOW': 'fa-snowflake', 'BLIZZARD': 'fa-snowflake',
+  'ICE STORM': 'fa-icicles', 'SLEET': 'fa-cloud-rain', 'FREEZING RAIN': 'fa-icicles',
+};
+const iconForType = (t: string): string => ICON_BY_TYPE[t] || 'fa-circle-exclamation';
+
+/** Leaflet divIcon: a colored badge with the report's type glyph. */
+const lsrDivIcon = (report: StormReport, color: string, selected: boolean): L.DivIcon => {
+  const fa = report.is_viewer ? 'fa-eye' : iconForType(report.report_type);
+  const size = selected ? 30 : 26;
+  const html = `<div class="lsr-mark${selected ? ' lsr-mark-sel' : ''}" style="background:${color}"><i class="fas ${fa}"></i></div>`;
+  return L.divIcon({ html, className: 'lsr-mark-wrap', iconSize: [size, size], iconAnchor: [size / 2, size / 2], popupAnchor: [0, -size / 2] });
+};
 
 export const StormReportsSection: React.FC<StormReportsSectionProps> = ({
   onReportSelect,
@@ -399,18 +420,12 @@ export const StormReportsSection: React.FC<StormReportsSectionProps> = ({
               onLocationSelect={handleLocationSelect}
             />
 
-            {/* Render report markers */}
+            {/* Render report markers — type glyph per report */}
             {filteredReports.map((report) => (
-              <CircleMarker
+              <Marker
                 key={report.id}
-                center={[report.lat, report.lon]}
-                radius={report.is_viewer ? 10 : 8}
-                pathOptions={{
-                  color: getMarkerColor(report),
-                  fillColor: getMarkerColor(report),
-                  fillOpacity: 0.8,
-                  weight: selectedReport?.id === report.id ? 3 : (report.is_viewer ? 2 : 1),
-                }}
+                position={[report.lat, report.lon]}
+                icon={lsrDivIcon(report, getMarkerColor(report), selectedReport?.id === report.id)}
                 eventHandlers={{
                   click: () => handleReportClick(report),
                 }}
@@ -451,7 +466,7 @@ export const StormReportsSection: React.FC<StormReportsSectionProps> = ({
                     )}
                   </div>
                 </Popup>
-              </CircleMarker>
+              </Marker>
             ))}
 
             {/* Show selected location for new report */}

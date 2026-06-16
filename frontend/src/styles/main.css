@@ -340,6 +340,39 @@ body {
   border-color: rgba(0, 255, 0, 0.5);
 }
 
+/* Tornado Emergency — the most severe warning the NWS issues. Overrides every
+   other threat treatment with a faster, deeper red pulse and a solid red edge
+   so it is impossible to confuse with a routine observed tornado. */
+@keyframes tornado-emergency-pulse {
+  0%, 100% {
+    box-shadow: 0 0 12px rgba(255, 0, 0, 0.85), inset 0 0 6px rgba(255, 0, 0, 0.25);
+  }
+  50% {
+    box-shadow: 0 0 28px rgba(255, 0, 0, 1), 0 0 56px rgba(255, 0, 0, 0.55),
+                inset 0 0 12px rgba(255, 0, 0, 0.4);
+  }
+}
+
+.alert-card.threat-tornado-emergency,
+.alert-card.high-threat.threat-tornado-emergency {
+  animation: tornado-emergency-pulse 1s ease-in-out infinite;
+  border: 2px solid var(--tor-color);
+  border-left-width: 6px;
+}
+
+/* The "TORNADO EMERGENCY" badge itself flashes so it draws the eye even on a
+   crowded board. Used in both the alert card and the detail pane. */
+@keyframes tornado-emergency-badge-flash {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.78; transform: scale(1.03); }
+}
+
+.tornado-emergency-badge {
+  animation: tornado-emergency-badge-flash 1s ease-in-out infinite;
+  text-transform: uppercase;
+  box-shadow: 0 0 10px rgba(255, 0, 0, 0.7);
+}
+
 .alert-card:hover {
   transform: translateY(-2px);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(99, 102, 241, 0.05);
@@ -573,6 +606,23 @@ body {
   height: 100%;
   gap: var(--spacing-md);
 }
+
+/* Storm-report map markers: a colored badge with the report's type glyph. */
+.lsr-mark-wrap { background: none; border: none; }
+.lsr-mark {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1.5px solid rgba(0, 0, 0, 0.85);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 12px;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
+}
+.lsr-mark-sel { border-color: #fff; border-width: 2px; }
 
 .lsr-controls {
   display: flex;
@@ -3594,6 +3644,30 @@ body {
 @keyframes emergencyPulse {
   0%, 100% { box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1); }
   50% { box-shadow: 0 8px 32px rgba(255, 0, 0, 0.4), 0 0 20px rgba(255, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.1); }
+}
+
+/* Tornado Emergency — crimson-magenta header + flashing banner so an OBS
+   take-over reads instantly as the most severe tier. */
+.obs-alert.emergency .obs-alert-header,
+.obs-alert.emergency .obs-alert-progress {
+  background: #d6008c;
+}
+
+.obs-alert-emergency {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #d6008c;
+  color: #fff;
+  padding: 9px 16px;
+  border-radius: 6px;
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  width: fit-content;
+  box-shadow: 0 0 14px rgba(214, 0, 140, 0.7);
+  animation: tornadoPulse 0.8s ease-in-out infinite;
 }
 
 /* Progress bar */
