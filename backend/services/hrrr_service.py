@@ -33,6 +33,10 @@ BUFKIT_MASTER_URL = (
 CONUS = (24.0, 50.0, -125.0, -66.0)  # south, north, west, east
 CACHE_TTL_S = 1800  # reuse a station's PNG within a run window
 
+# Open-Meteo HRRR pressure levels for exact-point soundings (surface→up).
+OM_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500,
+             450, 400, 350, 300, 250, 200, 150, 100, 70, 50]
+
 _patched = False
 
 
@@ -78,6 +82,7 @@ class HRRRSoundingService:
         self._loaded = False
         self._lock = threading.Lock()  # serialize matplotlib + SounderPy (not thread-safe)
         self._cache: dict[str, tuple[float, bytes, str]] = {}  # station -> (ts, png, run)
+        self._point_cache: dict[str, tuple[float, bytes]] = {}  # latlon/valid -> (ts, png)
 
     # ── station index ──────────────────────────────────────────────────────
     def _ensure_stations(self) -> None:
@@ -184,6 +189,120 @@ class HRRRSoundingService:
                     continue
 
             raise RuntimeError(f"no HRRR BUFKIT data near {lat:.2f},{lon:.2f}: {last_err}")
+
+    def get_point_sounding_png(self, lat: float, lon: float, fhour: int = 0, run: Optional[str] = None) -> tuple[bytes, str]:
+        """Exact-point HRRR sounding: pull the pressure-level profile at the exact
+        lat/lon from Open-Meteo's HRRR, assemble a SounderPy clean_data dict, and
+        render the full plot. run=YYYYMMDDHH (model-active forecast); None = F00 now.
+        Open-Meteo serves the latest run, valid-time aligned."""
+        import os
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+
+        import matplotlib.pyplot as plt
+        import sounderpy as spy
+        from metpy.calc import dewpoint_from_relative_humidity, wind_components
+        from metpy.units import units
+
+        _patch_sounderpy_units()
+
+        if run:
+            run_dt = datetime(int(run[:4]), int(run[4:6]), int(run[6:8]), int(run[8:10]), tzinfo=timezone.utc)
+            valid_dt = run_dt + timedelta(hours=fhour)
+        else:
+            run_dt = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+            valid_dt = run_dt
+        fhr = int(fhour)
+        ckey = f"{round(lat, 2)},{round(lon, 2)}@{valid_dt.strftime('%Y%m%d%H')}"
+
+        with self._lock:
+            cached = self._point_cache.get(ckey)
+            if cached and (time.time() - cached[0]) < CACHE_TTL_S:
+                return cached[1], ckey
+
+        # Fetch the exact-point profile (all levels + surface) for the valid hour.
+        pl = []
+        for L in OM_LEVELS:
+            pl += [f"temperature_{L}hPa", f"relative_humidity_{L}hPa", f"wind_speed_{L}hPa",
+                   f"wind_direction_{L}hPa", f"geopotential_height_{L}hPa"]
+        sfc = ["surface_pressure", "temperature_2m", "dewpoint_2m", "wind_speed_10m", "wind_direction_10m"]
+        vh = valid_dt.strftime("%Y-%m-%dT%H:00")
+        url = (f"https://api.open-meteo.com/v1/gfs?latitude={lat}&longitude={lon}"
+               f"&models=ncep_hrrr_conus&hourly={','.join(pl + sfc)}"
+               f"&temperature_unit=celsius&wind_speed_unit=kn&start_hour={vh}&end_hour={vh}")
+        resp = requests.get(url, timeout=25)
+        resp.raise_for_status()
+        j = resp.json()
+        h = j.get("hourly", {})
+        elev = float(j.get("elevation", 0) or 0)
+
+        def val(k):
+            a = h.get(k)
+            return a[0] if a and a[0] is not None else None
+
+        sfc_p = val("surface_pressure")
+        if sfc_p is None:
+            raise RuntimeError("no HRRR data at this point")
+
+        # Surface first, then pressure levels above ground (p < surface pressure).
+        p_a, z_a, T_a, Td_a, ws_a, wd_a = [sfc_p], [elev], [val("temperature_2m")], [val("dewpoint_2m")], [val("wind_speed_10m") or 0.0], [val("wind_direction_10m") or 0.0]
+        for L in OM_LEVELS:
+            if L >= sfc_p:
+                continue
+            t, rh, z = val(f"temperature_{L}hPa"), val(f"relative_humidity_{L}hPa"), val(f"geopotential_height_{L}hPa")
+            ws, wd = val(f"wind_speed_{L}hPa"), val(f"wind_direction_{L}hPa")
+            if None in (t, rh, z, ws, wd):
+                continue
+            td = float(dewpoint_from_relative_humidity(t * units.degC, max(1.0, rh) * units.percent).m)
+            p_a.append(float(L)); z_a.append(z); T_a.append(t); Td_a.append(min(td, t)); ws_a.append(ws); wd_a.append(wd)
+        if len(p_a) < 5:
+            raise RuntimeError("insufficient HRRR levels at this point")
+
+        u = wind_components(np.array(ws_a) * units.kts, np.array(wd_a) * units.degrees)[0].m
+        v = wind_components(np.array(ws_a) * units.kts, np.array(wd_a) * units.degrees)[1].m
+        clean = {
+            "p": np.array(p_a) * units.hPa,
+            "z": np.array(z_a) * units.meter,
+            "T": np.array(T_a) * units.degC,
+            "Td": np.array(Td_a) * units.degC,
+            "u": np.array(u) * units.kts,
+            "v": np.array(v) * units.kts,
+            "omega": np.zeros(len(p_a)) * units("Pa/s"),
+            "site_info": {
+                "site-id": "PT", "site-name": "Point", "site-lctn": "HRRR",
+                "site-latlon": [round(lat, 2), round(lon, 2)], "site-elv": int(elev),
+                "source": "HRRR POINT (Open-Meteo)", "model": "HRRR", "fcst-hour": f"F{fhr:02d}",
+                "run-time": [run_dt.strftime("%Y"), run_dt.strftime("%m"), run_dt.strftime("%d"), run_dt.strftime("%H")],
+                "valid-time": [valid_dt.strftime("%Y"), valid_dt.strftime("%m"), valid_dt.strftime("%d"), valid_dt.strftime("%H")],
+            },
+        }
+        clean["titles"] = {
+            "top_title": f"HRRR POINT FORECAST | {run_dt.strftime('%H')}Z HRRR F{fhr:02d}",
+            "left_title": f"VALID: {valid_dt.strftime('%m/%d/%Y %HZ')}  |  RUN: {run_dt.strftime('%m/%d/%Y %HZ')}",
+            "right_title": f"{round(lat, 2)}, {round(lon, 2)}    ",
+        }
+
+        with self._lock:
+            tmp = tempfile.NamedTemporaryFile(prefix="ptsnd_", suffix="", delete=False)
+            path = tmp.name
+            tmp.close()
+            common = dict(style="full", dark_mode=True, storm_motion="right_moving", radar=None, save=True, filename=path)
+            try:
+                spy.build_sounding(clean, **common)
+            except Exception as parcel_err:
+                logger.debug(f"point sounding parcel render failed ({parcel_err}); retry simple")
+                plt.close("all")
+                spy.build_sounding(clean, special_parcels="simple", **common)
+            png_path = path + ".png"
+            with open(png_path, "rb") as fh:
+                png = fh.read()
+            try:
+                os.unlink(png_path)
+            except OSError:
+                pass
+            self._point_cache[ckey] = (time.time(), png)
+        logger.info(f"HRRR point sounding {ckey} ({len(png)} bytes)")
+        return png, ckey
 
 
 _service: Optional[HRRRSoundingService] = None

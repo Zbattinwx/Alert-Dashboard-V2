@@ -3616,25 +3616,28 @@ async def get_mrms_png():
 
 
 @app.get("/api/hrrr/sounding.png")
-async def get_hrrr_sounding(lat: float, lon: float):
-    """Full SHARPpy/SounderPy HRRR F00 point sounding (nearest BUFKIT site) as PNG.
-
-    Heavy (~30 s first render for a site; cached per-site after) — the radar app
-    shows an instant quick-look while this builds.
-    """
+async def get_hrrr_sounding(lat: float, lon: float, fhour: int = 0, run: Optional[str] = None):
+    """Full SounderPy HRRR point sounding PNG at the EXACT lat/lon (Open-Meteo
+    pressure-level profile). fhour + run (YYYYMMDDHH) give a forecast-hour
+    sounding when the model is active; default is F00 (now). Falls back to the
+    nearest-BUFKIT-site render if the exact-point path fails. The radar app shows
+    an instant quick-look while this builds."""
     from fastapi.responses import Response as FastResponse
     from .services.hrrr_service import get_hrrr_service
 
     svc = get_hrrr_service()
     loop = asyncio.get_event_loop()
     try:
-        png, station = await loop.run_in_executor(None, svc.get_sounding_png, lat, lon)
+        png, key = await loop.run_in_executor(None, lambda: svc.get_point_sounding_png(lat, lon, fhour, run))
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"HRRR sounding unavailable: {e}")
+        try:  # exact-point failed (Open-Meteo down?) → nearest BUFKIT site
+            png, key = await loop.run_in_executor(None, svc.get_sounding_png, lat, lon)
+        except Exception:
+            raise HTTPException(status_code=503, detail=f"HRRR sounding unavailable: {e}")
     return FastResponse(
         content=png,
         media_type="image/png",
-        headers={"Cache-Control": "no-store", "X-Bufkit-Station": station},
+        headers={"Cache-Control": "no-store", "X-Sounding-Source": key},
     )
 
 
