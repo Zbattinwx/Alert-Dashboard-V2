@@ -58,28 +58,28 @@ HRRR_FIELDS: dict[str, dict] = {
     "refc": {"idx": ":REFC:entire atmosphere:", "label": "Composite Reflectivity","conv": None, "vmin": -20.0, "vmax": 80.0,  "units": "dBZ", "lut": "reflectivity",  "group": "Surface", "nodata_below": 5.0},
 
     # ── Severe ──
-    "sbcape":  {"idx": ":CAPE:surface:",                 "label": "Surface CAPE",   "conv": None, "vmin": 0.0, "vmax": 6000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
-    "mlcape":  {"idx": ":CAPE:90-0 mb above ground:",    "label": "ML CAPE",        "conv": None, "vmin": 0.0, "vmax": 6000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
-    "mucape":  {"idx": ":CAPE:255-0 mb above ground:",   "label": "MU CAPE",        "conv": None, "vmin": 0.0, "vmax": 6000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
-    "sbcin":   {"idx": ":CIN:surface:",                  "label": "Surface CIN",    "conv": None, "vmin": -300.0, "vmax": 0.0, "units": "J/kg", "lut": "cin",   "group": "Severe"},
-    "srh01":   {"idx": ":HLCY:1000-0 m above ground:",   "label": "0–1 km SRH",     "conv": None, "vmin": 0.0, "vmax": 600.0,  "units": "m²/s²", "lut": "srh",  "group": "Severe", "nodata_below": 50.0},
-    "srh03":   {"idx": ":HLCY:3000-0 m above ground:",   "label": "0–3 km SRH",     "conv": None, "vmin": 0.0, "vmax": 600.0,  "units": "m²/s²", "lut": "srh",  "group": "Severe", "nodata_below": 50.0},
-    "shear06": {"derive": ("mag", ":VUCSH:0-6000 m above ground:", ":VVCSH:0-6000 m above ground:"), "label": "0–6 km Bulk Shear", "conv": "ms2kt", "vmin": 0.0, "vmax": 80.0, "units": "kt", "lut": "shear", "group": "Severe"},
+    "sbcape":  {"idx": ":CAPE:surface:",                 "label": "Surface CAPE",   "conv": None, "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
+    "mlcape":  {"idx": ":CAPE:90-0 mb above ground:",    "label": "ML CAPE",        "conv": None, "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
+    "mucape":  {"idx": ":CAPE:255-0 mb above ground:",   "label": "MU CAPE",        "conv": None, "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
+    "sbcin":   {"idx": ":CIN:surface:",                  "label": "Surface CIN",    "conv": None, "vmin": -400.0, "vmax": 0.0, "units": "J/kg", "lut": "cin",   "group": "Severe"},
+    "srh01":   {"idx": ":HLCY:1000-0 m above ground:",   "label": "0–1 km SRH",     "conv": None, "vmin": 0.0, "vmax": 800.0,  "units": "m²/s²", "lut": "srh",  "group": "Severe", "nodata_below": 50.0},
+    "srh03":   {"idx": ":HLCY:3000-0 m above ground:",   "label": "0–3 km SRH",     "conv": None, "vmin": 0.0, "vmax": 900.0,  "units": "m²/s²", "lut": "srh",  "group": "Severe", "nodata_below": 50.0},
+    "shear06": {"derive": ("mag", ":VUCSH:0-6000 m above ground:", ":VVCSH:0-6000 m above ground:"), "label": "0–6 km Bulk Shear", "conv": "ms2kt", "vmin": 0.0, "vmax": 100.0, "units": "kt", "lut": "shear", "group": "Severe"},
     "pwat":    {"idx": ":PWAT:entire atmosphere",        "label": "Precipitable Water", "conv": "mm2in", "vmin": 0.0, "vmax": 2.5, "units": "in", "lut": "pwat", "group": "Severe"},
     "lftx4":   {"idx": ":4LFTX:180-0 mb above ground:",  "label": "Best Lifted Index", "conv": None, "vmin": -12.0, "vmax": 12.0, "units": "°C", "lut": "lftx", "group": "Severe"},
 
     # ── Composite parameters (derived from CAPE / SRH / shear / LCL) ──
     "ehi01": {"derive": ("calc", "ehi", [(":CAPE:90-0 mb above ground:", None), (":HLCY:1000-0 m above ground:", None)]), "label": "Energy Helicity Index 0–1 km", "conv": None, "vmin": 0.0, "vmax": 8.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
     "ehi03": {"derive": ("calc", "ehi", [(":CAPE:90-0 mb above ground:", None), (":HLCY:3000-0 m above ground:", None)]), "label": "Energy Helicity Index 0–3 km", "conv": None, "vmin": 0.0, "vmax": 8.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
-    "scp":   {"derive": ("calc", "scp", [(":CAPE:255-0 mb above ground:", None), (":HLCY:3000-0 m above ground:", None), (":VUCSH:0-6000 m above ground:", None), (":VVCSH:0-6000 m above ground:", None)]), "label": "Supercell Composite", "conv": None, "vmin": 0.0, "vmax": 30.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
-    "stp":   {"derive": ("calc", "stp", [(":CAPE:surface:", None), (":CIN:surface:", None), (":TMP:2 m above ground:", None), (":DPT:2 m above ground:", None), (":HLCY:1000-0 m above ground:", None), (":VUCSH:0-6000 m above ground:", None), (":VVCSH:0-6000 m above ground:", None)]), "label": "Sig Tornado (STP)", "conv": None, "vmin": 0.0, "vmax": 8.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.25},
+    "scp":   {"derive": ("calc", "scp", [(":CAPE:255-0 mb above ground:", None), (":HLCY:3000-0 m above ground:", None), (":VUCSH:0-6000 m above ground:", None), (":VVCSH:0-6000 m above ground:", None)]), "label": "Supercell Composite", "conv": None, "vmin": 0.0, "vmax": 50.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
+    "stp":   {"derive": ("calc", "stp", [(":CAPE:surface:", None), (":CIN:surface:", None), (":TMP:2 m above ground:", None), (":DPT:2 m above ground:", None), (":HLCY:1000-0 m above ground:", None), (":VUCSH:0-6000 m above ground:", None), (":VVCSH:0-6000 m above ground:", None)]), "label": "Sig Tornado (STP)", "conv": None, "vmin": 0.0, "vmax": 10.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.25},
 
     # ── Explicit convective (updraft helicity; max-in-window → no F00) ──
-    "uh25":     {"idx": ":MXUPHL:5000-2000 m above ground:", "label": "2–5 km UH (1 h max)", "conv": None, "vmin": 0.0, "vmax": 300.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
-    "uh03":     {"idx": ":MXUPHL:3000-0 m above ground:",    "label": "0–3 km UH (1 h max)", "conv": None, "vmin": 0.0, "vmax": 150.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
-    "uh25_3h":  {"timeagg": ("max", 3),     "base": "uh25", "label": "2–5 km UH (3 h max)", "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
-    "uh25_run": {"timeagg": ("max", "run"), "base": "uh25", "label": "2–5 km UH (run max)", "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
-    "uh03_run": {"timeagg": ("max", "run"), "base": "uh03", "label": "0–3 km UH (run max)", "vmin": 0.0, "vmax": 200.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "uh25":     {"idx": ":MXUPHL:5000-2000 m above ground:", "label": "2–5 km UH (1 h max)", "conv": None, "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "uh03":     {"idx": ":MXUPHL:3000-0 m above ground:",    "label": "0–3 km UH (1 h max)", "conv": None, "vmin": 0.0, "vmax": 250.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "uh25_3h":  {"timeagg": ("max", 3),     "base": "uh25", "label": "2–5 km UH (3 h max)", "vmin": 0.0, "vmax": 600.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "uh25_run": {"timeagg": ("max", "run"), "base": "uh25", "label": "2–5 km UH (run max)", "vmin": 0.0, "vmax": 800.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "uh03_run": {"timeagg": ("max", "run"), "base": "uh03", "label": "0–3 km UH (run max)", "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
 
     # ── Upper Air (height / temp / wind / moisture) ──
     "t850":    {"idx": ":TMP:850 mb:",  "label": "850 mb Temp",  "conv": "k2c", "vmin": -30.0, "vmax": 30.0,  "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
