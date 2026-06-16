@@ -34,14 +34,61 @@ HRRR_BUCKET = "noaa-hrrr-bdp-pds"
 BINARY_MAGIC = b"HRRR"
 CACHE_MAX = 80  # LRU entries (~2 MB each → ~160 MB cap)
 
-# ── Field registry (MVP; extend by adding entries) ──────────────────────────
-# conv: None | "k2f"  (Kelvin → °F for surface temps).  nodata_below: pack 0
-# (transparent) for values under this threshold (e.g. clear-air reflectivity).
+# ── Field registry (extend by adding entries) ───────────────────────────────
+# Each entry needs either an `idx` (one GRIB record, matched as a substring of
+# the .idx line) or a `derive` tuple (multiple records combined):
+#   ("mag",  u_idx, v_idx)                  → vector magnitude √(u²+v²)
+#   ("ptype", rain, snow, icep, frzr)       → categorical precip type 1/2/3/4
+# file: "sfc" (wrfsfc, default) | "prs" (wrfprs, pressure levels).
+# conv: None | k2f | k2c | ms2kt | m2in | mm2in | x1e5  (see _conv).
+# nodata_below: pack 0 (transparent) for values under this threshold.
+# group: sidebar grouping + ordering.
 HRRR_FIELDS: dict[str, dict] = {
-    "t2m":  {"idx": ":TMP:2 m above ground:",    "label": "2 m Temperature",       "conv": "k2f", "vmin": -30.0, "vmax": 120.0, "units": "°F",  "lut": "hrrr_temp"},
-    "td2m": {"idx": ":DPT:2 m above ground:",    "label": "2 m Dew Point",         "conv": "k2f", "vmin": -30.0, "vmax": 90.0,  "units": "°F",  "lut": "hrrr_dewpoint"},
-    "refc": {"idx": ":REFC:entire atmosphere:",  "label": "Composite Reflectivity","conv": None,  "vmin": -20.0, "vmax": 80.0,  "units": "dBZ", "lut": "reflectivity", "nodata_below": 5.0},
+    # ── Surface ──
+    "t2m":  {"idx": ":TMP:2 m above ground:", "label": "2 m Temperature",        "conv": "k2f", "vmin": -30.0, "vmax": 120.0, "units": "°F",  "lut": "hrrr_temp",     "group": "Surface"},
+    "td2m": {"idx": ":DPT:2 m above ground:", "label": "2 m Dew Point",          "conv": "k2f", "vmin": -30.0, "vmax": 90.0,  "units": "°F",  "lut": "hrrr_dewpoint", "group": "Surface"},
+    "refc": {"idx": ":REFC:entire atmosphere:", "label": "Composite Reflectivity","conv": None, "vmin": -20.0, "vmax": 80.0,  "units": "dBZ", "lut": "reflectivity",  "group": "Surface", "nodata_below": 5.0},
+
+    # ── Severe ──
+    "sbcape":  {"idx": ":CAPE:surface:",                 "label": "Surface CAPE",   "conv": None, "vmin": 0.0, "vmax": 6000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
+    "mlcape":  {"idx": ":CAPE:90-0 mb above ground:",    "label": "ML CAPE",        "conv": None, "vmin": 0.0, "vmax": 6000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
+    "mucape":  {"idx": ":CAPE:255-0 mb above ground:",   "label": "MU CAPE",        "conv": None, "vmin": 0.0, "vmax": 6000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
+    "sbcin":   {"idx": ":CIN:surface:",                  "label": "Surface CIN",    "conv": None, "vmin": -300.0, "vmax": 0.0, "units": "J/kg", "lut": "cin",   "group": "Severe"},
+    "srh01":   {"idx": ":HLCY:1000-0 m above ground:",   "label": "0–1 km SRH",     "conv": None, "vmin": 0.0, "vmax": 600.0,  "units": "m²/s²", "lut": "srh",  "group": "Severe", "nodata_below": 50.0},
+    "srh03":   {"idx": ":HLCY:3000-0 m above ground:",   "label": "0–3 km SRH",     "conv": None, "vmin": 0.0, "vmax": 600.0,  "units": "m²/s²", "lut": "srh",  "group": "Severe", "nodata_below": 50.0},
+    "shear06": {"derive": ("mag", ":VUCSH:0-6000 m above ground:", ":VVCSH:0-6000 m above ground:"), "label": "0–6 km Bulk Shear", "conv": "ms2kt", "vmin": 0.0, "vmax": 80.0, "units": "kt", "lut": "shear", "group": "Severe"},
+    "uphl":    {"idx": ":MXUPHL:5000-2000 m above ground:", "label": "2–5 km Updraft Helicity", "conv": None, "vmin": 0.0, "vmax": 300.0, "units": "m²/s²", "lut": "uphl", "group": "Severe", "nodata_below": 25.0},
+    "pwat":    {"idx": ":PWAT:entire atmosphere",        "label": "Precipitable Water", "conv": "mm2in", "vmin": 0.0, "vmax": 2.5, "units": "in", "lut": "pwat", "group": "Severe"},
+    "lftx4":   {"idx": ":4LFTX:180-0 mb above ground:",  "label": "Best Lifted Index", "conv": None, "vmin": -12.0, "vmax": 12.0, "units": "°C", "lut": "lftx", "group": "Severe"},
+
+    # ── Upper Air (height / temp / wind / moisture) ──
+    "t850":    {"idx": ":TMP:850 mb:",  "label": "850 mb Temp",  "conv": "k2c", "vmin": -30.0, "vmax": 30.0,  "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
+    "rh850":   {"idx": ":RH:850 mb:",   "label": "850 mb RH",    "conv": None,  "vmin": 0.0,   "vmax": 100.0, "units": "%",  "lut": "rh",         "group": "Upper Air"},
+    "wspd850": {"derive": ("mag", ":UGRD:850 mb:", ":VGRD:850 mb:"), "label": "850 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 80.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air"},
+    "t700":    {"idx": ":TMP:700 mb:",  "label": "700 mb Temp",  "conv": "k2c", "vmin": -40.0, "vmax": 20.0,  "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
+    "rh700":   {"idx": ":RH:700 mb:",   "label": "700 mb RH",    "conv": None,  "vmin": 0.0,   "vmax": 100.0, "units": "%",  "lut": "rh",         "group": "Upper Air"},
+    "z500":    {"idx": ":HGT:500 mb:",  "label": "500 mb Height","conv": None,  "vmin": 5160.0, "vmax": 6000.0, "units": "m", "lut": "height",    "group": "Upper Air"},
+    "t500":    {"idx": ":TMP:500 mb:",  "label": "500 mb Temp",  "conv": "k2c", "vmin": -45.0, "vmax": 0.0,   "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
+    "wspd500": {"derive": ("mag", ":UGRD:500 mb:", ":VGRD:500 mb:"), "label": "500 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 120.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air"},
+    "z300":    {"idx": ":HGT:300 mb:",  "label": "300 mb Height","conv": None,  "vmin": 8640.0, "vmax": 9960.0, "units": "m", "lut": "height",    "group": "Upper Air"},
+    "wspd250": {"derive": ("mag", ":UGRD:250 mb:", ":VGRD:250 mb:"), "label": "250 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 160.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air"},
+
+    # ── Dynamics ──
+    "vort500":  {"idx": ":ABSV:500 mb:", "label": "500 mb Abs Vorticity", "conv": "x1e5", "vmin": 0.0,  "vmax": 50.0, "units": "×10⁻⁵ s⁻¹", "lut": "vort",  "group": "Dynamics"},
+    "omega700": {"idx": ":VVEL:700 mb:", "label": "700 mb Vertical Velocity", "conv": None, "vmin": -5.0, "vmax": 5.0, "units": "Pa/s", "lut": "omega", "group": "Dynamics"},
+    "wspd300":  {"derive": ("mag", ":UGRD:300 mb:", ":VGRD:300 mb:"), "label": "300 mb Jet", "conv": "ms2kt", "vmin": 0.0, "vmax": 160.0, "units": "kt", "lut": "wind_upper", "group": "Dynamics"},
+
+    # ── Winter ──
+    "snod":  {"idx": ":SNOD:surface:",  "label": "Snow Depth",        "conv": "m2in", "vmin": 0.0, "vmax": 24.0, "units": "in", "lut": "snow", "group": "Winter", "nodata_below": 0.1},
+    "asnow": {"idx": ":ASNOW:surface:", "label": "Accumulated Snow",  "conv": "m2in", "vmin": 0.0, "vmax": 18.0, "units": "in", "lut": "snow", "group": "Winter", "nodata_below": 0.1},
+    "ptype": {"derive": ("ptype", ":CRAIN:surface:", ":CSNOW:surface:", ":CICEP:surface:", ":CFRZR:surface:"), "label": "Precip Type", "conv": None, "vmin": 0.0, "vmax": 4.0, "units": "", "lut": "ptype", "group": "Winter", "nodata_below": 0.5},
 }
+
+# Mark pressure-level fields (wrfprs file) — everything at an "mb" level.
+for _id, _spec in HRRR_FIELDS.items():
+    _m = _spec.get("idx") or (_spec.get("derive") or (None, ""))[1]
+    if isinstance(_m, str) and " mb:" in _m:
+        _spec["file"] = "prs"
 
 # Target display grid (regular lat/lon, covers the HRRR CONUS domain).
 T_W, T_E, T_S, T_N = -134.0, -60.5, 20.5, 53.0
@@ -65,8 +112,14 @@ def _check_deps() -> bool:
     return _eccodes_ok
 
 
-def _k2f(k: np.ndarray) -> np.ndarray:
-    return (k - 273.15) * 9.0 / 5.0 + 32.0
+def _conv(name: Optional[str], v: np.ndarray) -> np.ndarray:
+    if name == "k2f":   return (v - 273.15) * 9.0 / 5.0 + 32.0   # Kelvin → °F
+    if name == "k2c":   return v - 273.15                        # Kelvin → °C
+    if name == "ms2kt": return v * 1.94384                       # m/s → knots
+    if name == "m2in":  return v * 39.3701                       # meters → inches
+    if name == "mm2in": return v * 0.0393701                     # kg/m² (mm) → inches
+    if name == "x1e5":  return v * 1e5                           # s⁻¹ → ×10⁻⁵ s⁻¹
+    return v
 
 
 class HRRRFieldService:
@@ -93,8 +146,8 @@ class HRRRFieldService:
 
     # ── Run discovery ──────────────────────────────────────────────────────
     @staticmethod
-    def _key(date: str, hh: int, fhour: int) -> str:
-        return f"hrrr.{date}/conus/hrrr.t{hh:02d}z.wrfsfcf{fhour:02d}.grib2"
+    def _key(date: str, hh: int, fhour: int, kind: str = "sfc") -> str:
+        return f"hrrr.{date}/conus/hrrr.t{hh:02d}z.wrf{kind}f{fhour:02d}.grib2"
 
     @staticmethod
     def _max_fhour(hh: int) -> int:
@@ -133,7 +186,7 @@ class HRRRFieldService:
     def fields(self) -> list[dict]:
         return [
             {"id": k, "label": v["label"], "units": v["units"], "lut": v["lut"],
-             "vmin": v["vmin"], "vmax": v["vmax"]}
+             "vmin": v["vmin"], "vmax": v["vmax"], "group": v.get("group", "Other")}
             for k, v in HRRR_FIELDS.items()
         ]
 
@@ -168,21 +221,44 @@ class HRRRFieldService:
     def _build_field(self, run: str, param: str, fhour: int) -> Optional[bytes]:
         spec = HRRR_FIELDS[param]
         date, hh = run[:8], int(run[8:10])
-        key = self._key(date, hh, fhour)
-        grib = self._fetch_message(key, spec["idx"])
-        if grib is None:
-            return None
-        values, lats, lons, ni, nj = self._decode(grib)
+        key = self._key(date, hh, fhour, spec.get("file", "sfc"))
+        lines = self._read_idx(key)  # raises NoSuchKey if the hour isn't produced yet
+
+        derive = spec.get("derive")
+        if derive:
+            kind = derive[0]
+            msgs = [self._range_get(key, lines, m) for m in derive[1:]]
+            if any(g is None for g in msgs):
+                return None
+            decoded = [self._decode(g) for g in msgs]
+            lats, lons, ni, nj = decoded[0][1], decoded[0][2], decoded[0][3], decoded[0][4]
+            arrs = [d[0] for d in decoded]
+            if kind == "mag":
+                values = np.sqrt(arrs[0] ** 2 + arrs[1] ** 2)
+            elif kind == "ptype":  # rain, snow, icep, frzr → 1/2/3/4 (later wins)
+                values = np.zeros_like(arrs[0])
+                for code, a in enumerate(arrs, start=1):
+                    values = np.where(a > 0.5, float(code), values)
+            else:
+                raise ValueError(f"unknown derive kind {kind}")
+        else:
+            grib = self._range_get(key, lines, spec["idx"])
+            if grib is None:
+                return None
+            values, lats, lons, ni, nj = self._decode(grib)
+
+        values = _conv(spec.get("conv"), values)
         self._ensure_mapping(lats, lons, ni, nj)
-        if spec["conv"] == "k2f":
-            values = _k2f(values)
         grid = values[self._mapping].reshape(T_NJ, T_NI).astype(np.float32)
         return self._encode(grid, float(spec["vmin"]), float(spec["vmax"]), spec.get("nodata_below"))
 
-    def _fetch_message(self, key: str, idx_match: str) -> Optional[bytes]:
+    def _read_idx(self, key: str) -> list[str]:
         s3 = self._get_s3()
         idx = s3.get_object(Bucket=HRRR_BUCKET, Key=key + ".idx")["Body"].read().decode("utf-8", "replace")
-        lines = idx.splitlines()
+        return idx.splitlines()
+
+    def _range_get(self, key: str, lines: list[str], idx_match: str) -> Optional[bytes]:
+        """Byte-range GET the single GRIB record whose .idx line contains idx_match."""
         start = end = None
         for i, line in enumerate(lines):
             if idx_match in line:
@@ -194,7 +270,7 @@ class HRRRFieldService:
             logger.warning("HRRR field %s not in idx for %s", idx_match, key)
             return None
         rng = f"bytes={start}-" + (str(end - 1) if end else "")
-        return s3.get_object(Bucket=HRRR_BUCKET, Key=key, Range=rng)["Body"].read()
+        return self._get_s3().get_object(Bucket=HRRR_BUCKET, Key=key, Range=rng)["Body"].read()
 
     def _decode(self, grib: bytes):
         # Decode straight from the in-memory message (no temp file → avoids
