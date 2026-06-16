@@ -3630,8 +3630,9 @@ async def get_hrrr_sounding(lat: float, lon: float, fhour: int = 0, run: Optiona
     try:
         png, key = await loop.run_in_executor(None, lambda: svc.get_point_sounding_png(lat, lon, fhour, run))
     except Exception as e:
-        try:  # exact-point failed (Open-Meteo down?) → nearest BUFKIT site
-            png, key = await loop.run_in_executor(None, svc.get_sounding_png, lat, lon)
+        try:  # exact-point failed (beyond Open-Meteo's ~45 h horizon?) → nearest
+            # BUFKIT site at the SAME forecast hour (BUFKIT reaches F48).
+            png, key = await loop.run_in_executor(None, lambda: svc.get_sounding_png(lat, lon, fhour))
         except Exception:
             raise HTTPException(status_code=503, detail=f"HRRR sounding unavailable: {e}")
     return FastResponse(

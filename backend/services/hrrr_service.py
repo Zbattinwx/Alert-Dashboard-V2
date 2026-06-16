@@ -121,16 +121,25 @@ class HRRRSoundingService:
         return out
 
     # ── sounding render ────────────────────────────────────────────────────
-    def get_sounding_png(self, lat: float, lon: float) -> tuple[bytes, str]:
+    def get_sounding_png(self, lat: float, lon: float, fhour: int = 0) -> tuple[bytes, str]:
         """Return (png_bytes, station_id). Raises if no nearby station has data."""
         import os
         import tempfile
+        from datetime import datetime, timedelta, timezone
 
         import sounderpy as spy
 
         _patch_sounderpy_units()
+        # Forecast hours past 18 only exist in the extended 00/06/12/18Z runs, so
+        # target the latest extended run (≈2 h production lag) for those.
+        run_kwargs: dict = {}
+        if fhour > 18:
+            t = datetime.now(timezone.utc) - timedelta(hours=2)
+            rdt = t.replace(hour=(t.hour // 6) * 6, minute=0, second=0, microsecond=0)
+            run_kwargs = dict(run_year=rdt.strftime("%Y"), run_month=rdt.strftime("%m"),
+                              run_day=rdt.strftime("%d"), run_hour=rdt.strftime("%H"))
         with self._lock:
-            stations = self._nearest(lat, lon, k=8)
+            stations = self._nearest(lat, lon, k=5)
             if not stations:
                 raise RuntimeError("no BUFKIT stations available")
 
@@ -138,13 +147,13 @@ class HRRRSoundingService:
             for stn in stations:
                 sid = stn.lower()
                 # serve a recent cached render for this station/run
-                cached = self._cache.get(sid)
+                cached = self._cache.get(f"{sid}:{fhour}")
                 if cached and (time.time() - cached[0]) < CACHE_TTL_S:
                     return cached[1], stn
 
                 try:
                     t0 = time.time()
-                    clean = spy.get_bufkit_data("hrrr", sid, 0, hush=True)
+                    clean = spy.get_bufkit_data("hrrr", sid, fhour, hush=True, **run_kwargs)
                     tmp = tempfile.NamedTemporaryFile(prefix=f"snd_{sid}_", suffix="", delete=False)
                     path = tmp.name
                     tmp.close()
@@ -178,7 +187,7 @@ class HRRRSoundingService:
                     except OSError:
                         pass
                     run = "-".join(clean.get("site_info", {}).get("run-time", []))
-                    self._cache[sid] = (time.time(), png, run)
+                    self._cache[f"{sid}:{fhour}"] = (time.time(), png, run)
                     logger.info(
                         f"HRRR sounding: {stn} ({len(png)} bytes) in {time.time() - t0:.0f}s"
                     )
@@ -208,10 +217,9 @@ class HRRRSoundingService:
 
         if run:
             run_dt = datetime(int(run[:4]), int(run[4:6]), int(run[6:8]), int(run[8:10]), tzinfo=timezone.utc)
-            valid_dt = run_dt + timedelta(hours=fhour)
         else:
             run_dt = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-            valid_dt = run_dt
+        valid_dt = run_dt + timedelta(hours=fhour)  # fhour applies with or without an explicit run
         fhr = int(fhour)
         ckey = f"{round(lat, 2)},{round(lon, 2)}@{valid_dt.strftime('%Y%m%d%H')}"
 
