@@ -3643,24 +3643,25 @@ async def get_hrrr_sounding(lat: float, lon: float, fhour: int = 0, run: Optiona
 
 
 @app.get("/api/hrrr/runs")
-async def get_hrrr_runs():
-    """Manifest for the HRRR model field overlays: the last ~10 runs (with each
-    run's max forecast hour) + the available fields. Lazy/cached — see
-    hrrr_field_service."""
+async def get_hrrr_runs(model: str = "hrrr"):
+    """Manifest for a model's field overlays (model=hrrr|rrfs): the last ~10 runs
+    (with each run's max forecast hour), the available fields, and the model's
+    forecast-hour offset. Lazy/cached — see hrrr_field_service."""
     try:
-        from .services.hrrr_field_service import get_hrrr_field_service
+        from .services.hrrr_field_service import get_hrrr_field_service, MODELS
     except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
+        from backend.services.hrrr_field_service import get_hrrr_field_service, MODELS
     svc = get_hrrr_field_service()
     if not svc.available:
         raise HTTPException(status_code=503, detail="HRRR fields unavailable (eccodes/scipy missing)")
-    runs = await asyncio.to_thread(svc.list_runs, 10)
-    return {"runs": runs, "fields": svc.fields()}
+    runs = await asyncio.to_thread(svc.list_runs, model, 10)
+    offset = MODELS.get(model, MODELS["hrrr"]).get("fhour_offset", 0)
+    return {"runs": runs, "fields": svc.fields(model), "fhour_offset": offset}
 
 
 @app.get("/api/hrrr/field")
-async def get_hrrr_field(run: str, param: str, fhour: int = 0):
-    """One HRRR field as a compact lat/lon binary grid (magic 'HRRR') for the
+async def get_hrrr_field(run: str, param: str, fhour: int = 0, model: str = "hrrr"):
+    """One model field as a compact lat/lon binary grid (magic 'HRRR') for the
     app's WebGL layer. run=YYYYMMDDHH, param in the field registry, fhour int."""
     try:
         from .services.hrrr_field_service import get_hrrr_field_service
@@ -3670,7 +3671,7 @@ async def get_hrrr_field(run: str, param: str, fhour: int = 0):
     svc = get_hrrr_field_service()
     if not svc.available:
         raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    data = await asyncio.to_thread(svc.get_field, run, param, fhour)
+    data = await asyncio.to_thread(svc.get_field, model, run, param, fhour)
     if data is None:
         raise HTTPException(status_code=404, detail="HRRR field not available")
     return FastResponse(
@@ -3681,7 +3682,7 @@ async def get_hrrr_field(run: str, param: str, fhour: int = 0):
 
 
 @app.get("/api/hrrr/barbs")
-async def get_hrrr_barbs(run: str, param: str, fhour: int = 0):
+async def get_hrrr_barbs(run: str, param: str, fhour: int = 0, model: str = "hrrr"):
     """Downsampled wind vectors for a wind field → barb plotting ([lon,lat,kt,dir])."""
     try:
         from .services.hrrr_field_service import get_hrrr_field_service
@@ -3690,14 +3691,14 @@ async def get_hrrr_barbs(run: str, param: str, fhour: int = 0):
     svc = get_hrrr_field_service()
     if not svc.available:
         raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    data = await asyncio.to_thread(svc.get_barbs, run, param, fhour)
+    data = await asyncio.to_thread(svc.get_barbs, model, run, param, fhour)
     if data is None:
         raise HTTPException(status_code=404, detail="HRRR barbs not available")
     return data
 
 
 @app.get("/api/hrrr/isobars")
-async def get_hrrr_isobars(run: str, fhour: int = 0):
+async def get_hrrr_isobars(run: str, fhour: int = 0, model: str = "hrrr"):
     """MSLP isobars (GeoJSON LineStrings) for the run/forecast hour."""
     try:
         from .services.hrrr_field_service import get_hrrr_field_service
@@ -3706,15 +3707,15 @@ async def get_hrrr_isobars(run: str, fhour: int = 0):
     svc = get_hrrr_field_service()
     if not svc.available:
         raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    data = await asyncio.to_thread(svc.get_isobars, run, fhour)
+    data = await asyncio.to_thread(svc.get_isobars, model, run, fhour)
     if data is None:
         raise HTTPException(status_code=404, detail="HRRR isobars not available")
     return data
 
 
 @app.get("/api/hrrr/contours")
-async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = "75,150"):
-    """Contour a registered HRRR field at `levels` (GeoJSON; for the UH overlay)."""
+async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = "75,150", model: str = "hrrr"):
+    """Contour a registered model field at `levels` (GeoJSON; for the UH overlay)."""
     try:
         from .services.hrrr_field_service import get_hrrr_field_service
     except ImportError:
@@ -3723,7 +3724,7 @@ async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = 
     if not svc.available:
         raise HTTPException(status_code=503, detail="HRRR fields unavailable")
     lv = [float(x) for x in levels.split(",") if x.strip()]
-    data = await asyncio.to_thread(svc.get_contours, run, param, fhour, lv)
+    data = await asyncio.to_thread(svc.get_contours, model, run, param, fhour, lv)
     if data is None:
         raise HTTPException(status_code=404, detail="HRRR contours not available")
     return data

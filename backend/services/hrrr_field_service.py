@@ -111,6 +111,56 @@ for _id, _spec in HRRR_FIELDS.items():
     if isinstance(_m, str) and " mb:" in _m:
         _spec["file"] = "prs"
 
+# ── RRFS-A (REFS) ensemble registry ─────────────────────────────────────────
+# Public RRFS-A is the REFS ensemble; the usable single field set is the
+# ensemble *mean* (file "mean") plus the probability-matched mean (file "pmmn")
+# for reflectivity / updraft helicity. Same conv/derive/LUT machinery as HRRR;
+# `file` here is the enspost product token. No F00 (products start at f01) — the
+# model's fhour_offset handles that.
+RRFS_FIELDS: dict[str, dict] = {
+    # Surface
+    "t2m":  {"idx": ":TMP:2 m above ground:", "label": "2 m Temperature", "conv": "k2f", "vmin": -30.0, "vmax": 120.0, "units": "°F", "lut": "hrrr_temp", "group": "Surface", "file": "mean"},
+    "td2m": {"idx": ":DPT:2 m above ground:", "label": "2 m Dew Point", "conv": "k2f", "vmin": -30.0, "vmax": 90.0, "units": "°F", "lut": "hrrr_dewpoint", "group": "Surface", "file": "mean"},
+    "refc": {"idx": ":REFC:entire atmosphere", "label": "Composite Reflectivity", "conv": None, "vmin": -20.0, "vmax": 80.0, "units": "dBZ", "lut": "reflectivity", "group": "Surface", "nodata_below": 5.0, "file": "pmmn"},
+    # Severe
+    "sbcape": {"idx": ":CAPE:surface:", "label": "Surface CAPE", "conv": None, "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape", "group": "Severe", "nodata_below": 100.0, "file": "mean"},
+    "mlcape": {"idx": ":CAPE:90-0 mb above ground:", "label": "ML CAPE", "conv": None, "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape", "group": "Severe", "nodata_below": 100.0, "file": "mean"},
+    "sbcin": {"idx": ":CIN:surface:", "label": "Surface CIN", "conv": None, "vmin": -400.0, "vmax": 0.0, "units": "J/kg", "lut": "cin", "group": "Severe", "file": "mean"},
+    "srh03": {"idx": ":HLCY:3000-0 m above ground:", "label": "0–3 km SRH", "conv": None, "vmin": 0.0, "vmax": 900.0, "units": "m²/s²", "lut": "srh", "group": "Severe", "nodata_below": 50.0, "file": "mean"},
+    "pwat": {"idx": ":PWAT:entire atmosphere", "label": "Precipitable Water", "conv": "mm2in", "vmin": 0.0, "vmax": 2.5, "units": "in", "lut": "pwat", "group": "Severe", "file": "mean"},
+    "uphl": {"idx": ":MXUPHL:5000-2000 m above ground:", "label": "2–5 km Updraft Helicity", "conv": None, "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "file": "pmmn"},
+    # Upper Air
+    "t850": {"idx": ":TMP:850 mb:", "label": "850 mb Temp", "conv": "k2c", "vmin": -30.0, "vmax": 30.0, "units": "°C", "lut": "temp_upper", "group": "Upper Air", "file": "mean"},
+    "t700": {"idx": ":TMP:700 mb:", "label": "700 mb Temp", "conv": "k2c", "vmin": -40.0, "vmax": 20.0, "units": "°C", "lut": "temp_upper", "group": "Upper Air", "file": "mean"},
+    "t500": {"idx": ":TMP:500 mb:", "label": "500 mb Temp", "conv": "k2c", "vmin": -45.0, "vmax": 0.0, "units": "°C", "lut": "temp_upper", "group": "Upper Air", "file": "mean"},
+    "rh700": {"idx": ":RH:700 mb:", "label": "700 mb RH", "conv": None, "vmin": 0.0, "vmax": 100.0, "units": "%", "lut": "rh", "group": "Upper Air", "file": "mean"},
+    "z500": {"idx": ":HGT:500 mb:", "label": "500 mb Height", "conv": None, "vmin": 5160.0, "vmax": 6000.0, "units": "m", "lut": "height", "group": "Upper Air", "file": "mean"},
+    "wspd850": {"derive": ("mag", ":UGRD:850 mb:", ":VGRD:850 mb:"), "label": "850 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 80.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air", "file": "mean"},
+    "wspd500": {"derive": ("mag", ":UGRD:500 mb:", ":VGRD:500 mb:"), "label": "500 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 120.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air", "file": "mean"},
+    "wspd250": {"derive": ("mag", ":UGRD:250 mb:", ":VGRD:250 mb:"), "label": "250 mb Jet", "conv": "ms2kt", "vmin": 0.0, "vmax": 160.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air", "file": "mean"},
+    # Winter
+    "asnow": {"idx": ":ASNOW:surface:", "label": "Accumulated Snow", "conv": "m2in", "vmin": 0.0, "vmax": 18.0, "units": "in", "lut": "snow", "group": "Winter", "nodata_below": 0.1, "file": "mean"},
+    "ptype": {"derive": ("ptype", ":CRAIN:surface:", ":CSNOW:surface:", ":CICEP:surface:", ":CFRZR:surface:"), "label": "Precip Type", "conv": None, "vmin": 0.0, "vmax": 4.0, "units": "", "lut": "ptype", "group": "Winter", "nodata_below": 0.5, "file": "mean"},
+}
+
+# ── Model registry (HRRR + RRFS-A) ──────────────────────────────────────────
+MODELS: dict[str, dict] = {
+    "hrrr": {
+        "label": "HRRR", "bucket": "noaa-hrrr-bdp-pds", "fields": HRRR_FIELDS,
+        "run_hours": tuple(range(24)), "fhour_offset": 0,
+        "max_fhour": (lambda hh: 48 if hh % 6 == 0 else 18),
+        "default_file": "sfc", "mslp": (":MSLMA:mean sea level:", "sfc"),
+        "key": (lambda date, hh, f, tok: f"hrrr.{date}/conus/hrrr.t{hh:02d}z.wrf{tok}f{f:02d}.grib2"),
+    },
+    "rrfs": {
+        "label": "RRFS-A", "bucket": "noaa-rrfs-pds", "fields": RRFS_FIELDS,
+        "run_hours": (0, 6, 12, 18), "fhour_offset": 1,  # enspost starts at f01
+        "max_fhour": (lambda hh: 59),  # f01..f60 → app slots 0..59
+        "default_file": "mean", "mslp": (":MSLET:mean sea level:", "mean"),
+        "key": (lambda date, hh, f, tok: f"rrfs_a/refs.{date}/{hh:02d}/enspost/refs.t{hh:02d}z.{tok}.f{f:02d}.conus.grib2"),
+    },
+}
+
 # Target display grid (regular lat/lon, covers the HRRR CONUS domain).
 T_W, T_E, T_S, T_N = -134.0, -60.5, 20.5, 53.0
 T_RES = 0.035
@@ -194,70 +244,71 @@ class HRRRFieldService:
 
     # ── Run discovery ──────────────────────────────────────────────────────
     @staticmethod
-    def _key(date: str, hh: int, fhour: int, kind: str = "sfc") -> str:
-        return f"hrrr.{date}/conus/hrrr.t{hh:02d}z.wrf{kind}f{fhour:02d}.grib2"
+    def _key(model: str, date: str, hh: int, fhour: int, token: Optional[str] = None) -> str:
+        m = MODELS[model]
+        tok = token or m["default_file"]
+        return m["key"](date, hh, fhour + m["fhour_offset"], tok)  # offset → real file hour
 
-    @staticmethod
-    def _max_fhour(hh: int) -> int:
-        return 48 if hh % 6 == 0 else 18  # 00/06/12/18Z run to F48, others F18
-
-    def _exists(self, key: str) -> bool:
+    def _exists(self, model: str, key: str) -> bool:
         try:
-            self._get_s3().head_object(Bucket=HRRR_BUCKET, Key=key + ".idx")
+            self._get_s3().head_object(Bucket=MODELS[model]["bucket"], Key=key + ".idx")
             return True
         except Exception:
             return False
 
-    def list_runs(self, limit: int = 10) -> list[dict]:
-        """The most recent `limit` HRRR runs (newest first). Walks back from the
-        current hour to find the latest available run, then enumerates back."""
+    def list_runs(self, model: str = "hrrr", limit: int = 10) -> list[dict]:
+        """The most recent `limit` runs for the model (newest first). Walks back
+        from now to the latest available run hour, then enumerates prior runs."""
+        if model not in MODELS:
+            return []
+        m = MODELS[model]
         now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
         latest: Optional[datetime] = None
-        for back in range(0, 6):  # latest run is usually 1–2 h old
+        for back in range(0, 24):  # 6-hourly models may be several h old
             t = now - timedelta(hours=back)
-            if self._exists(self._key(t.strftime("%Y%m%d"), t.hour, 0)):
+            if t.hour not in m["run_hours"]:
+                continue
+            if self._exists(model, self._key(model, t.strftime("%Y%m%d"), t.hour, 0)):
                 latest = t
                 break
         if latest is None:
             return []
-        runs = []
-        for i in range(limit):
-            t = latest - timedelta(hours=i)
-            hh = t.hour
-            runs.append({
-                "run": t.strftime("%Y%m%d%H"),
-                "iso": t.isoformat(),
-                "max_fhour": self._max_fhour(hh),
-            })
+        runs, t = [], latest
+        while len(runs) < limit and t > latest - timedelta(days=10):
+            if t.hour in m["run_hours"]:
+                runs.append({"run": t.strftime("%Y%m%d%H"), "iso": t.isoformat(),
+                             "max_fhour": m["max_fhour"](t.hour)})
+            t -= timedelta(hours=1)
         return runs
 
-    def fields(self) -> list[dict]:
+    def fields(self, model: str = "hrrr") -> list[dict]:
+        reg = MODELS.get(model, MODELS["hrrr"])["fields"]
         return [
             {"id": k, "label": v["label"], "units": v["units"], "lut": v["lut"],
              "vmin": v["vmin"], "vmax": v["vmax"], "group": v.get("group", "Other"),
              "barbs": (v.get("derive") or (None,))[0] == "mag",
              "uh_contour": v.get("uh_contour")}
-            for k, v in HRRR_FIELDS.items()
+            for k, v in reg.items()
         ]
 
     # ── Field fetch (on demand, cached) ────────────────────────────────────
-    def get_field(self, run: str, param: str, fhour: int) -> Optional[bytes]:
-        if not _check_deps() or param not in HRRR_FIELDS:
+    def get_field(self, model: str, run: str, param: str, fhour: int) -> Optional[bytes]:
+        if not _check_deps() or model not in MODELS or param not in MODELS[model]["fields"]:
             return None
-        ck = f"{run}:{param}:{fhour}"
+        ck = f"{model}:{run}:{param}:{fhour}"
         with self._lock:
             if ck in self._cache:
                 self._cache.move_to_end(ck)
                 return self._cache[ck]
         try:
-            data = self._build_field(run, param, fhour)
+            data = self._build_field(model, run, param, fhour)
         except Exception as e:
             # A not-yet-produced forecast hour (fresh run still uploading) is
             # expected — log it quietly, not as a warning.
             if "NoSuchKey" in str(e) or "Not Found" in str(e):
-                logger.debug("HRRR field %s not available yet", ck)
+                logger.debug("field %s not available yet", ck)
             else:
-                logger.warning("HRRR field %s failed: %s", ck, e)
+                logger.warning("field %s failed: %s", ck, e)
             return None
         if data is None:
             return None
@@ -268,9 +319,9 @@ class HRRRFieldService:
                 self._cache.popitem(last=False)
         return data
 
-    def _build_field(self, run: str, param: str, fhour: int) -> Optional[bytes]:
-        spec = HRRR_FIELDS[param]
-        grid = self._field_grid(run, param, fhour)
+    def _build_field(self, model: str, run: str, param: str, fhour: int) -> Optional[bytes]:
+        spec = MODELS[model]["fields"][param]
+        grid = self._field_grid(model, run, param, fhour)
         if grid is None:
             return None
         return self._encode(grid, float(spec["vmin"]), float(spec["vmax"]), spec.get("nodata_below"))
@@ -282,21 +333,21 @@ class HRRRFieldService:
             return np.zeros((T_NJ, T_NI), dtype=np.float32)
         return None
 
-    def _field_grid(self, run: str, param: str, fhour: int):
+    def _field_grid(self, model: str, run: str, param: str, fhour: int):
         """Produce the regridded float grid (T_NJ×T_NI) for a field, or None."""
-        spec = HRRR_FIELDS[param]
+        spec = MODELS[model]["fields"][param]
         if "timeagg" in spec:
-            return self._timeagg_grid(run, param, fhour, spec)
+            return self._timeagg_grid(model, run, param, fhour, spec)
 
         date, hh = run[:8], int(run[8:10])
-        key = self._key(date, hh, fhour, spec.get("file", "sfc"))
-        lines = self._read_idx(key)  # raises NoSuchKey if the hour isn't produced yet
+        key = self._key(model, date, hh, fhour, spec.get("file"))
+        lines = self._read_idx(model, key)  # raises NoSuchKey if the hour isn't produced yet
 
         derive = spec.get("derive")
         if derive:
             kind = derive[0]
             if kind in ("mag", "ptype"):
-                msgs = [self._range_get(key, lines, m) for m in derive[1:]]
+                msgs = [self._range_get(model, key, lines, m) for m in derive[1:]]
                 if any(g is None for g in msgs):
                     return self._zero_or_none(spec, fhour)
                 decoded = [self._decode(g) for g in msgs]
@@ -312,7 +363,7 @@ class HRRRFieldService:
                 name, inputs = derive[1], derive[2]
                 arrs, lats, lons = [], None, None
                 for idx_match, cv in inputs:
-                    g = self._range_get(key, lines, idx_match)
+                    g = self._range_get(model, key, lines, idx_match)
                     if g is None:
                         return self._zero_or_none(spec, fhour)
                     vv, lats, lons, _, _ = self._decode(g)
@@ -321,32 +372,32 @@ class HRRRFieldService:
             else:
                 raise ValueError(f"unknown derive kind {kind}")
         else:
-            grib = self._range_get(key, lines, spec["idx"])
+            grib = self._range_get(model, key, lines, spec["idx"])
             if grib is None:
                 return self._zero_or_none(spec, fhour)
             values, lats, lons, _, _ = self._decode(grib)
 
         values = _conv(spec.get("conv"), values)
-        self._ensure_mapping(lats, lons)
+        self._ensure_mapping(lats, lons, model)
         return values[self._mapping].reshape(T_NJ, T_NI).astype(np.float32)
 
-    def _timeagg_grid(self, run: str, param: str, fhour: int, spec: dict):
+    def _timeagg_grid(self, model: str, run: str, param: str, fhour: int, spec: dict):
         """Aggregate a base field over a forecast-hour window (e.g. UH run/3-h max)."""
         op, window = spec["timeagg"]
         base = spec["base"]
-        cur = self._field_grid(run, base, fhour)
+        cur = self._field_grid(model, run, base, fhour)
         if cur is None:
             return self._zero_or_none(spec, fhour)
         if window == "run":  # cumulative — reuse the cached previous run-max (O(1)/frame)
             if fhour <= 0:
                 return cur
-            prev = self.get_field(run, param, fhour - 1)
+            prev = self.get_field(model, run, param, fhour - 1)
             if prev is None:
                 return cur
             return np.maximum(cur, self._dequantize(prev))
         out = cur  # last N hours
         for h in range(max(0, fhour - int(window) + 1), fhour):
-            g = self._field_grid(run, base, h)
+            g = self._field_grid(model, run, base, h)
             if g is not None:
                 out = np.maximum(out, g)
         return out
@@ -359,23 +410,23 @@ class HRRRFieldService:
         out[b == 0] = 0.0
         return out.reshape(T_NJ, T_NI)
 
-    def get_barbs(self, run: str, param: str, fhour: int, stride: int = 14) -> Optional[dict]:
+    def get_barbs(self, model: str, run: str, param: str, fhour: int, stride: int = 14) -> Optional[dict]:
         """Downsampled wind vectors for a `mag` wind field → barb plotting data.
         Returns compact [lon, lat, speed_kt, from_dir_deg] rows."""
-        spec = HRRR_FIELDS.get(param)
+        spec = MODELS.get(model, {}).get("fields", {}).get(param)
         if not spec or spec.get("derive", (None,))[0] != "mag":
             return None
         _, u_idx, v_idx = spec["derive"]
         date, hh = run[:8], int(run[8:10])
-        key = self._key(date, hh, fhour, spec.get("file", "sfc"))
-        lines = self._read_idx(key)
-        gu = self._range_get(key, lines, u_idx)
-        gv = self._range_get(key, lines, v_idx)
+        key = self._key(model, date, hh, fhour, spec.get("file"))
+        lines = self._read_idx(model, key)
+        gu = self._range_get(model, key, lines, u_idx)
+        gv = self._range_get(model, key, lines, v_idx)
         if gu is None or gv is None:
             return None
         u, lats, lons, _, _ = self._decode(gu)
         v, _, _, _, _ = self._decode(gv)
-        self._ensure_mapping(lats, lons)
+        self._ensure_mapping(lats, lons, model)
         ug = u[self._mapping].reshape(T_NJ, T_NI)
         vg = v[self._mapping].reshape(T_NJ, T_NI)
         rs = np.arange(stride // 2, T_NJ, stride)
@@ -390,17 +441,18 @@ class HRRRFieldService:
         pts = np.stack([long[mask].round(3), latg[mask].round(3), spd[mask].round(), drc[mask].round()], axis=1)
         return {"param": param, "fhour": fhour, "points": pts.tolist()}
 
-    def get_isobars(self, run: str, fhour: int, interval: int = 4) -> Optional[dict]:
+    def get_isobars(self, model: str, run: str, fhour: int, interval: int = 4) -> Optional[dict]:
         """MSLP isobars as GeoJSON LineStrings (hPa in `p`, every-20 hPa flagged
         `bold`). Smoothed + downsampled before contouring to keep lines clean."""
+        mslp_idx, mslp_tok = MODELS[model]["mslp"]
         date, hh = run[:8], int(run[8:10])
-        key = self._key(date, hh, fhour, "sfc")
-        lines = self._read_idx(key)
-        grib = self._range_get(key, lines, ":MSLMA:mean sea level:")
+        key = self._key(model, date, hh, fhour, mslp_tok)
+        lines = self._read_idx(model, key)
+        grib = self._range_get(model, key, lines, mslp_idx)
         if grib is None:
             return None
         vals, lats, lons, _, _ = self._decode(grib)
-        self._ensure_mapping(lats, lons)
+        self._ensure_mapping(lats, lons, model)
         grid = vals[self._mapping].reshape(T_NJ, T_NI) / 100.0  # Pa → hPa
 
         from scipy.ndimage import gaussian_filter
@@ -426,12 +478,12 @@ class HRRRFieldService:
                 })
         return {"type": "FeatureCollection", "features": feats, "fhour": fhour}
 
-    def get_contours(self, run: str, param: str, fhour: int, levels: list[float]) -> Optional[dict]:
+    def get_contours(self, model: str, run: str, param: str, fhour: int, levels: list[float]) -> Optional[dict]:
         """Contour a registered field at the given levels → GeoJSON LineStrings
         (level in `v`). Used for the updraft-helicity overlay on reflectivity."""
-        if param not in HRRR_FIELDS:
+        if model not in MODELS or param not in MODELS[model]["fields"]:
             return None
-        grid = self._field_grid(run, param, fhour)
+        grid = self._field_grid(model, run, param, fhour)
         if grid is None:
             return {"type": "FeatureCollection", "features": [], "fhour": fhour}
         from scipy.ndimage import gaussian_filter
@@ -455,12 +507,12 @@ class HRRRFieldService:
                 })
         return {"type": "FeatureCollection", "features": feats, "fhour": fhour}
 
-    def _read_idx(self, key: str) -> list[str]:
+    def _read_idx(self, model: str, key: str) -> list[str]:
         s3 = self._get_s3()
-        idx = s3.get_object(Bucket=HRRR_BUCKET, Key=key + ".idx")["Body"].read().decode("utf-8", "replace")
+        idx = s3.get_object(Bucket=MODELS[model]["bucket"], Key=key + ".idx")["Body"].read().decode("utf-8", "replace")
         return idx.splitlines()
 
-    def _range_get(self, key: str, lines: list[str], idx_match: str) -> Optional[bytes]:
+    def _range_get(self, model: str, key: str, lines: list[str], idx_match: str) -> Optional[bytes]:
         """Byte-range GET the single GRIB record whose .idx line contains idx_match."""
         start = end = None
         for i, line in enumerate(lines):
@@ -470,10 +522,10 @@ class HRRRFieldService:
                     end = int(lines[i + 1].split(":")[1])
                 break
         if start is None:
-            logger.warning("HRRR field %s not in idx for %s", idx_match, key)
+            logger.warning("field %s not in idx for %s", idx_match, key)
             return None
         rng = f"bytes={start}-" + (str(end - 1) if end else "")
-        return self._get_s3().get_object(Bucket=HRRR_BUCKET, Key=key, Range=rng)["Body"].read()
+        return self._get_s3().get_object(Bucket=MODELS[model]["bucket"], Key=key, Range=rng)["Body"].read()
 
     def _decode(self, grib: bytes):
         # Decode straight from the in-memory message (no temp file → avoids
@@ -500,11 +552,12 @@ class HRRRFieldService:
         lons = np.where(lons > 180.0, lons - 360.0, lons)  # → [-180,180]
         return values, lats, lons, ni, nj
 
-    def _ensure_mapping(self, lats: np.ndarray, lons: np.ndarray) -> None:
-        sig = str(lats.size)  # HRRR native grid is fixed (1799×1059)
+    def _ensure_mapping(self, lats: np.ndarray, lons: np.ndarray, model: str) -> None:
+        # Per-model (HRRR & RRFS-A share the 1799×1059 size but are distinct grids).
+        sig = f"{model}:{lats.size}"
         if self._mapping is not None and self._mapping_sig == sig:
             return
-        cache_path = os.path.join(self._map_dir, f"map_{sig}_{T_NI}x{T_NJ}.npy")
+        cache_path = os.path.join(self._map_dir, f"map_{model}_{lats.size}_{T_NI}x{T_NJ}.npy")
         if os.path.exists(cache_path):
             self._mapping = np.load(cache_path)
             self._mapping_sig = sig
