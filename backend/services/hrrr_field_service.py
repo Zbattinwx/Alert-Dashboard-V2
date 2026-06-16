@@ -34,6 +34,13 @@ HRRR_BUCKET = "noaa-hrrr-bdp-pds"
 BINARY_MAGIC = b"HRRR"
 CACHE_MAX = 80  # LRU entries (~2 MB each → ~160 MB cap)
 
+# eccodes is NOT thread-safe: its .def parser (flex) keeps global buffer state,
+# so concurrent codes_new_from_message() calls corrupt it ("end of buffer
+# missed" / template syntax errors). The app prefetches with several workers and
+# derived fields decode 2+ messages each, so we serialize the eccodes decode
+# (the slow S3 byte-range fetches stay parallel — they run outside this lock).
+_DECODE_LOCK = threading.Lock()
+
 # ── Field registry (extend by adding entries) ───────────────────────────────
 # Each entry needs either an `idx` (one GRIB record, matched as a substring of
 # the .idx line) or a `derive` tuple (multiple records combined):
@@ -274,24 +281,26 @@ class HRRRFieldService:
 
     def _decode(self, grib: bytes):
         # Decode straight from the in-memory message (no temp file → avoids
-        # Windows file locking and is faster).
+        # Windows file locking and is faster). Serialized: eccodes isn't
+        # thread-safe (see _DECODE_LOCK).
         import eccodes
-        gid = eccodes.codes_new_from_message(grib)
-        if gid is None:
-            raise ValueError("no GRIB message")
-        try:
-            ni = int(eccodes.codes_get(gid, "Ni"))
-            nj = int(eccodes.codes_get(gid, "Nj"))
-            values = np.asarray(eccodes.codes_get_values(gid), dtype=np.float64)
-            lats = np.asarray(eccodes.codes_get_array(gid, "latitudes"), dtype=np.float64)
-            lons = np.asarray(eccodes.codes_get_array(gid, "longitudes"), dtype=np.float64)
+        with _DECODE_LOCK:
+            gid = eccodes.codes_new_from_message(grib)
+            if gid is None:
+                raise ValueError("no GRIB message")
             try:
-                mv = eccodes.codes_get(gid, "missingValue")
-                values = np.where(values == mv, np.nan, values)
-            except Exception:
-                pass
-        finally:
-            eccodes.codes_release(gid)
+                ni = int(eccodes.codes_get(gid, "Ni"))
+                nj = int(eccodes.codes_get(gid, "Nj"))
+                values = np.asarray(eccodes.codes_get_values(gid), dtype=np.float64)
+                lats = np.asarray(eccodes.codes_get_array(gid, "latitudes"), dtype=np.float64)
+                lons = np.asarray(eccodes.codes_get_array(gid, "longitudes"), dtype=np.float64)
+                try:
+                    mv = eccodes.codes_get(gid, "missingValue")
+                    values = np.where(values == mv, np.nan, values)
+                except Exception:
+                    pass
+            finally:
+                eccodes.codes_release(gid)
         lons = np.where(lons > 180.0, lons - 360.0, lons)  # → [-180,180]
         return values, lats, lons, ni, nj
 
