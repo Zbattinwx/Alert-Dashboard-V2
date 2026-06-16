@@ -55,7 +55,7 @@ HRRR_FIELDS: dict[str, dict] = {
     # ── Surface ──
     "t2m":  {"idx": ":TMP:2 m above ground:", "label": "2 m Temperature",        "conv": "k2f", "vmin": -30.0, "vmax": 120.0, "units": "°F",  "lut": "hrrr_temp",     "group": "Surface"},
     "td2m": {"idx": ":DPT:2 m above ground:", "label": "2 m Dew Point",          "conv": "k2f", "vmin": -30.0, "vmax": 90.0,  "units": "°F",  "lut": "hrrr_dewpoint", "group": "Surface"},
-    "refc": {"idx": ":REFC:entire atmosphere:", "label": "Composite Reflectivity","conv": None, "vmin": -20.0, "vmax": 80.0,  "units": "dBZ", "lut": "reflectivity",  "group": "Surface", "nodata_below": 5.0},
+    "refc": {"idx": ":REFC:entire atmosphere", "label": "Composite Reflectivity","conv": None, "vmin": -20.0, "vmax": 80.0,  "units": "dBZ", "lut": "reflectivity",  "group": "Surface", "nodata_below": 5.0},
 
     # ── Severe ──
     "sbcape":  {"idx": ":CAPE:surface:",                 "label": "Surface CAPE",   "conv": None, "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
@@ -80,7 +80,7 @@ HRRR_FIELDS: dict[str, dict] = {
     "uh25_3h":  {"timeagg": ("max", 3),     "base": "uh25", "label": "2–5 km UH (3 h max)", "vmin": 0.0, "vmax": 600.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
     "uh25_run": {"timeagg": ("max", "run"), "base": "uh25", "label": "2–5 km UH (run max)", "vmin": 0.0, "vmax": 800.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
     "uh03_run": {"timeagg": ("max", "run"), "base": "uh03", "label": "0–3 km UH (run max)", "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
-    "refc_uh":  {"idx": ":REFC:entire atmosphere:", "label": "Reflectivity + UH>75", "conv": None, "vmin": -20.0, "vmax": 80.0, "units": "dBZ", "lut": "reflectivity", "group": "Convective", "nodata_below": 5.0, "uh_contour": "uh25"},
+    "refc_uh":  {"idx": ":REFC:entire atmosphere", "label": "Reflectivity + UH>75", "conv": None, "vmin": -20.0, "vmax": 80.0, "units": "dBZ", "lut": "reflectivity", "group": "Convective", "nodata_below": 5.0, "uh_contour": "uh25"},
 
     # ── Upper Air (height / temp / wind / moisture) ──
     "t850":    {"idx": ":TMP:850 mb:",  "label": "850 mb Temp",  "conv": "k2c", "vmin": -30.0, "vmax": 30.0,  "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
@@ -111,37 +111,24 @@ for _id, _spec in HRRR_FIELDS.items():
     if isinstance(_m, str) and " mb:" in _m:
         _spec["file"] = "prs"
 
-# ── RRFS-A (REFS) ensemble registry ─────────────────────────────────────────
-# Public RRFS-A is the REFS ensemble; the usable single field set is the
-# ensemble *mean* (file "mean") plus the probability-matched mean (file "pmmn")
-# for reflectivity / updraft helicity. Same conv/derive/LUT machinery as HRRR;
-# `file` here is the enspost product token. No F00 (products start at f01) — the
-# model's fhour_offset handles that.
-RRFS_FIELDS: dict[str, dict] = {
-    # Surface
-    "t2m":  {"idx": ":TMP:2 m above ground:", "label": "2 m Temperature", "conv": "k2f", "vmin": -30.0, "vmax": 120.0, "units": "°F", "lut": "hrrr_temp", "group": "Surface", "file": "mean"},
-    "td2m": {"idx": ":DPT:2 m above ground:", "label": "2 m Dew Point", "conv": "k2f", "vmin": -30.0, "vmax": 90.0, "units": "°F", "lut": "hrrr_dewpoint", "group": "Surface", "file": "mean"},
-    "refc": {"idx": ":REFC:entire atmosphere", "label": "Composite Reflectivity", "conv": None, "vmin": -20.0, "vmax": 80.0, "units": "dBZ", "lut": "reflectivity", "group": "Surface", "nodata_below": 5.0, "file": "pmmn"},
-    # Severe
-    "sbcape": {"idx": ":CAPE:surface:", "label": "Surface CAPE", "conv": None, "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape", "group": "Severe", "nodata_below": 100.0, "file": "mean"},
-    "mlcape": {"idx": ":CAPE:90-0 mb above ground:", "label": "ML CAPE", "conv": None, "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape", "group": "Severe", "nodata_below": 100.0, "file": "mean"},
-    "sbcin": {"idx": ":CIN:surface:", "label": "Surface CIN", "conv": None, "vmin": -400.0, "vmax": 0.0, "units": "J/kg", "lut": "cin", "group": "Severe", "file": "mean"},
-    "srh03": {"idx": ":HLCY:3000-0 m above ground:", "label": "0–3 km SRH", "conv": None, "vmin": 0.0, "vmax": 900.0, "units": "m²/s²", "lut": "srh", "group": "Severe", "nodata_below": 50.0, "file": "mean"},
-    "pwat": {"idx": ":PWAT:entire atmosphere", "label": "Precipitable Water", "conv": "mm2in", "vmin": 0.0, "vmax": 2.5, "units": "in", "lut": "pwat", "group": "Severe", "file": "mean"},
-    "uphl": {"idx": ":MXUPHL:5000-2000 m above ground:", "label": "2–5 km Updraft Helicity", "conv": None, "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "file": "pmmn"},
-    # Upper Air
-    "t850": {"idx": ":TMP:850 mb:", "label": "850 mb Temp", "conv": "k2c", "vmin": -30.0, "vmax": 30.0, "units": "°C", "lut": "temp_upper", "group": "Upper Air", "file": "mean"},
-    "t700": {"idx": ":TMP:700 mb:", "label": "700 mb Temp", "conv": "k2c", "vmin": -40.0, "vmax": 20.0, "units": "°C", "lut": "temp_upper", "group": "Upper Air", "file": "mean"},
-    "t500": {"idx": ":TMP:500 mb:", "label": "500 mb Temp", "conv": "k2c", "vmin": -45.0, "vmax": 0.0, "units": "°C", "lut": "temp_upper", "group": "Upper Air", "file": "mean"},
-    "rh700": {"idx": ":RH:700 mb:", "label": "700 mb RH", "conv": None, "vmin": 0.0, "vmax": 100.0, "units": "%", "lut": "rh", "group": "Upper Air", "file": "mean"},
-    "z500": {"idx": ":HGT:500 mb:", "label": "500 mb Height", "conv": None, "vmin": 5160.0, "vmax": 6000.0, "units": "m", "lut": "height", "group": "Upper Air", "file": "mean"},
-    "wspd850": {"derive": ("mag", ":UGRD:850 mb:", ":VGRD:850 mb:"), "label": "850 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 80.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air", "file": "mean"},
-    "wspd500": {"derive": ("mag", ":UGRD:500 mb:", ":VGRD:500 mb:"), "label": "500 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 120.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air", "file": "mean"},
-    "wspd250": {"derive": ("mag", ":UGRD:250 mb:", ":VGRD:250 mb:"), "label": "250 mb Jet", "conv": "ms2kt", "vmin": 0.0, "vmax": 160.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air", "file": "mean"},
-    # Winter
-    "asnow": {"idx": ":ASNOW:surface:", "label": "Accumulated Snow", "conv": "m2in", "vmin": 0.0, "vmax": 18.0, "units": "in", "lut": "snow", "group": "Winter", "nodata_below": 0.1, "file": "mean"},
-    "ptype": {"derive": ("ptype", ":CRAIN:surface:", ":CSNOW:surface:", ":CICEP:surface:", ":CFRZR:surface:"), "label": "Precip Type", "conv": None, "vmin": 0.0, "vmax": 4.0, "units": "", "lut": "ptype", "group": "Winter", "nodata_below": 0.5, "file": "mean"},
-}
+# ── RRFS-A deterministic registry ───────────────────────────────────────────
+# The deterministic RRFS (rrfs_a/rrfs.YYYYMMDD) is a full 3 km CONUS model with
+# the same GRIB field names as HRRR — 2dfld (surface, like wrfsfc) + prslev
+# (pressure, like wrfprs). So we derive the RRFS registry from HRRR_FIELDS,
+# remapping the file token (sfc→2dfld, prs→prslev). Differences: vertical
+# velocity is DZDT (m/s, up-positive) not VVEL; MSLP is MSLET (handled per-model).
+def _rrfs_fields() -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for k, v in HRRR_FIELDS.items():
+        s = dict(v)
+        s["file"] = "prslev" if s.get("file") == "prs" else "2dfld"
+        out[k] = s
+    out["omega700"] = {"idx": ":DZDT:700 mb:", "label": "700 mb Vertical Velocity",
+                       "conv": None, "vmin": -3.0, "vmax": 3.0, "units": "m/s",
+                       "lut": "omega_up", "group": "Dynamics", "file": "prslev"}
+    return out
+
+RRFS_FIELDS: dict[str, dict] = _rrfs_fields()
 
 # ── Model registry (HRRR + RRFS-A) ──────────────────────────────────────────
 MODELS: dict[str, dict] = {
@@ -154,10 +141,10 @@ MODELS: dict[str, dict] = {
     },
     "rrfs": {
         "label": "RRFS-A", "bucket": "noaa-rrfs-pds", "fields": RRFS_FIELDS,
-        "run_hours": (0, 6, 12, 18), "fhour_offset": 1,  # enspost starts at f01
-        "max_fhour": (lambda hh: 59),  # f01..f60 → app slots 0..59
-        "default_file": "mean", "mslp": (":MSLET:mean sea level:", "mean"),
-        "key": (lambda date, hh, f, tok: f"rrfs_a/refs.{date}/{hh:02d}/enspost/refs.t{hh:02d}z.{tok}.f{f:02d}.conus.grib2"),
+        "run_hours": tuple(range(24)), "fhour_offset": 0,  # deterministic has f000
+        "max_fhour": (lambda hh: 84 if hh % 6 == 0 else 18),  # synoptic runs to F84
+        "default_file": "2dfld", "mslp": (":MSLET:mean sea level:", "2dfld"),
+        "key": (lambda date, hh, f, tok: f"rrfs_a/rrfs.{date}/{hh:02d}/rrfs.t{hh:02d}z.{tok}.3km.f{f:03d}.conus.grib2"),
     },
 }
 
