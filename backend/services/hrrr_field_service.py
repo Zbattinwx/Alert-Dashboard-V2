@@ -388,6 +388,42 @@ class HRRRFieldService:
         pts = np.stack([long[mask].round(3), latg[mask].round(3), spd[mask].round(), drc[mask].round()], axis=1)
         return {"param": param, "fhour": fhour, "points": pts.tolist()}
 
+    def get_isobars(self, run: str, fhour: int, interval: int = 4) -> Optional[dict]:
+        """MSLP isobars as GeoJSON LineStrings (hPa in `p`, every-20 hPa flagged
+        `bold`). Smoothed + downsampled before contouring to keep lines clean."""
+        date, hh = run[:8], int(run[8:10])
+        key = self._key(date, hh, fhour, "sfc")
+        lines = self._read_idx(key)
+        grib = self._range_get(key, lines, ":MSLMA:mean sea level:")
+        if grib is None:
+            return None
+        vals, lats, lons, _, _ = self._decode(grib)
+        self._ensure_mapping(lats, lons)
+        grid = vals[self._mapping].reshape(T_NJ, T_NI) / 100.0  # Pa → hPa
+
+        from scipy.ndimage import gaussian_filter
+        from contourpy import contour_generator, LineType
+        step = 4
+        g = gaussian_filter(grid[::step, ::step], sigma=1.2)
+        xs = T_W + (np.arange(0, T_NI, step) + 0.5) * T_RES               # W→E (increasing)
+        ys = (T_N - (np.arange(0, T_NJ, step) + 0.5) * T_RES)[::-1]       # flip to S→N (increasing)
+        g = g[::-1, :]
+        cg = contour_generator(xs, ys, g, line_type=LineType.Separate)
+        lo = int(np.floor(float(np.nanmin(g)) / interval) * interval)
+        hi = int(np.ceil(float(np.nanmax(g)) / interval) * interval)
+        feats = []
+        for level in range(lo, hi + 1, interval):
+            for arr in cg.lines(level):
+                if len(arr) < 3:
+                    continue
+                coords = [[round(float(x), 3), round(float(y), 3)] for x, y in arr]
+                feats.append({
+                    "type": "Feature",
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                    "properties": {"p": int(level), "bold": 1 if level % 20 == 0 else 0},
+                })
+        return {"type": "FeatureCollection", "features": feats, "fhour": fhour}
+
     def _read_idx(self, key: str) -> list[str]:
         s3 = self._get_s3()
         idx = s3.get_object(Bucket=HRRR_BUCKET, Key=key + ".idx")["Body"].read().decode("utf-8", "replace")

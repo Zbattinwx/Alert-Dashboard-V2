@@ -3696,6 +3696,22 @@ async def get_hrrr_barbs(run: str, param: str, fhour: int = 0):
     return data
 
 
+@app.get("/api/hrrr/isobars")
+async def get_hrrr_isobars(run: str, fhour: int = 0):
+    """MSLP isobars (GeoJSON LineStrings) for the run/forecast hour."""
+    try:
+        from .services.hrrr_field_service import get_hrrr_field_service
+    except ImportError:
+        from backend.services.hrrr_field_service import get_hrrr_field_service
+    svc = get_hrrr_field_service()
+    if not svc.available:
+        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
+    data = await asyncio.to_thread(svc.get_isobars, run, fhour)
+    if data is None:
+        raise HTTPException(status_code=404, detail="HRRR isobars not available")
+    return data
+
+
 @app.get("/api/glm/status")
 async def get_glm_status():
     """Debug endpoint: check GLM lightning service and probe S3 directly."""
