@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import struct
 import tempfile
 import threading
 from collections import OrderedDict
@@ -64,9 +65,21 @@ HRRR_FIELDS: dict[str, dict] = {
     "srh01":   {"idx": ":HLCY:1000-0 m above ground:",   "label": "0–1 km SRH",     "conv": None, "vmin": 0.0, "vmax": 600.0,  "units": "m²/s²", "lut": "srh",  "group": "Severe", "nodata_below": 50.0},
     "srh03":   {"idx": ":HLCY:3000-0 m above ground:",   "label": "0–3 km SRH",     "conv": None, "vmin": 0.0, "vmax": 600.0,  "units": "m²/s²", "lut": "srh",  "group": "Severe", "nodata_below": 50.0},
     "shear06": {"derive": ("mag", ":VUCSH:0-6000 m above ground:", ":VVCSH:0-6000 m above ground:"), "label": "0–6 km Bulk Shear", "conv": "ms2kt", "vmin": 0.0, "vmax": 80.0, "units": "kt", "lut": "shear", "group": "Severe"},
-    "uphl":    {"idx": ":MXUPHL:5000-2000 m above ground:", "label": "2–5 km Updraft Helicity", "conv": None, "vmin": 0.0, "vmax": 300.0, "units": "m²/s²", "lut": "uphl", "group": "Severe", "nodata_below": 25.0},
     "pwat":    {"idx": ":PWAT:entire atmosphere",        "label": "Precipitable Water", "conv": "mm2in", "vmin": 0.0, "vmax": 2.5, "units": "in", "lut": "pwat", "group": "Severe"},
     "lftx4":   {"idx": ":4LFTX:180-0 mb above ground:",  "label": "Best Lifted Index", "conv": None, "vmin": -12.0, "vmax": 12.0, "units": "°C", "lut": "lftx", "group": "Severe"},
+
+    # ── Composite parameters (derived from CAPE / SRH / shear / LCL) ──
+    "ehi01": {"derive": ("calc", "ehi", [(":CAPE:90-0 mb above ground:", None), (":HLCY:1000-0 m above ground:", None)]), "label": "Energy Helicity Index 0–1 km", "conv": None, "vmin": 0.0, "vmax": 8.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
+    "ehi03": {"derive": ("calc", "ehi", [(":CAPE:90-0 mb above ground:", None), (":HLCY:3000-0 m above ground:", None)]), "label": "Energy Helicity Index 0–3 km", "conv": None, "vmin": 0.0, "vmax": 8.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
+    "scp":   {"derive": ("calc", "scp", [(":CAPE:255-0 mb above ground:", None), (":HLCY:3000-0 m above ground:", None), (":VUCSH:0-6000 m above ground:", None), (":VVCSH:0-6000 m above ground:", None)]), "label": "Supercell Composite", "conv": None, "vmin": 0.0, "vmax": 30.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
+    "stp":   {"derive": ("calc", "stp", [(":CAPE:surface:", None), (":CIN:surface:", None), (":TMP:2 m above ground:", None), (":DPT:2 m above ground:", None), (":HLCY:1000-0 m above ground:", None), (":VUCSH:0-6000 m above ground:", None), (":VVCSH:0-6000 m above ground:", None)]), "label": "Sig Tornado (STP)", "conv": None, "vmin": 0.0, "vmax": 8.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.25},
+
+    # ── Explicit convective (updraft helicity; max-in-window → no F00) ──
+    "uh25":     {"idx": ":MXUPHL:5000-2000 m above ground:", "label": "2–5 km UH (1 h max)", "conv": None, "vmin": 0.0, "vmax": 300.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "uh03":     {"idx": ":MXUPHL:3000-0 m above ground:",    "label": "0–3 km UH (1 h max)", "conv": None, "vmin": 0.0, "vmax": 150.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "uh25_3h":  {"timeagg": ("max", 3),     "base": "uh25", "label": "2–5 km UH (3 h max)", "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "uh25_run": {"timeagg": ("max", "run"), "base": "uh25", "label": "2–5 km UH (run max)", "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
+    "uh03_run": {"timeagg": ("max", "run"), "base": "uh03", "label": "0–3 km UH (run max)", "vmin": 0.0, "vmax": 200.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
 
     # ── Upper Air (height / temp / wind / moisture) ──
     "t850":    {"idx": ":TMP:850 mb:",  "label": "850 mb Temp",  "conv": "k2c", "vmin": -30.0, "vmax": 30.0,  "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
@@ -127,6 +140,33 @@ def _conv(name: Optional[str], v: np.ndarray) -> np.ndarray:
     if name == "mm2in": return v * 0.0393701                     # kg/m² (mm) → inches
     if name == "x1e5":  return v * 1e5                           # s⁻¹ → ×10⁻⁵ s⁻¹
     return v
+
+
+# ── Composite-parameter calculators (operate on native-grid arrays) ─────────
+# Inputs are decoded in registry order; units are SI as stored in GRIB
+# (CAPE/CIN J/kg, SRH m²/s², shear components m/s, temps K).
+def _calc_ehi(a):  # [CAPE, SRH] → Energy Helicity Index
+    return a[0] * a[1] / 160000.0
+
+def _calc_scp(a):  # [MUCAPE, SRH 0-3km, u-shear 0-6km, v-shear 0-6km] → SCP (fixed-layer)
+    mucape, srh3, u, v = a
+    bwd = np.sqrt(u * u + v * v)                       # m/s
+    shr = np.clip(bwd / 20.0, 0.0, 1.5)
+    shr = np.where(bwd < 10.0, 0.0, shr)              # SPC: <10 m/s → 0
+    return (mucape / 1000.0) * (srh3 / 50.0) * shr
+
+def _calc_stp(a):  # [SBCAPE, SBCIN, T2m(K), Td2m(K), SRH 0-1km, u-shear, v-shear] → STP (fixed-layer)
+    sbcape, sbcin, tK, tdK, srh1, u, v = a
+    lcl = 125.0 * ((tK - 273.15) - (tdK - 273.15))   # ≈ LCL height (m AGL)
+    lcl_term = np.clip((2000.0 - lcl) / 1000.0, 0.0, 1.0)  # 1 if <1000 m, 0 if >2000 m
+    bwd = np.sqrt(u * u + v * v)
+    shr = np.clip(bwd / 20.0, 0.0, 1.5)
+    shr = np.where(bwd < 12.5, 0.0, shr)
+    shr = np.where(bwd > 30.0, 1.5, shr)
+    cin_term = np.clip((200.0 + sbcin) / 150.0, 0.0, 1.0)  # sbcin ≤ 0; 1 if >-50, 0 if <-200
+    return (sbcape / 1500.0) * lcl_term * (srh1 / 150.0) * shr * cin_term
+
+_CALCS = {"ehi": _calc_ehi, "scp": _calc_scp, "stp": _calc_stp}
 
 
 class HRRRFieldService:
@@ -227,6 +267,24 @@ class HRRRFieldService:
 
     def _build_field(self, run: str, param: str, fhour: int) -> Optional[bytes]:
         spec = HRRR_FIELDS[param]
+        grid = self._field_grid(run, param, fhour)
+        if grid is None:
+            return None
+        return self._encode(grid, float(spec["vmin"]), float(spec["vmax"]), spec.get("nodata_below"))
+
+    def _zero_or_none(self, spec: dict, fhour: int):
+        """F00 of a max-in-window field (e.g. updraft helicity) has no record —
+        return a blank grid so the loop has a valid first frame, not a hole."""
+        if fhour == 0 and spec.get("zero_at_f0"):
+            return np.zeros((T_NJ, T_NI), dtype=np.float32)
+        return None
+
+    def _field_grid(self, run: str, param: str, fhour: int):
+        """Produce the regridded float grid (T_NJ×T_NI) for a field, or None."""
+        spec = HRRR_FIELDS[param]
+        if "timeagg" in spec:
+            return self._timeagg_grid(run, param, fhour, spec)
+
         date, hh = run[:8], int(run[8:10])
         key = self._key(date, hh, fhour, spec.get("file", "sfc"))
         lines = self._read_idx(key)  # raises NoSuchKey if the hour isn't produced yet
@@ -234,30 +292,69 @@ class HRRRFieldService:
         derive = spec.get("derive")
         if derive:
             kind = derive[0]
-            msgs = [self._range_get(key, lines, m) for m in derive[1:]]
-            if any(g is None for g in msgs):
-                return None
-            decoded = [self._decode(g) for g in msgs]
-            lats, lons, ni, nj = decoded[0][1], decoded[0][2], decoded[0][3], decoded[0][4]
-            arrs = [d[0] for d in decoded]
-            if kind == "mag":
-                values = np.sqrt(arrs[0] ** 2 + arrs[1] ** 2)
-            elif kind == "ptype":  # rain, snow, icep, frzr → 1/2/3/4 (later wins)
-                values = np.zeros_like(arrs[0])
-                for code, a in enumerate(arrs, start=1):
-                    values = np.where(a > 0.5, float(code), values)
+            if kind in ("mag", "ptype"):
+                msgs = [self._range_get(key, lines, m) for m in derive[1:]]
+                if any(g is None for g in msgs):
+                    return self._zero_or_none(spec, fhour)
+                decoded = [self._decode(g) for g in msgs]
+                lats, lons = decoded[0][1], decoded[0][2]
+                arrs = [d[0] for d in decoded]
+                if kind == "mag":
+                    values = np.sqrt(arrs[0] ** 2 + arrs[1] ** 2)
+                else:  # ptype: rain, snow, icep, frzr → 1/2/3/4 (later wins)
+                    values = np.zeros_like(arrs[0])
+                    for code, a in enumerate(arrs, start=1):
+                        values = np.where(a > 0.5, float(code), values)
+            elif kind == "calc":
+                name, inputs = derive[1], derive[2]
+                arrs, lats, lons = [], None, None
+                for idx_match, cv in inputs:
+                    g = self._range_get(key, lines, idx_match)
+                    if g is None:
+                        return self._zero_or_none(spec, fhour)
+                    vv, lats, lons, _, _ = self._decode(g)
+                    arrs.append(_conv(cv, vv))
+                values = _CALCS[name](arrs)
             else:
                 raise ValueError(f"unknown derive kind {kind}")
         else:
             grib = self._range_get(key, lines, spec["idx"])
             if grib is None:
-                return None
-            values, lats, lons, ni, nj = self._decode(grib)
+                return self._zero_or_none(spec, fhour)
+            values, lats, lons, _, _ = self._decode(grib)
 
         values = _conv(spec.get("conv"), values)
-        self._ensure_mapping(lats, lons, ni, nj)
-        grid = values[self._mapping].reshape(T_NJ, T_NI).astype(np.float32)
-        return self._encode(grid, float(spec["vmin"]), float(spec["vmax"]), spec.get("nodata_below"))
+        self._ensure_mapping(lats, lons)
+        return values[self._mapping].reshape(T_NJ, T_NI).astype(np.float32)
+
+    def _timeagg_grid(self, run: str, param: str, fhour: int, spec: dict):
+        """Aggregate a base field over a forecast-hour window (e.g. UH run/3-h max)."""
+        op, window = spec["timeagg"]
+        base = spec["base"]
+        cur = self._field_grid(run, base, fhour)
+        if cur is None:
+            return self._zero_or_none(spec, fhour)
+        if window == "run":  # cumulative — reuse the cached previous run-max (O(1)/frame)
+            if fhour <= 0:
+                return cur
+            prev = self.get_field(run, param, fhour - 1)
+            if prev is None:
+                return cur
+            return np.maximum(cur, self._dequantize(prev))
+        out = cur  # last N hours
+        for h in range(max(0, fhour - int(window) + 1), fhour):
+            g = self._field_grid(run, base, h)
+            if g is not None:
+                out = np.maximum(out, g)
+        return out
+
+    def _dequantize(self, data: bytes) -> np.ndarray:
+        """Reconstruct a float grid from a packed HRRR binary (for timeagg max)."""
+        vmin, vmax = struct.unpack("<ff", data[44:52])
+        b = np.frombuffer(data[52:], dtype=np.uint8).astype(np.float32)
+        out = vmin + (b - 1.0) / 254.0 * (vmax - vmin)
+        out[b == 0] = 0.0
+        return out.reshape(T_NJ, T_NI)
 
     def _read_idx(self, key: str) -> list[str]:
         s3 = self._get_s3()
@@ -304,8 +401,8 @@ class HRRRFieldService:
         lons = np.where(lons > 180.0, lons - 360.0, lons)  # → [-180,180]
         return values, lats, lons, ni, nj
 
-    def _ensure_mapping(self, lats: np.ndarray, lons: np.ndarray, ni: int, nj: int) -> None:
-        sig = f"{ni}x{nj}"
+    def _ensure_mapping(self, lats: np.ndarray, lons: np.ndarray) -> None:
+        sig = str(lats.size)  # HRRR native grid is fixed (1799×1059)
         if self._mapping is not None and self._mapping_sig == sig:
             return
         cache_path = os.path.join(self._map_dir, f"map_{sig}_{T_NI}x{T_NJ}.npy")
