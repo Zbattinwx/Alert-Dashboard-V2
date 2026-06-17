@@ -27,6 +27,23 @@ interface StatesResponse {
   using_overrides: boolean;
 }
 
+interface CountyItem {
+  code: string;
+  name: string;
+  enabled: boolean;
+}
+
+interface CountyStateInfo {
+  state_name: string;
+  counties: CountyItem[];
+  all_selected: boolean;
+}
+
+interface CountiesResponse {
+  states: Record<string, CountyStateInfo>;
+  using_overrides: boolean;
+}
+
 interface GeneralSettings {
   nexrad_enabled: boolean;
   nexrad_default_site: string;
@@ -70,6 +87,16 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
   const [statesSaving, setStatesSaving] = useState(false);
   const [statesError, setStatesError] = useState<string | null>(null);
   const [statesMsg, setStatesMsg] = useState<string | null>(null);
+
+  // ── County filter state ───────────────────────────────────────────────
+  const [countyStates, setCountyStates] = useState<Record<string, CountyStateInfo>>({});
+  const [countySel, setCountySel] = useState<Record<string, Set<string>>>({});
+  const [savedCountySel, setSavedCountySel] = useState<Record<string, Set<string>>>({});
+  const [usingCountyOverrides, setUsingCountyOverrides] = useState(false);
+  const [countiesLoading, setCountiesLoading] = useState(true);
+  const [countiesSaving, setCountiesSaving] = useState(false);
+  const [countiesError, setCountiesError] = useState<string | null>(null);
+  const [countiesMsg, setCountiesMsg] = useState<string | null>(null);
 
   // ── General settings state ────────────────────────────────────────────
   const [general, setGeneral] = useState<GeneralSettings | null>(null);
@@ -202,6 +229,17 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
     return false;
   })();
 
+  const countiesHasChanges = (() => {
+    const keys = new Set([...Object.keys(countySel), ...Object.keys(savedCountySel)]);
+    for (const st of keys) {
+      const cur = countySel[st] ?? new Set<string>();
+      const saved = savedCountySel[st] ?? new Set<string>();
+      if (cur.size !== saved.size) return true;
+      for (const c of cur) if (!saved.has(c)) return true;
+    }
+    return false;
+  })();
+
   const generalHasChanges = (() => {
     if (!general || !savedGeneral) return false;
     return (
@@ -258,6 +296,28 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
     }
   }, []);
 
+  const fetchCounties = useCallback(async () => {
+    setCountiesLoading(true);
+    setCountiesError(null);
+    try {
+      const res = await fetch(apiUrl('/api/settings/counties'));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: CountiesResponse = await res.json();
+      setCountyStates(data.states);
+      const sel: Record<string, Set<string>> = {};
+      Object.entries(data.states).forEach(([st, info]) => {
+        sel[st] = new Set(info.counties.filter(c => c.enabled).map(c => c.code));
+      });
+      setCountySel(sel);
+      setSavedCountySel(Object.fromEntries(Object.entries(sel).map(([k, v]) => [k, new Set(v)])));
+      setUsingCountyOverrides(data.using_overrides);
+    } catch (err) {
+      setCountiesError(err instanceof Error ? err.message : 'Failed to load counties');
+    } finally {
+      setCountiesLoading(false);
+    }
+  }, []);
+
   const fetchGeneral = useCallback(async () => {
     setGeneralLoading(true);
     setGeneralError(null);
@@ -290,9 +350,10 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
   useEffect(() => {
     fetchPhenomena();
     fetchStates();
+    fetchCounties();
     fetchGeneral();
     fetchTickerSettings();
-  }, [fetchPhenomena, fetchStates, fetchGeneral, fetchTickerSettings]);
+  }, [fetchPhenomena, fetchStates, fetchCounties, fetchGeneral, fetchTickerSettings]);
 
   // ── Phenomena handlers ────────────────────────────────────────────────
   const togglePhenomenon = (code: string) => {
@@ -389,6 +450,8 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
       setSavedStates(newSet);
       setUsingStatesOverrides(true);
       setStatesMsg(data.message);
+      // Monitored states drive the county list — refresh it.
+      fetchCounties();
     } catch (err) {
       setStatesError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -406,10 +469,79 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
       const data = await res.json();
       setStatesMsg(data.message);
       await fetchStates();
+      fetchCounties();
     } catch (err) {
       setStatesError(err instanceof Error ? err.message : 'Failed to reset');
     } finally {
       setStatesSaving(false);
+    }
+  };
+
+  // ── County handlers ───────────────────────────────────────────────────
+  const toggleCounty = (state: string, code: string) => {
+    setCountySel(prev => {
+      const next = { ...prev, [state]: new Set(prev[state] ?? []) };
+      next[state].has(code) ? next[state].delete(code) : next[state].add(code);
+      return next;
+    });
+    setCountiesMsg(null);
+  };
+
+  const setAllCountiesForState = (state: string, selectAll: boolean) => {
+    setCountySel(prev => {
+      const next = { ...prev };
+      next[state] = selectAll
+        ? new Set((countyStates[state]?.counties ?? []).map(c => c.code))
+        : new Set<string>();
+      return next;
+    });
+    setCountiesMsg(null);
+  };
+
+  const handleCountiesSave = async () => {
+    setCountiesSaving(true);
+    setCountiesError(null);
+    setCountiesMsg(null);
+    try {
+      // Empty selection for a state means "all counties" — backend drops empties.
+      const payload: Record<string, string[]> = {};
+      Object.entries(countySel).forEach(([st, set]) => {
+        payload[st] = Array.from(set);
+      });
+      const res = await fetch(apiUrl('/api/settings/counties'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filter_counties: payload }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setSavedCountySel(Object.fromEntries(Object.entries(countySel).map(([k, v]) => [k, new Set(v)])));
+      setUsingCountyOverrides(Object.keys(data.filter_counties || {}).length > 0);
+      setCountiesMsg(data.message);
+    } catch (err) {
+      setCountiesError(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setCountiesSaving(false);
+    }
+  };
+
+  const handleCountiesReset = async () => {
+    setCountiesSaving(true);
+    setCountiesError(null);
+    setCountiesMsg(null);
+    try {
+      const res = await fetch(apiUrl('/api/settings/counties/reset'), { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setCountiesMsg(data.message);
+      await fetchCounties();
+    } catch (err) {
+      setCountiesError(err instanceof Error ? err.message : 'Failed to reset');
+    } finally {
+      setCountiesSaving(false);
     }
   };
 
@@ -845,6 +977,114 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
           )}
           <button className="settings-save-btn" onClick={handleStatesSave} disabled={!statesHasChanges || statesSaving}>
             {statesSaving ? 'Saving...' : 'Save Changes'}
+          </button>
+        </div>
+      </div>
+
+      {/* ── County Filter ─────────────────────────────────────────── */}
+      <div className="settings-section" style={{ marginBottom: '24px' }}>
+        <h3 className="settings-subtitle">County Filter</h3>
+        <p className="settings-description">
+          Narrow alerts to specific counties within your monitored states. Leave a state with
+          no counties selected to keep all of its counties (no narrowing).
+        </p>
+
+        <div className="settings-status-bar">
+          <div className="settings-status-left">
+            <span className={`settings-status-dot ${usingCountyOverrides ? 'custom' : 'default'}`}></span>
+            <span className="settings-status-text">
+              {usingCountyOverrides ? 'Filtering to selected counties' : 'All counties in monitored states'}
+            </span>
+          </div>
+        </div>
+
+        {countiesError && (
+          <div className="settings-message settings-error">
+            <i className="fas fa-exclamation-circle"></i> {countiesError}
+          </div>
+        )}
+        {countiesMsg && (
+          <div className="settings-message settings-success">
+            <i className="fas fa-check-circle"></i> {countiesMsg}
+          </div>
+        )}
+
+        {countiesLoading ? (
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '12px' }}>Loading...</p>
+        ) : Object.keys(countyStates).length === 0 ? (
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '12px' }}>
+            Select monitored states first to choose counties.
+          </p>
+        ) : (
+          Object.entries(countyStates).map(([st, info]) => {
+            const sel = countySel[st] ?? new Set<string>();
+            const allOn = sel.size === info.counties.length && info.counties.length > 0;
+            return (
+              <div key={st} className="settings-category-card" style={{ marginTop: '12px' }}>
+                <div className="settings-category-header">
+                  <div className="settings-category-title">
+                    {info.state_name}
+                    <span className="settings-category-count">
+                      {sel.size === 0 ? 'all' : `${sel.size}/${info.counties.length}`}
+                    </span>
+                  </div>
+                  <button
+                    className="settings-select-all-btn"
+                    onClick={() => setAllCountiesForState(st, !allOn)}
+                  >
+                    {allOn ? 'Clear' : 'Select All'}
+                  </button>
+                </div>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+                  gap: '6px',
+                }}>
+                  {info.counties.map(county => {
+                    const isOn = sel.has(county.code);
+                    return (
+                      <button
+                        key={county.code}
+                        onClick={() => toggleCounty(st, county.code)}
+                        className={`settings-toggle-btn ${isOn ? 'enabled' : ''}`}
+                        style={isOn ? {
+                          borderLeftColor: 'var(--primary-color)',
+                          backgroundColor: 'var(--primary-color-20, rgba(59,130,246,0.12))',
+                          color: 'var(--text-primary)',
+                        } : { opacity: 0.45 }}
+                        title={`${county.name} (${county.code})`}
+                      >
+                        <span className="settings-toggle-name">{county.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })
+        )}
+
+        <div className="settings-action-bar">
+          {usingCountyOverrides && (
+            <button className="settings-reset-btn" onClick={handleCountiesReset} disabled={countiesSaving}>
+              <i className="fas fa-undo"></i> Clear Filter
+            </button>
+          )}
+          {countiesHasChanges && (
+            <button
+              className="settings-cancel-btn"
+              onClick={() => {
+                setCountySel(Object.fromEntries(Object.entries(savedCountySel).map(([k, v]) => [k, new Set(v)])));
+                setCountiesMsg(null);
+                setCountiesError(null);
+              }}
+              disabled={countiesSaving}
+            >
+              Cancel
+            </button>
+          )}
+          <button className="settings-save-btn" onClick={handleCountiesSave} disabled={!countiesHasChanges || countiesSaving}>
+            {countiesSaving ? 'Saving...' : 'Save Changes'}
           </button>
         </div>
       </div>

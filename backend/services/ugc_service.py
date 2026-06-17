@@ -139,6 +139,34 @@ def get_county_names_list(ugc_codes: list[str]) -> list[str]:
     return names
 
 
+def get_counties_for_state(state_code: str) -> list[dict]:
+    """
+    List all county UGC codes for a state, sorted by county name.
+
+    Uses the canonical county ("C") UGC codes from the map (e.g. "OHC023" =
+    "Clark County, OH").
+
+    Args:
+        state_code: 2-letter state abbreviation (e.g. "OH")
+
+    Returns:
+        List of {"code": "OHC023", "name": "Clark"} dicts.
+    """
+    if not _ugc_map:
+        load_ugc_map()
+
+    st = state_code.upper()
+    counties: list[dict] = []
+    for code, name in _ugc_map.items():
+        if len(code) == 6 and code[:2] == st and code[2] == "C" and code[3:].isdigit():
+            short = name.split(",")[0].strip()
+            if short.lower().endswith(" county"):
+                short = short[: -len(" county")].strip()
+            counties.append({"code": code, "name": short})
+    counties.sort(key=lambda c: c["name"])
+    return counties
+
+
 def is_ugc_map_loaded() -> bool:
     """Check if the UGC map has been loaded."""
     return len(_ugc_map) > 0

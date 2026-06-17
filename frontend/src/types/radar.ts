@@ -4,7 +4,8 @@
 
 export interface RadarFrame {
   product: string;
-  image_url: string;
+  frame_id: string;
+  has_binary: boolean;
   bounds: {
     south: number;
     north: number;
@@ -14,6 +15,21 @@ export interface RadarFrame {
   timestamp: string;
   site: string;
   elevation: number;
+  /** Legacy field — only populated by oneshot_frame (social graphics). Absent on live WebSocket frames. */
+  image_url?: string;
+}
+
+/** Parsed binary radar frame ready for WebGL upload. Zero-copy typed-array views
+ *  into the original ArrayBuffer — keep the buffer alive as long as this object. */
+export interface RadarBinaryFrame extends RadarFrame {
+  n_rays:      number;
+  n_gates:     number;
+  azimuths:    Float32Array;  // degrees, length n_rays
+  ranges_m:    Float32Array;  // metres,  length n_gates
+  gate_values: Uint8Array;    // [ray * n_gates + gate], 0 = no-data
+  vmin:        number;
+  vmax:        number;
+  max_range_m: number;
 }
 
 export interface RadarStatus {
@@ -56,7 +72,10 @@ export interface StormCell {
   max_rot_velocity_ms?: number | null;
   max_rot_height_km?: number | null;
   rotation_depth_km?: number | null;
+  rotation_base_km?: number | null;
   rotation_profile?: Array<{ height_km: number; elevation_deg: number; rot_velocity_ms: number }>;
+  low_level_meso_detected?: boolean;
+  mid_level_meso_detected?: boolean;
   cell_base_km?: number | null;
   max_ref_height_km?: number | null;
   centroid_height_km?: number | null;
@@ -66,6 +85,20 @@ export interface StormCell {
   debris_signature: boolean;
   vil_kg_m2: number | null;
   cell_top_km: number | null;
+  // Phase 5
+  bwer_detected?: boolean;
+  bwer_overhang_dbz?: number | null;
+  mesh_mm?: number | null;
+  shi_value?: number | null;
+  p_rotation_model?: number | null;
+  // Wind signatures
+  straight_line_wind_detected?: boolean;
+  strong_wind_detected?: boolean;
+  strong_wind_swath_km2?: number | null;
+  max_wind_velocity_ms?: number | null;
+  downburst_detected?: boolean;
+  downburst_delta_v_ms?: number | null;
+  rij_detected?: boolean;
   track_history: TrackPoint[];
   forecast_track: ForecastPoint[];
   score_breakdown: Record<string, number>;
@@ -115,24 +148,27 @@ export interface ForecastPoint {
 
 export type ThreatLevel = 'minimal' | 'moderate' | 'significant' | 'severe' | 'extreme';
 
-export type RadarProduct = 'reflectivity' | 'velocity' | 'cross_correlation_ratio';
+export type RadarProduct = 'reflectivity' | 'velocity' | 'cross_correlation_ratio' | 'storm_relative_velocity';
 
 export const RADAR_PRODUCT_LABELS: Record<RadarProduct, string> = {
   reflectivity: 'Reflectivity',
   velocity: 'Velocity',
   cross_correlation_ratio: 'Corr. Coeff.',
+  storm_relative_velocity: 'Storm-Relative Velocity',
 };
 
 export const RADAR_PRODUCT_SHORT: Record<RadarProduct, string> = {
   reflectivity: 'Z',
   velocity: 'V',
   cross_correlation_ratio: 'CC',
+  storm_relative_velocity: 'SRV',
 };
 
 export const RADAR_PRODUCT_UNITS: Record<RadarProduct, string> = {
   reflectivity: 'dBZ',
   velocity: 'm/s',
   cross_correlation_ratio: '',
+  storm_relative_velocity: 'm/s',
 };
 
 export const THREAT_LEVEL_COLORS: Record<ThreatLevel, string> = {

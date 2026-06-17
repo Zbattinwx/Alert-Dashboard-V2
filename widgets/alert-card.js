@@ -311,7 +311,19 @@ class AlertCardWidget {
         this.tagsEl.innerHTML = '';
         const threat = alert.threat || {};
 
-        if (threat.tornado_detection) {
+        // Tornado Emergency is the highest tier — its own loud tag, shown
+        // instead of the plain tornado tag. Prefer the structured flag, fall
+        // back to a CATASTROPHIC damage tag or the literal declaration text.
+        const isTornadoEmergency = threat.tornado_emergency === true ||
+            threat.tornado_damage_threat === 'CATASTROPHIC' ||
+            (alert.description || alert.raw_text || '').toUpperCase().includes('TORNADO EMERGENCY');
+
+        if (isTornadoEmergency) {
+            const tag = document.createElement('span');
+            tag.className = 'tag tag-tornado-emergency';
+            tag.textContent = 'TORNADO EMERGENCY';
+            this.tagsEl.appendChild(tag);
+        } else if (threat.tornado_detection) {
             const tag = document.createElement('span');
             tag.className = 'tag tag-tornado';
             tag.textContent = 'TORNADO ' + threat.tornado_detection;

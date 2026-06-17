@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useImperativeHandle, forwardRef, useState } from 'react';
-import { MapContainer, TileLayer, Polygon, Polyline, ImageOverlay, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polygon, Polyline, ImageOverlay, GeoJSON, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import type { Alert } from '../types/alert';
 import type { RadarFrame } from '../types/radar';
@@ -209,6 +209,18 @@ function SetView({ bounds }: { bounds: [[number, number], [number, number]] }) {
   return null;
 }
 
+const CreateLabelsPane = () => {
+  const map = useMap();
+  useEffect(() => {
+    if (!map.getPane('labelsPane')) {
+      const pane = map.createPane('labelsPane');
+      pane.style.zIndex = '600';
+      pane.style.pointerEvents = 'none';
+    }
+  }, [map]);
+  return null;
+};
+
 // ─── County name formatting ───────────────────────────────────────────────────
 // display_locations: "Crawford County, OH; Marion County, OH; ..."
 // Output badge labels: "CRAWFORD, OH", "MARION, OH", ...
@@ -298,8 +310,25 @@ interface Props {
 export const AlertMapGraphic = forwardRef<AlertMapGraphicHandle, Props>(
   ({ alert, radarFrame, onCapture }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
+    const [usStates, setUsStates] = useState<any>(null);
+
+    useEffect(() => {
+      fetch('/us-states.json')
+        .then(res => res.json())
+        .then(data => setUsStates(data))
+        .catch(() => {});
+    }, []);
+
+    // Tornado Emergency is the most severe warning the NWS issues — the header
+    // turns crimson-magenta and leads with the words so the graphic is
+    // unmistakable on air. Prefer the structured flag; fall back to the headline.
+    const isTornadoEmergency =
+      alert.threat.tornado_emergency === true ||
+      (alert.headline || '').toUpperCase().includes('TORNADO EMERGENCY');
+
     const style = getAlertStyle(alert.phenomenon, alert.significance);
-    const headerTextColor = readableTextColor(style.backgroundColor);
+    const headerBg = isTornadoEmergency ? '#d6008c' : style.backgroundColor;
+    const headerTextColor = readableTextColor(headerBg);
     const headerTextShadow = textShadow(headerTextColor);
 
     // Threat data
@@ -404,7 +433,7 @@ export const AlertMapGraphic = forwardRef<AlertMapGraphicHandle, Props>(
         {/* ── Header bar ── */}
         <div style={{
           height: `${HEADER_H}px`,
-          backgroundColor: style.backgroundColor,
+          backgroundColor: headerBg,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -414,10 +443,11 @@ export const AlertMapGraphic = forwardRef<AlertMapGraphicHandle, Props>(
             color: headerTextColor,
             textShadow: headerTextShadow,
             fontSize: '19px',
-            fontWeight: 700,
+            fontWeight: isTornadoEmergency ? 800 : 700,
             letterSpacing: '1px',
             textTransform: 'uppercase',
           }}>
+            {isTornadoEmergency ? '⚠ TORNADO EMERGENCY — ' : ''}
             {alert.event_name.toUpperCase()}
             {alert.expiration_time
               ? ` — EXPIRES: ${formatExpires(alert.expiration_time)}`
@@ -476,10 +506,23 @@ export const AlertMapGraphic = forwardRef<AlertMapGraphicHandle, Props>(
               keyboard={false}
             >
               <SetView bounds={viewBounds} />
+              <CreateLabelsPane />
               <TileLayer
-                url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+                attribution="Esri"
               />
-              {radarFrame ? (
+              <TileLayer
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
+                pane="labelsPane"
+              />
+              {usStates && (
+                <GeoJSON 
+                  data={usStates} 
+                  pane="labelsPane"
+                  style={{ color: 'rgba(255, 255, 255, 0.4)', weight: 1.5, fill: false }}
+                />
+              )}
+              {radarFrame?.image_url ? (
                 <ImageOverlay
                   url={radarFrame.image_url}
                   bounds={[

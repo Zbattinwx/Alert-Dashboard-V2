@@ -310,6 +310,7 @@ class ThreatData:
     # Tornado
     tornado_detection: Optional[str] = None  # "RADAR INDICATED", "OBSERVED", etc.
     tornado_damage_threat: Optional[str] = None  # "CONSIDERABLE", "CATASTROPHIC"
+    tornado_emergency: bool = False  # "TORNADO EMERGENCY" declared — highest tier
 
     # Thunderstorm
     thunderstorm_damage_threat: Optional[str] = None  # "CONSIDERABLE", "DESTRUCTIVE"
@@ -354,8 +355,12 @@ class ThreatData:
 
     @property
     def is_pds(self) -> bool:
-        """Check if this is a Particularly Dangerous Situation."""
+        """Check if this is a Particularly Dangerous Situation.
+
+        A Tornado Emergency is always at least a PDS, so it counts here too.
+        """
         return (
+            self.tornado_emergency or
             self.tornado_damage_threat in ("CONSIDERABLE", "CATASTROPHIC") or
             self.thunderstorm_damage_threat in ("CONSIDERABLE", "DESTRUCTIVE", "CATASTROPHIC") or
             self.wind_damage_threat in ("CONSIDERABLE", "DESTRUCTIVE", "CATASTROPHIC") or
@@ -367,6 +372,7 @@ class ThreatData:
         result = {
             "tornado_detection": self.tornado_detection,
             "tornado_damage_threat": self.tornado_damage_threat,
+            "tornado_emergency": self.tornado_emergency,
             "thunderstorm_damage_threat": self.thunderstorm_damage_threat,
             "sustained_wind_min_mph": self.sustained_wind_min_mph,
             "sustained_wind_max_mph": self.sustained_wind_max_mph,

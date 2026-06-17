@@ -1,0 +1,52 @@
+# Alert Dashboard V2 - LITE dependencies (no NEXRAD / radar processing)
+#
+# Use for the always-on Raspberry Pi build. Excludes the heavy radar stack
+# (arm-pyart, scipy, boto3, matplotlib, netCDF4) which is only needed when
+# NEXRAD_ENABLED=true. Those run on the main Windows PC, not the Pi.
+#
+# IMPORTANT: numpy is pinned explicitly. The radar service modules are imported
+# at startup by backend/main.py and do `import numpy as np` at module top level
+# (nexrad_service, mrms_service, storm_tracking_service). Without numpy the app
+# crashes on boot even with radar disabled. Everything heavier than numpy is
+# lazy-imported and never touched while NEXRAD_ENABLED=false.
+
+# Web Framework (FastAPI)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Core async and web
+aiohttp>=3.9.0
+websockets>=12.0
+uvloop>=0.19.0; sys_platform != 'win32'
+
+# XMPP for NWWS-OI Weather Wire connection
+slixmpp>=1.8.5
+
+# Date/time handling
+python-dateutil>=2.8.2
+pytz>=2024.1
+
+# Configuration and environment
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Logging
+structlog>=24.1.0
+
+# Serialization
+orjson>=3.9.0
+
+# HTTP client with retry support
+httpx>=0.26.0
+tenacity>=8.2.0
+
+# Geospatial (polygon operations)
+shapely>=2.0.0
+
+# Image processing (alert broadcast graphics, web-tile radar overlays)
+Pillow>=10.0.0
+
+# Required at import time by the (disabled) radar service modules.
+# Ships as a prebuilt arm64 wheel - no compilation on build.
+numpy>=1.26.0

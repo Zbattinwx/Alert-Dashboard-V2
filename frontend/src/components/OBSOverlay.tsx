@@ -39,8 +39,12 @@ const OBSAlert: React.FC<OBSAlertProps> = ({ alert, onDismiss, duration }) => {
   }, [duration, onDismiss]);
 
   const alertStyle = getAlertStyle(alert.phenomenon, alert.significance);
-  const isEmergency = alert.event_name?.toLowerCase().includes('emergency') ||
+  // A Tornado Emergency is the highest tier — prefer the structured flag, fall
+  // back to the event name / catastrophic damage tag for legacy/preview alerts.
+  const isTornadoEmergency = alert.threat?.tornado_emergency === true ||
+    alert.event_name?.toLowerCase().includes('emergency') ||
     alert.threat?.tornado_damage_threat === 'CATASTROPHIC';
+  const isEmergency = isTornadoEmergency;
   const isTornado = alert.phenomenon === 'TO' || alert.threat?.tornado_detection;
 
   // Truncate locations for display
@@ -74,8 +78,16 @@ const OBSAlert: React.FC<OBSAlertProps> = ({ alert, onDismiss, duration }) => {
           <span>{displayLocations}</span>
         </div>
 
-        {/* Tornado tag */}
-        {alert.threat?.tornado_detection && (
+        {/* Tornado Emergency — highest tier, leads with its own banner */}
+        {isTornadoEmergency && (
+          <div className="obs-alert-emergency">
+            <i className="fas fa-triangle-exclamation"></i>
+            TORNADO EMERGENCY
+          </div>
+        )}
+
+        {/* Tornado tag (suppressed when the emergency banner is shown) */}
+        {alert.threat?.tornado_detection && !isTornadoEmergency && (
           <div className="obs-alert-tornado">
             <i className="fas fa-exclamation-triangle"></i>
             TORNADO {alert.threat.tornado_detection}

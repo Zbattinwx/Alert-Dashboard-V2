@@ -66,10 +66,24 @@ export const AlertDetailPane: React.FC<AlertDetailPaneProps> = ({
         )}
 
         {/* Threat Info */}
-        {(alert.threat.tornado_detection || alert.threat.max_hail_size_inches || alert.threat.max_wind_gust_mph || alert.threat.snow_amount_max_inches) && (
+        {(alert.threat.tornado_emergency || alert.threat.tornado_detection || alert.threat.max_hail_size_inches || alert.threat.max_wind_gust_mph || alert.threat.snow_amount_max_inches) && (
           <div className="detail-section">
             <div className="detail-section-title">Threat Information</div>
             <div className="detail-section-content">
+              {alert.threat.tornado_emergency && (
+                <div className="tornado-emergency-badge" style={{
+                  marginBottom: '6px',
+                  padding: '6px 10px',
+                  backgroundColor: 'var(--tor-color)',
+                  color: 'white',
+                  borderRadius: '4px',
+                  fontWeight: 800,
+                  letterSpacing: '0.04em',
+                  display: 'inline-block'
+                }}>
+                  <i className="fas fa-triangle-exclamation"></i> TORNADO EMERGENCY
+                </div>
+              )}
               {alert.threat.tornado_detection && (
                 <div style={{ color: 'var(--tor-color)', fontWeight: 'bold' }}>
                   <i className="fas fa-exclamation-triangle"></i> TORNADO {alert.threat.tornado_detection}

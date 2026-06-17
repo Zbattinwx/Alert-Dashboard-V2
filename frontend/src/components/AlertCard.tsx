@@ -1,6 +1,23 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { Alert } from '../types/alert';
 import { getAlertStyle } from '../types/alert';
+
+const GRAPHIC_PHENOMENA = new Set(['TO', 'SV', 'FF', 'FA', 'FL', 'BZ', 'WS', 'IS', 'EW', 'HW']);
+
+// OSM impact-scan result shape (mirrors osm_impact_service.py)
+interface ImpactItem { name: string; sub?: string; }
+interface ImpactCategory {
+  key: string;
+  label: string;
+  at_risk: boolean;
+  items: ImpactItem[];
+  total: number;
+}
+interface ImpactResult {
+  total: number;
+  counts: Record<string, number>;
+  categories: ImpactCategory[];
+}
 
 interface AlertCardProps {
   alert: Alert;
@@ -10,6 +27,53 @@ interface AlertCardProps {
 }
 
 export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, onShare }) => {
+  const [generatingGraphic, setGeneratingGraphic] = useState(false);
+  const [scanningImpact, setScanningImpact] = useState(false);
+  const [impactResult, setImpactResult] = useState<ImpactResult | null>(null);
+  const [impactExpanded, setImpactExpanded] = useState(false);
+
+  // Only warnings carry a polygon worth scanning for impacted places.
+  const hasPolygon = Array.isArray(alert.polygon) && alert.polygon.length >= 3;
+
+  const handleGenerateGraphic = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setGeneratingGraphic(true);
+    try {
+      // Generate + save, then open in new tab
+      await fetch(`/api/graphics/alert/${alert.product_id}?save=true`);
+      window.open(`/api/graphics/alert/${alert.product_id}`, '_blank');
+    } finally {
+      setGeneratingGraphic(false);
+    }
+  };
+
+  // Scan the warning polygon via OSM and push the result to the stream widget.
+  const handleScanImpact = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setScanningImpact(true);
+    try {
+      const res = await fetch(`/api/alerts/${alert.product_id}/impact-scan`, { method: 'POST' });
+      if (res.ok) {
+        const data: ImpactResult = await res.json();
+        setImpactResult(data);
+        setImpactExpanded(true); // reveal the names right away after a scan
+      }
+    } finally {
+      setScanningImpact(false);
+    }
+  };
+
+  const handleClearImpact = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await fetch('/api/impact/clear', { method: 'POST' });
+    setImpactResult(null);
+  };
+
+  // Tell the radar app to zoom to + flash this alert (and show its info card).
+  const handleFocusRadar = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await fetch(`/api/alerts/${alert.product_id}/focus`, { method: 'POST' });
+  };
   const formatTime = (isoString: string | null) => {
     if (!isoString) return '';
     const date = new Date(isoString);
@@ -100,11 +164,15 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, o
     onShare?.(alert);
   };
 
-  // Determine if this is a high-threat alert that should visually stand out
+  // Determine if this is a high-threat alert that should visually stand out.
+  // A Tornado Emergency is the single most severe warning the NWS issues — it
+  // outranks everything else and always gets the strongest treatment.
+  const isTornadoEmergency = alert.threat.tornado_emergency === true;
   const isCatastrophic =
     alert.threat.tornado_damage_threat === 'CATASTROPHIC' ||
     alert.threat.thunderstorm_damage_threat === 'CATASTROPHIC';
   const isHighThreat =
+    isTornadoEmergency ||
     alert.threat.tornado_detection === 'OBSERVED' ||
     alert.threat.tornado_damage_threat === 'CONSIDERABLE' ||
     isCatastrophic ||
@@ -121,6 +189,9 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, o
     if (alert.phenomenon === 'SV') cardClasses.push('threat-svr');
     if (alert.phenomenon === 'FF') cardClasses.push('threat-ffw');
   }
+  // Emergency class is independent of phenomenon-specific glows — it overrides
+  // them with the most aggressive styling.
+  if (isTornadoEmergency) cardClasses.push('threat-tornado-emergency');
 
   return (
     <div
@@ -140,6 +211,33 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, o
         <span className="alert-card-type">{alert.event_name}</span>
         <span className="alert-card-time">
           {formatTime(alert.issued_time)}
+        </span>
+        {GRAPHIC_PHENOMENA.has(alert.phenomenon) && (
+          <span
+            className="alert-card-share"
+            onClick={handleGenerateGraphic}
+            title="Generate broadcast graphic"
+            style={{ opacity: generatingGraphic ? 0.5 : 1 }}
+          >
+            <i className={generatingGraphic ? 'fas fa-spinner fa-spin' : 'fas fa-image'}></i>
+          </span>
+        )}
+        {hasPolygon && (
+          <span
+            className="alert-card-share"
+            onClick={handleScanImpact}
+            title="Scan impacted places (OSM) and push to stream"
+            style={{ opacity: scanningImpact ? 0.5 : 1 }}
+          >
+            <i className={scanningImpact ? 'fas fa-spinner fa-spin' : 'fas fa-location-crosshairs'}></i>
+          </span>
+        )}
+        <span
+          className="alert-card-share"
+          onClick={handleFocusRadar}
+          title="Show on radar (zoom + flash)"
+        >
+          <i className="fas fa-satellite-dish"></i>
         </span>
         <span className="alert-card-share" onClick={handleShareClick} title="Share to social media">
           <i className="fas fa-share-alt"></i>
@@ -168,8 +266,26 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, o
           </div>
         )}
 
-        {/* Tornado tag */}
-        {alert.threat.tornado_detection && (
+        {/* Tornado Emergency — highest tier, always the loudest badge */}
+        {isTornadoEmergency && (
+          <div className="tornado-emergency-badge" style={{
+            marginTop: '8px',
+            padding: '6px 10px',
+            backgroundColor: 'var(--tor-color)',
+            color: 'white',
+            borderRadius: '4px',
+            fontSize: '0.85rem',
+            fontWeight: 800,
+            letterSpacing: '0.04em',
+            display: 'inline-block'
+          }}>
+            <i className="fas fa-triangle-exclamation" style={{ marginRight: '6px' }}></i>
+            TORNADO EMERGENCY
+          </div>
+        )}
+
+        {/* Tornado tag (suppressed when an emergency badge is already shown) */}
+        {alert.threat.tornado_detection && !isTornadoEmergency && (
           <div style={{
             marginTop: '8px',
             padding: '4px 8px',
@@ -200,6 +316,68 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, o
           }}>
             <i className="fas fa-bolt" style={{ marginRight: '4px' }}></i>
             THUNDERSTORM DAMAGE: {alert.threat.thunderstorm_damage_threat}
+          </div>
+        )}
+
+        {/* OSM impact scan result — live on stream until cleared */}
+        {impactResult && (
+          <div style={{
+            marginTop: '8px',
+            padding: '8px 10px',
+            backgroundColor: 'rgba(99, 102, 241, 0.12)',
+            border: '1px solid rgba(99, 102, 241, 0.4)',
+            borderRadius: '4px',
+            fontSize: '0.75rem',
+          }}>
+            {/* Summary line — click to expand/collapse the names */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <span
+                style={{ cursor: 'pointer', flex: 1 }}
+                onClick={(e) => { e.stopPropagation(); setImpactExpanded(v => !v); }}
+                title="Show / hide the impacted place names"
+              >
+                <i className={`fas fa-chevron-${impactExpanded ? 'down' : 'right'}`} style={{ marginRight: '6px', fontSize: '0.65rem' }}></i>
+                <i className="fas fa-people-roof" style={{ marginRight: '4px' }}></i>
+                In path: <strong>{impactResult.total}</strong>
+                {impactResult.counts.mobile_home ? ` · ${impactResult.counts.mobile_home} mobile-home` : ''}
+                {impactResult.counts.schools ? ` · ${impactResult.counts.schools} schools` : ''}
+                {impactResult.counts.medical ? ` · ${impactResult.counts.medical} medical` : ''}
+              </span>
+              <span style={{ color: 'var(--accent-blue, #818cf8)', fontWeight: 600, cursor: 'pointer' }}
+                onClick={handleClearImpact} title="Hide the impact panel on stream">
+                Clear from stream
+              </span>
+            </div>
+
+            {/* Expanded named lists */}
+            {impactExpanded && (
+              <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {impactResult.categories.filter(c => c.items.length > 0).map(cat => (
+                  <div key={cat.key}>
+                    <div style={{
+                      fontSize: '0.68rem',
+                      fontWeight: 700,
+                      letterSpacing: '0.04em',
+                      textTransform: 'uppercase',
+                      color: cat.at_risk ? '#ff6b81' : 'var(--accent-blue, #818cf8)',
+                      marginBottom: '2px',
+                    }}>
+                      {cat.at_risk && <i className="fas fa-triangle-exclamation" style={{ marginRight: '4px' }}></i>}
+                      {cat.label} ({cat.total})
+                    </div>
+                    <div style={{ color: 'var(--text-primary)', lineHeight: 1.5 }}>
+                      {cat.items.map((it, i) => (
+                        <span key={i}>
+                          {it.name}{it.sub ? <span style={{ color: 'var(--text-muted)' }}> ({it.sub})</span> : ''}
+                          {i < cat.items.length - 1 ? ', ' : ''}
+                        </span>
+                      ))}
+                      {cat.total > cat.items.length ? <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}> +{cat.total - cat.items.length} more</span> : ''}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

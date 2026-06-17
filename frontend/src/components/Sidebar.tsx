@@ -20,7 +20,6 @@ const navItems: NavItem[] = [
   { id: 'metar', label: 'Surface Obs', icon: 'fa-thermometer-half' },
   { id: 'snow-emergency', label: 'Snow Emergencies', icon: 'fa-car-crash' },
   { id: 'nwws-feed', label: 'NWWS Products', icon: 'fa-rss' },
-  { id: 'daily-recap', label: 'Daily Recap', icon: 'fa-calendar-day' },
   { id: 'social', label: 'Social Media', icon: 'fa-share-nodes' },
   { id: 'event-stats', label: 'Event Stats', icon: 'fa-chart-bar' },
   { id: 'alert-graphics', label: 'Alert Graphics', icon: 'fa-images' },

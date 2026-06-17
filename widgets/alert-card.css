@@ -130,6 +130,19 @@ body {
     background-color: #FF0000;
 }
 
+/* Tornado Emergency — highest tier. Crimson-magenta + flash so it can't be
+   confused with a routine tornado tag. */
+.tag-tornado-emergency {
+    background-color: #d6008c;
+    box-shadow: 0 0 10px rgba(214, 0, 140, 0.7);
+    animation: tag-emergency-flash 1s ease-in-out infinite;
+}
+
+@keyframes tag-emergency-flash {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.72; }
+}
+
 .tag-tstorm-destructive {
     background-color: #D50000;
 }

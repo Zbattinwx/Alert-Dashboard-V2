@@ -18,7 +18,7 @@ body {
     bottom: 0;
     left: 0;
     right: 0;
-    height: 60px;
+    height: 80px;
     display: flex;
     align-items: center;
     background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
@@ -40,7 +40,7 @@ body {
 }
 
 .ticker-logo img {
-    height: 52px;
+    height: 65px;
     width: auto;
     object-fit: contain;
 }
@@ -58,7 +58,7 @@ body {
 
 /* Event name / title */
 .ticker-title {
-    font-size: 16px;
+    font-size: 20px;
     font-weight: 600;
     color: #ffffff;
     white-space: nowrap;
@@ -68,7 +68,7 @@ body {
 
 /* Key details subtitle */
 .ticker-subtitle {
-    font-size: 13px;
+    font-size: 16px;
     color: #ffcc00;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -82,7 +82,7 @@ body {
 
 /* Location text with scroll animation */
 .ticker-location {
-    font-size: 14px;
+    font-size: 18px;
     color: #b0b0b0;
     white-space: nowrap;
     display: inline-block;
@@ -110,13 +110,13 @@ body {
 }
 
 .ticker-expires-label {
-    font-size: 12px;
+    font-size: 14px;
     color: #888;
     text-transform: uppercase;
 }
 
 .ticker-expires-time {
-    font-size: 18px;
+    font-size: 24px;
     font-weight: bold;
 }
 
@@ -138,13 +138,29 @@ body {
     align-items: center;
     justify-content: center;
     color: #888;
-    font-size: 16px;
+    font-size: 20px;
 }
 
 @keyframes gradientShift {
     0% { background-position: 0% 50%; }
     50% { background-position: 100% 50%; }
     100% { background-position: 0% 50%; }
+}
+
+/* Tornado Emergency — takes over with a pulsing magenta treatment. Uses
+   !important + comes after the per-phenomenon colors so it always wins. */
+.ticker-container.emergency {
+    border-color: #ff00ff !important;
+    background: linear-gradient(180deg, #4a004a 0%, #25002a 100%) !important;
+    animation: tickerEmergencyPulse 1.2s ease-in-out infinite;
+}
+.ticker-container.emergency #ticker-title {
+    color: #ff8bff;
+    text-shadow: 0 0 12px rgba(255, 0, 255, 0.6);
+}
+@keyframes tickerEmergencyPulse {
+    0%, 100% { box-shadow: inset 0 0 28px rgba(255, 0, 255, 0.30); border-color: #ff00ff; }
+    50%      { box-shadow: inset 0 0 60px rgba(255, 0, 255, 0.60); border-color: #ff77ff; }
 }
 
 /* Alert Type Border Colors */

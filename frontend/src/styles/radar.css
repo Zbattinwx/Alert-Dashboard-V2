@@ -151,6 +151,65 @@
   color: var(--bg-primary);
 }
 
+/* Click-toggle control group (replaces hover-based rc-slider-group) */
+.rc-ctrl-group {
+  position: relative;
+}
+
+.rc-ctrl-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 200px;
+  padding: 12px 14px;
+  background: rgba(12, 17, 30, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 2000;
+}
+
+.rc-ctrl-panel label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.rc-ctrl-panel label span {
+  font-family: "JetBrains Mono", monospace;
+  color: var(--accent-cyan);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.rc-ctrl-panel input[type="range"] {
+  width: 100%;
+  height: 4px;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.rc-ctrl-panel input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(0, 206, 209, 0.5);
+}
+
+/* Legacy hover group (still used by non-radar sections) */
 .rc-slider-group {
   position: relative;
 }
@@ -170,7 +229,8 @@
   -webkit-backdrop-filter: blur(12px);
   transition: 0.15s;
 }
-.rc-icon-btn:hover { color: var(--text-primary); border-color: rgba(0, 206, 209, 0.5); }
+.rc-icon-btn:hover  { color: var(--text-primary); border-color: rgba(0, 206, 209, 0.5); }
+.rc-icon-btn.active { color: var(--accent-cyan);  border-color: rgba(0, 206, 209, 0.6); background: rgba(0, 206, 209, 0.12); }
 
 .rc-slider-popover {
   position: absolute;
@@ -305,55 +365,92 @@
 .rc-mcs-tag.bev  { background: rgba(255, 215, 0, 0.4); color: #fff8cc; }
 .rc-mcs-tag.qlcs { background: rgba(100, 200, 255, 0.3); color: #c5e9ff; }
 
-/* --- Bottom-left: status pill --- */
+/* --- Bottom-left: WeatherWise-style info bar --- */
 
-.rc-status-pill {
+.rc-infobar {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 1000;
+}
+
+.rc-infobar-main {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
-  background: rgba(15, 23, 42, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 7px 12px 7px 8px;
+  background: rgba(12, 17, 30, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: 8px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   font-size: 12px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
 }
 
-.rc-status-site {
+.rc-sites-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.rc-sites-toggle:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.rc-sites-toggle.active {
+  background: rgba(34, 211, 238, 0.18);
+  border-color: rgba(34, 211, 238, 0.5);
+  color: #22d3ee;
+}
+
+.rc-infobar-site {
   font-family: "JetBrains Mono", monospace;
   font-weight: 700;
-  color: var(--accent-cyan);
-  letter-spacing: 0.03em;
+  font-size: 13px;
+  color: #22d3ee;
+  letter-spacing: 0.04em;
 }
 
-.rc-status-product {
+.rc-infobar-product {
   color: var(--text-secondary);
   font-weight: 500;
 }
 
-.rc-status-time {
+.rc-infobar-time {
   font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
   color: var(--text-primary);
 }
 
-.rc-status-age {
-  padding: 1px 6px;
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 4px;
+.rc-infobar-live {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4ade80;
+  letter-spacing: 0.02em;
+}
+.rc-infobar-live.scanning { color: #94a3b8; }
+
+.rc-infobar-sep { color: rgba(255, 255, 255, 0.25); }
+
+.rc-infobar-err { color: #ff6b6b; font-size: 11px; }
+
+.rc-infobar-hint {
   font-size: 10px;
-  color: var(--text-muted);
-  font-family: "JetBrains Mono", monospace;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 0 4px;
+  text-align: center;
 }
-
-.rc-status-sep {
-  color: var(--text-muted);
-  opacity: 0.5;
-}
-
-.rc-status-spin { color: var(--accent-cyan); font-size: 11px; }
-.rc-status-err  { color: #ff6b6b;             font-size: 11px; }
 
 /* --- Bottom-center: scrubber stack (per active site) --- */
 
@@ -917,18 +1014,44 @@
 .cell-debris   { color: #ff8800; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-/* --- Cell Popup (Leaflet) --- */
+/* --- Cell Popup (MapLibre) --- */
 
-.cell-popup-container .leaflet-popup-content-wrapper {
+.cell-popup-container .maplibregl-popup-content {
   background: var(--bg-secondary);
   color: var(--text-primary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  padding: 0;
+  min-width: 260px;
 }
-.cell-popup-container .leaflet-popup-content { margin: 0; min-width: 260px; }
-.cell-popup-container .leaflet-popup-tip {
-  background: var(--bg-secondary); border: 1px solid var(--border-color);
+.cell-popup-container .maplibregl-popup-tip {
+  border-top-color: var(--bg-secondary);
+  border-bottom-color: var(--bg-secondary);
+}
+.cell-popup-container .maplibregl-popup-close-button {
+  color: var(--text-secondary);
+  font-size: 18px;
+  padding: 4px 8px;
+}
+
+/* AlertMap popup baseline (dark theme for non-cell popups) */
+.map-container .maplibregl-popup-content {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  padding: 10px 12px;
+}
+.map-container .maplibregl-popup-tip {
+  border-top-color: var(--bg-secondary);
+  border-bottom-color: var(--bg-secondary);
+}
+.map-container .maplibregl-popup-close-button {
+  color: var(--text-secondary);
+  font-size: 18px;
+  padding: 2px 6px;
 }
 .cell-popup { padding: var(--spacing-sm); }
 .cell-popup-header {

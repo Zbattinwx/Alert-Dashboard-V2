@@ -320,7 +320,11 @@ class AlertParser:
                     event_name_for_log = properties.get("event", "Unknown")
                     if alert.message_id:
                         alert.product_id = alert.message_id.split("/")[-1]
-                        logger.warning(f"No VTEC found for '{event_name_for_log}', using fallback ID: {alert.product_id}")
+                        # Non-VTEC products (Air Quality Alert, Hydrologic Outlook, etc.)
+                        # legitimately have no VTEC; the message URN is the correct ID
+                        # fallback. Most are non-target phenomena filtered out below, so
+                        # this is expected — debug, not a warning.
+                        logger.debug(f"No VTEC found for '{event_name_for_log}', using fallback ID: {alert.product_id}")
                     else:
                         alert.product_id = f"api_{datetime.now(timezone.utc).timestamp()}"
                         logger.warning(f"No VTEC or message_id for '{event_name_for_log}', using timestamp ID: {alert.product_id}")
@@ -405,11 +409,15 @@ class AlertParser:
 
             original_areas = alert.affected_areas.copy() if alert.affected_areas else []
             alert.affected_areas = cls._filter_to_target_states(alert.affected_areas)
+            alert.affected_areas = cls._filter_to_target_counties(alert.affected_areas)
             if alert.affected_areas and len(alert.affected_areas) < len(original_areas):
                 alert.display_locations = ugc_get_display_locations(alert.affected_areas)
 
             if not alert.affected_areas:
-                logger.warning(
+                # Expected: alert touches the target state but none of the target
+                # counties (county filter doing its job on adjacent-area alerts).
+                # Repeats every poll for the same alerts — debug, not a warning.
+                logger.debug(
                     f"Rejecting API alert {alert.product_id} - no valid affected_areas after filtering "
                     f"(original: {original_areas})"
                 )
@@ -572,11 +580,15 @@ class AlertParser:
 
             original_areas = alert.affected_areas.copy() if alert.affected_areas else []
             alert.affected_areas = cls._filter_to_target_states(alert.affected_areas)
+            alert.affected_areas = cls._filter_to_target_counties(alert.affected_areas)
             if alert.affected_areas and len(alert.affected_areas) < len(original_areas):
                 alert.display_locations = ugc_get_display_locations(alert.affected_areas)
 
             if not alert.affected_areas:
-                logger.warning(
+                # Expected: alert touches the target state but none of the target
+                # counties (county filter doing its job on adjacent-area alerts).
+                # Repeats every poll for the same alerts — debug, not a warning.
+                logger.debug(
                     f"Rejecting alert {alert.product_id} - no valid affected_areas after filtering "
                     f"(original: {original_areas})"
                 )
@@ -1103,6 +1115,64 @@ class AlertParser:
             )
 
         return filtered
+
+    @staticmethod
+    def _county_basename(name: str) -> str:
+        """Normalize a UGC name to a comparable county base name.
+
+        "Clark County, OH" -> "clark"; "Ashtabula Inland, OH" -> "ashtabula inland".
+        """
+        s = name.split(",")[0].strip()
+        if s.lower().endswith(" county"):
+            s = s[: -len(" county")].strip()
+        return s.lower()
+
+    @classmethod
+    def _filter_to_target_counties(cls, affected_areas: list[str]) -> list[str]:
+        """
+        Narrow affected_areas to the user's selected counties (per-state).
+
+        For each state that has a non-empty county selection, keep only areas
+        whose county/zone name matches a selected county.  States without a
+        selection are unaffected (all their counties pass).  Matching is by name
+        so it works for both county ("C") and forecast-zone ("Z") UGC codes,
+        which use different numbering but resolve to county-based names.
+        """
+        from ..config import get_settings
+        from ..services.ugc_service import get_ugc_name
+
+        settings = get_settings()
+        filter_counties = getattr(settings, "filter_counties", None) or {}
+        if not filter_counties or not affected_areas:
+            return affected_areas
+
+        # Per-state set of selected county base names.
+        selected: dict[str, set[str]] = {}
+        for state, codes in filter_counties.items():
+            if not codes:
+                continue
+            selected[state.upper()] = {
+                cls._county_basename(get_ugc_name(c)) for c in codes
+            }
+        if not selected:
+            return affected_areas
+
+        kept: list[str] = []
+        for ugc in affected_areas:
+            st = ugc[:2].upper() if len(ugc) >= 2 else ""
+            sel = selected.get(st)
+            if not sel:
+                kept.append(ugc)  # no county restriction for this state
+                continue
+            base_words = set(cls._county_basename(get_ugc_name(ugc)).split())
+            if any(set(name.split()).issubset(base_words) for name in sel):
+                kept.append(ugc)
+
+        if len(kept) < len(affected_areas):
+            logger.debug(
+                f"County filter: {len(affected_areas)} -> {len(kept)} areas"
+            )
+        return kept
 
     @classmethod
     def _looks_like_ugc_codes(cls, text: str) -> bool:

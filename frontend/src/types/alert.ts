@@ -16,6 +16,7 @@ export interface ThreatInfo {
   // Tornado
   tornado_detection: string | null;  // "RADAR INDICATED", "OBSERVED", etc.
   tornado_damage_threat: string | null;
+  tornado_emergency?: boolean;  // "TORNADO EMERGENCY" declared — highest tier
   // Convenience fields (computed from above)
   has_tornado?: boolean;
   tornado_possible?: boolean;

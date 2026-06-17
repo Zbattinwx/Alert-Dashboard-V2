@@ -60,6 +60,10 @@ class AlertTicker {
                 this.excludedTypes.add(t.trim().toUpperCase());
             });
         }
+
+        // Preview/test hook: ?test=emergency injects a synthetic tornado
+        // emergency so the escalation styling can be verified on demand.
+        this.testEmergency = params.get('test') === 'emergency';
     }
 
     init() {
@@ -92,6 +96,12 @@ class AlertTicker {
         // Apply theme
         this.applyTheme(this.config.theme);
 
+        // Show the synthetic emergency right away in test mode (before the WS
+        // delivers real alerts, which will re-inject it at the front).
+        if (this.testEmergency) {
+            this.handleBulkAlerts([]);
+        }
+
         // Fetch ticker filter settings from dashboard, then connect
         this.fetchTickerSettings().then(() => {
             this.connect();
@@ -100,6 +110,28 @@ class AlertTicker {
 
         // Update expiration times every minute
         setInterval(() => this.updateExpirationTime(), 60000);
+
+        // Safety net: drop alerts whose expiration time has passed, in case an
+        // alert_remove broadcast is ever missed (the ticker has no other way to
+        // age out a stale alert since alert_bulk only arrives on connect).
+        setInterval(() => this.sweepExpiredAlerts(), 30000);
+    }
+
+    sweepExpiredAlerts() {
+        if (!this.alerts.length) return;
+        const now = Date.now();
+        const before = this.alerts.length;
+        this.alerts = this.alerts.filter(a => {
+            const exp = a.expiration_time || a.expires;
+            if (!exp) return true;                 // no expiry → keep
+            const t = new Date(exp).getTime();
+            return isNaN(t) || t > now;            // keep if unparseable or still valid
+        });
+        if (this.alerts.length === before) return; // nothing aged out
+
+        if (this.currentIndex >= this.alerts.length) this.currentIndex = 0;
+        if (this.alerts.length > 0) this.displayAlert(this.alerts[this.currentIndex]);
+        else this.displayNoAlerts();
     }
 
     async fetchTickerSettings() {
@@ -233,6 +265,11 @@ class AlertTicker {
         }
 
         this.alerts = alerts;
+        // Test hook: keep a synthetic emergency pinned to the front so the
+        // escalation can be previewed even with no real alerts active.
+        if (this.testEmergency) {
+            this.alerts.unshift(this._testEmergencyAlert());
+        }
         this.currentIndex = 0;
 
         // Display first alert or no-alerts state
@@ -270,11 +307,19 @@ class AlertTicker {
     }
 
     handleAlertExpired(alertData) {
-        const alertId = alertData.id || alertData.alert_id;
-        console.log('Alert expired:', alertId);
+        // The backend's alert_remove payload identifies the alert by product_id
+        // (not id/alert_id), so match on product_id first — mirroring
+        // handleAlertUpdate. The old id/alert_id-only lookup never matched, so
+        // expired/cancelled alerts never dropped off the ticker.
+        const alertId = alertData.product_id || alertData.id || alertData.alert_id;
+        console.log('Alert expired/removed:', alertId, alertData.reason || '');
 
         // Remove from alerts list
-        const index = this.alerts.findIndex(a => a.id === alertId || a.alert_id === alertId);
+        const index = this.alerts.findIndex(a =>
+            (a.product_id && a.product_id === alertId) ||
+            (a.id && a.id === alertId) ||
+            (a.alert_id && a.alert_id === alertId)
+        );
         if (index !== -1) {
             this.alerts.splice(index, 1);
 
@@ -310,8 +355,12 @@ class AlertTicker {
         if (index !== -1) {
             this.alerts[index] = alert;
 
-            // Update display if this is the current alert
-            if (index === this.currentIndex) {
+            // Jump straight to a freshly-upgraded tornado emergency; otherwise
+            // only refresh if this is the alert currently on screen.
+            if (this.isTornadoEmergency(alert)) {
+                this.currentIndex = index;
+                this.displayAlert(alert);
+            } else if (index === this.currentIndex) {
                 this.displayAlert(alert);
             }
         }
@@ -346,10 +395,12 @@ class AlertTicker {
 
         // Get alert info
         const info = this.getAlertDisplayInfo(alert);
+        const emergency = this.isTornadoEmergency(alert);
 
         // Update container class for styling
         this.container.className = 'ticker-container';
         this.container.classList.add(info.phenomena);
+        if (emergency) this.container.classList.add('emergency');
 
         // Hide no-alerts message
         if (this.noAlertsEl) {
@@ -363,8 +414,8 @@ class AlertTicker {
         this.content.classList.add('fade-out');
 
         setTimeout(() => {
-            // Update title
-            this.titleEl.textContent = info.name;
+            // Update title — a tornado emergency overrides the product name.
+            this.titleEl.textContent = emergency ? 'TORNADO EMERGENCY' : info.name;
 
             // Update subtitle with key details (wind gusts, hail size, etc.)
             const keyDetails = this.extractKeyDetails(alert);
@@ -456,7 +507,50 @@ class AlertTicker {
         // The actual scheduling happens after displayAlert -> setupLocationScroll
     }
 
+    // A tornado emergency is the most severe tornado warning — flagged by the
+    // backend's structured `tornado_emergency` field. Falls back to a
+    // CATASTROPHIC tornado damage tag or the literal "TORNADO EMERGENCY" text
+    // for legacy/preview alerts. Mirrors the React app's detection.
+    isTornadoEmergency(alert) {
+        if (!alert) return false;
+        const threat = alert.threat || {};
+        if (threat.tornado_emergency === true) return true;
+        if (threat.tornado_damage_threat === 'CATASTROPHIC') return true;
+        const desc = (alert.description || alert.raw_text || '').toUpperCase();
+        return desc.includes('TORNADO EMERGENCY');
+    }
+
+    findEmergencyIndex() {
+        return this.alerts.findIndex(a => this.isTornadoEmergency(a));
+    }
+
+    _testEmergencyAlert() {
+        return {
+            product_id: 'TEST-TOR-E',
+            phenomenon: 'TO', significance: 'W',
+            event_name: 'Tornado Warning',
+            description: 'TORNADO EMERGENCY for the test area. Take cover now!',
+            threat: { tornado_damage_threat: 'CATASTROPHIC' },
+            display_locations: 'TEST — Clark County, OH',
+            area_description: 'TEST — Clark County, OH',
+            expiration_time: new Date(Date.now() + 30 * 60000).toISOString(),
+        };
+    }
+
     rotateToNext() {
+        // During a tornado emergency, pin the ticker to it (take-over behavior)
+        // instead of rotating past it to lesser alerts.
+        const emIdx = this.findEmergencyIndex();
+        if (emIdx !== -1) {
+            if (this.currentIndex !== emIdx) {
+                this.currentIndex = emIdx;
+                this.displayAlert(this.alerts[emIdx]);
+            } else {
+                this.scheduleNextRotation(); // already pinned — keep the heartbeat alive
+            }
+            return;
+        }
+
         if (this.alerts.length <= 1) return;
 
         this.currentIndex = (this.currentIndex + 1) % this.alerts.length;
@@ -577,32 +671,76 @@ class AlertTicker {
     }
 
     extractKeyDetails(alert) {
-        // Extract key details from description for display
-        const desc = alert.description || '';
+        const threat = alert.threat || {};
+        const parts = [];
 
-        // Try to find the WHAT section which contains key info
+        // High-priority threat tags — a Tornado Emergency leads everything.
+        if (this.isTornadoEmergency(alert)) {
+            parts.push('TORNADO EMERGENCY');
+        } else if (threat.tornado_detection === 'OBSERVED') {
+            parts.push('OBSERVED TORNADO');
+        }
+        if (threat.tornado_damage_threat === 'CATASTROPHIC') {
+            parts.push('CATASTROPHIC');
+        } else if (threat.tornado_damage_threat === 'CONSIDERABLE') {
+            parts.push('CONSIDERABLE');
+        }
+        if (threat.thunderstorm_damage_threat === 'DESTRUCTIVE') {
+            parts.push('DESTRUCTIVE');
+        } else if (threat.thunderstorm_damage_threat === 'CONSIDERABLE') {
+            parts.push('CONSIDERABLE');
+        }
+        if (threat.flash_flood_damage_threat === 'CATASTROPHIC') {
+            parts.push('CATASTROPHIC FLOODING');
+        } else if (threat.flash_flood_damage_threat === 'CONSIDERABLE') {
+            parts.push('CONSIDERABLE FLOODING');
+        }
+
+        // Wind
+        const hasSustained = threat.sustained_wind_min_mph || threat.sustained_wind_max_mph;
+        const hasGusts = threat.max_wind_gust_mph;
+        if (hasSustained && hasGusts) {
+            const min = threat.sustained_wind_min_mph;
+            const max = threat.sustained_wind_max_mph;
+            const sustainedStr = min !== max ? `${min}-${max}` : `${max}`;
+            parts.push(`Wind: ${sustainedStr} mph | Gusts: ${hasGusts} mph`);
+        } else if (hasSustained) {
+            const min = threat.sustained_wind_min_mph;
+            const max = threat.sustained_wind_max_mph;
+            const sustainedStr = min !== max ? `${min}-${max}` : `${max}`;
+            parts.push(`Wind: ${sustainedStr} mph`);
+        } else if (hasGusts) {
+            parts.push(`Gusts: ${hasGusts} mph`);
+        }
+
+        // Hail
+        if (threat.max_hail_size_inches) {
+            parts.push(`Hail: ${threat.max_hail_size_inches}"`);
+        }
+
+        // Snow
+        if (threat.snow_amount_max_inches) {
+            const snowMin = threat.snow_amount_min_inches || 0;
+            const snowMax = threat.snow_amount_max_inches;
+            parts.push(snowMin !== snowMax ? `Snow: ${snowMin}-${snowMax}"` : `Snow: ${snowMax}"`);
+        }
+
+        // Ice
+        if (threat.ice_accumulation_inches) {
+            parts.push(`Ice: ${threat.ice_accumulation_inches}"`);
+        }
+
+        if (parts.length > 0) {
+            return parts.join('  ·  ');
+        }
+
+        // Fallback: parse description text
+        const desc = alert.description || '';
         const whatMatch = desc.match(/\*\s*WHAT\.\.\.([^*]+)/i);
         if (whatMatch) {
-            let what = whatMatch[1].trim();
-            // Clean up and shorten
-            what = what.replace(/\s+/g, ' ').replace(/occurring\.?$/i, '').trim();
-            // Limit length
-            if (what.length > 100) {
-                what = what.substring(0, 100) + '...';
-            }
+            let what = whatMatch[1].trim().replace(/\s+/g, ' ').replace(/occurring\.?$/i, '').trim();
+            if (what.length > 100) what = what.substring(0, 100) + '...';
             return what;
-        }
-
-        // Try to extract wind info patterns
-        const windMatch = desc.match(/winds?\s+(\d+\s*to\s*\d+\s*mph)[^.]*gusts?\s+(?:from\s+)?(\d+\s*to\s*\d+\s*mph|\d+\s*mph)/i);
-        if (windMatch) {
-            return `Winds ${windMatch[1]}, gusts ${windMatch[2]}`;
-        }
-
-        // Try to extract hail size
-        const hailMatch = desc.match(/hail\s+(?:up\s+to\s+)?([^,.]+(?:inch|diameter)[^,.]*)/i);
-        if (hailMatch) {
-            return `Hail: ${hailMatch[1].trim()}`;
         }
 
         return null;

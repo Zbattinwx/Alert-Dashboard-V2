@@ -30,6 +30,7 @@ class MessageType(str, Enum):
     ALERT_UPDATE = "alert_update"
     ALERT_REMOVE = "alert_remove"
     ALERT_BULK = "alert_bulk"
+    ALERT_ZONES = "alert_zones"
     MD_NEW = "md_new"
     SYSTEM_STATUS = "system_status"
     CONNECTION_ACK = "connection_ack"
@@ -53,6 +54,16 @@ class MessageType(str, Enum):
     RADAR_STATUS = "radar_status"
     STORM_CELLS = "storm_cells"
     MCS_SYSTEMS = "mcs_systems"
+
+    # Stream overlay control (Server -> Client)
+    RADAR_PRODUCT = "radar_product"
+
+    # OSM impact scan — "what's in the path" (Server -> Client)
+    IMPACT_PLACES = "impact_places"
+    IMPACT_CLEAR = "impact_clear"
+
+    # Focus an alert on map clients (zoom + flash) (Server -> Client)
+    FOCUS_ALERT = "focus_alert"
 
     # Lightning (Server -> Client)
     LIGHTNING_STRIKES = "lightning_strikes"
@@ -307,6 +318,17 @@ class MessageBroker:
             "alerts": [alert.to_dict() for alert in alerts],
         })
 
+    async def broadcast_alert_zones(self, zones_payload: dict):
+        """
+        Broadcast the full zone-based map payload to all clients.
+
+        Pushed the instant an alert changes (and its zone geometry is resolved)
+        so map clients can render zone-fill alerts — especially watches, which
+        have no storm-based polygon — immediately instead of waiting for their
+        next /api/map/zones poll. Same shape as that endpoint's response.
+        """
+        await self._broadcast(MessageType.ALERT_ZONES, zones_payload)
+
     async def broadcast_system_status(self, status: dict):
         """
         Broadcast system status to all clients.
@@ -317,12 +339,42 @@ class MessageBroker:
         await self._broadcast(MessageType.SYSTEM_STATUS, status)
 
     async def broadcast_radar_frame(self, frame_data: dict):
-        """Broadcast a new radar frame to all clients."""
+        """Broadcast a new radar frame metadata to all clients (JSON)."""
         await self._broadcast(MessageType.RADAR_FRAME, frame_data)
+
+    async def broadcast_radar_frame_binary(self, frame_bytes: bytes) -> None:
+        """Broadcast a raw binary radar frame (RDRF wire format) to all clients."""
+        if not self._connections:
+            return
+        disconnected = []
+        for client_id, connection in self._connections.items():
+            try:
+                await connection.websocket.send_bytes(frame_bytes)
+            except Exception as e:
+                logger.warning(f"Failed to send binary frame to {client_id}: {e}")
+                disconnected.append(client_id)
+        for client_id in disconnected:
+            await self.disconnect(client_id)
 
     async def broadcast_radar_status(self, status_data: dict):
         """Broadcast radar status update to all clients."""
         await self._broadcast(MessageType.RADAR_STATUS, status_data)
+
+    async def broadcast_radar_product(self, product: str):
+        """Broadcast the on-air radar product label to stream-overlay clients."""
+        await self._broadcast(MessageType.RADAR_PRODUCT, {"product": product})
+
+    async def broadcast_impact_places(self, impact_data: dict):
+        """Push an OSM impact scan ('what's in the path') to stream widgets."""
+        await self._broadcast(MessageType.IMPACT_PLACES, impact_data)
+
+    async def broadcast_impact_clear(self):
+        """Tell stream widgets to hide the impact panel."""
+        await self._broadcast(MessageType.IMPACT_CLEAR, {})
+
+    async def broadcast_focus_alert(self, alert_data: dict):
+        """Tell map clients (e.g. the radar app) to zoom to and flash an alert."""
+        await self._broadcast(MessageType.FOCUS_ALERT, alert_data)
 
     async def broadcast_storm_cells(self, cells_data: list[dict]):
         """Broadcast storm cell tracking data to all clients."""

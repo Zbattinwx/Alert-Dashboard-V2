@@ -24,6 +24,7 @@ from typing import Optional
 from .patterns import (
     PATTERN_TORNADO_DETECTION,
     PATTERN_TORNADO_DAMAGE,
+    PATTERN_TORNADO_EMERGENCY,
     PATTERN_THUNDERSTORM_DAMAGE,
     PATTERN_WIND_GUST,
     PATTERN_WIND_XML,
@@ -72,6 +73,7 @@ class ThreatParser:
         # Parse each threat type
         threat.tornado_detection = cls.parse_tornado_detection(text)
         threat.tornado_damage_threat = cls.parse_tornado_damage(text)
+        threat.tornado_emergency = cls.parse_tornado_emergency(text)
         threat.thunderstorm_damage_threat = cls.parse_thunderstorm_damage(text)
 
         # Parse sustained wind (e.g., "winds 25 to 35 mph")
@@ -128,6 +130,24 @@ class ThreatParser:
             logger.debug(f"Tornado damage threat: {threat_level}")
             return threat_level
         return None
+
+    @classmethod
+    def parse_tornado_emergency(cls, text: str) -> bool:
+        """
+        Detect a Tornado Emergency — the NWS's most severe tornado wording,
+        reserved for a confirmed, catastrophic tornado threatening a populated
+        area. Sits above a PDS / observed tornado and should always be the most
+        prominent threat in the UI.
+
+        Returns:
+            True if the "TORNADO EMERGENCY" declaration is present.
+        """
+        if not text:
+            return False
+        found = bool(PATTERN_TORNADO_EMERGENCY.search(text))
+        if found:
+            logger.debug("Tornado Emergency detected")
+        return found
 
     @classmethod
     def parse_thunderstorm_damage(cls, text: str) -> Optional[str]:

@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     nwws_server: str = Field(default="nwws-oi.weather.gov", description="NWWS-OI server")
     nwws_resource: str = Field(default="nwws", description="NWWS-OI resource")
 
+    # Stadia Maps API key — when set, broadcast graphics use the same
+    # "alidade_smooth_dark" basemap as the radar (server-side raster tiles
+    # require a key). Empty falls back to the keyless CARTO dark basemap.
+    stadia_api_key: str = Field(default="", description="Stadia Maps API key for broadcast-graphic basemap")
+
     # NWS API settings
     nws_api_base_url: str = Field(default="https://api.weather.gov", description="NWS API base URL")
     nws_api_user_agent: str = Field(default="AlertDashboardV2/2.0", description="User agent for NWS API")
@@ -78,6 +83,13 @@ class Settings(BaseSettings):
     filter_ugc_codes: list[str] = Field(
         default=[],
         description="Specific UGC codes to include (empty = all)"
+    )
+    # Per-state county filter: {state_code: [county UGC codes]}.  When a monitored
+    # state has a non-empty list, only alerts touching those counties are kept;
+    # a state absent from this map (or mapped to []) keeps all its counties.
+    filter_counties: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Per-state county UGC filter; empty/absent state = all counties"
     )
 
     # Alert type filtering - which phenomena to show on dashboard
@@ -166,6 +178,28 @@ class Settings(BaseSettings):
     odot_cache_ttl_seconds: int = Field(
         default=300,
         description="ODOT data cache TTL (5 minutes)"
+    )
+
+    # 511-family camera API keys by state code (register a free key per state,
+    # e.g. https://511ny.org/developers). Env: CAMERAS_511_KEYS='{"NY":"<key>"}'.
+    cameras_511_keys: dict[str, str] = Field(
+        default_factory=dict,
+        description="511 GetCameras API keys keyed by state code, e.g. {'NY': '...'}"
+    )
+    cameras_511_cache_ttl_seconds: int = Field(
+        default=300,
+        description="511 camera list cache TTL (5 minutes)"
+    )
+
+    # CARS-program GraphQL camera states (keyless; live HLS). Empty list disables.
+    # Known members: CO, IN, IA, KS, MA, MN, NE. None = all known states.
+    cameras_cars_states: Optional[list[str]] = Field(
+        default=None,
+        description="CARS GraphQL state codes to fetch cameras from (None = all known)"
+    )
+    cameras_cars_cache_ttl_seconds: int = Field(
+        default=900,
+        description="CARS camera list cache TTL (15 minutes; locations are near-static)"
     )
 
     # Camera-in-alert settings - which alert types should trigger camera display
@@ -259,10 +293,29 @@ class Settings(BaseSettings):
     # NEXRAD Level 2 Radar
     nexrad_enabled: bool = Field(default=False, description="Enable Level 2 NEXRAD radar processing")
     nexrad_default_site: str = Field(default="KILN", description="Default NEXRAD site ICAO code (e.g., KILN for Wilmington OH)")
-    nexrad_poll_interval: int = Field(default=60, description="Seconds between checking for new volume scans")
+    nexrad_poll_interval: int = Field(default=10, description="Seconds between checking for new volume scans (most polls are a single S3 LIST and key compare, so a tight interval is cheap)")
     nexrad_history_count: int = Field(default=10, description="Number of past volume scans to keep in memory")
     nexrad_grid_resolution_km: float = Field(default=1.0, description="Grid resolution in km (increase for lower-power hardware)")
     nexrad_max_range_km: int = Field(default=230, description="Maximum radar range in km for rendering")
+
+    # NEXRAD chunks bucket — near-real-time partial volume scans from
+    # `unidata-nexrad-level2-chunks`.  Runs alongside the archive bucket
+    # pipeline; both broadcast the same RadarFrame/VolumeScanData shape.
+    # Default OFF so the new path can be enabled per deployment after it's
+    # been verified against live data.
+    nexrad_chunks_enabled: bool = Field(default=False, description="Enable the near-real-time chunks-bucket ingestion path (runs alongside archive)")
+    nexrad_chunks_poll_interval: int = Field(default=10, description="Seconds between chunks-bucket LIST polls")
+    nexrad_chunks_min_chunks_for_partial: int = Field(default=5, description="Render a partial-volume scan once this many chunks (counting the S header) have arrived. Lower = faster but fewer tilts; 5 ≈ first 3-4 tilts")
+    nexrad_chunks_render_on_complete: bool = Field(default=True, description="Also render once at end-of-volume (E chunk) for the complete tilt set")
+    nexrad_chunks_partial_refresh_chunks: int = Field(default=4, description="Re-broadcast a partial after at least this many additional chunks have arrived since the last partial (0 disables refresh). Keeps the displayed scan current during long VCPs.")
+    nexrad_chunks_partial_refresh_min_interval_s: int = Field(default=60, description="Minimum seconds between successive partial re-broadcasts of the same volume — protects CPU since each render is ~10s.")
+
+    # Live QA reporter — in-process per-scan storm cell QA logging.  Runs as
+    # an additional callback on the storm tracking service when NEXRAD is on.
+    live_qa_enabled: bool = Field(default=True, description="Run the in-process live QA reporter alongside the storm tracking service")
+    live_qa_log_training_data: bool = Field(default=False, description="Append every cell to data/training_data.jsonl for ML training")
+    live_qa_min_score: int = Field(default=30, description="Suppress cells below this severity score from QA log output (flagged cells always print)")
+    live_qa_verbose: bool = Field(default=False, description="Show detailed rotation/structure block for every notable cell")
 
     @field_validator("filter_states", mode="before")
     @classmethod
@@ -290,6 +343,25 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
         return v if v else []
+
+    @field_validator("filter_counties", mode="before")
+    @classmethod
+    def parse_counties(cls, v):
+        """Parse per-state county map from a JSON string or dict."""
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return {}
+            try:
+                v = json.loads(v)
+            except json.JSONDecodeError:
+                return {}
+        if isinstance(v, dict):
+            return {
+                str(k).upper(): [str(c).upper() for c in (codes or [])]
+                for k, codes in v.items()
+            }
+        return {}
 
     @field_validator("target_phenomena", "camera_alert_phenomena", "google_chat_phenomena", mode="before")
     @classmethod
@@ -358,6 +430,16 @@ def get_settings() -> Settings:
         logger.info(
             f"Applied user override: {len(settings.filter_states)} filter states"
         )
+    if "filter_counties" in overrides:
+        raw = overrides["filter_counties"] or {}
+        if isinstance(raw, dict):
+            settings.filter_counties = {
+                str(k).upper(): [str(c).upper() for c in (codes or [])]
+                for k, codes in raw.items()
+            }
+            logger.info(
+                f"Applied user override: county filter for {len(settings.filter_counties)} state(s)"
+            )
     # General settings overrides
     _GENERAL_OVERRIDE_FIELDS = [
         "nexrad_enabled", "nexrad_default_site",

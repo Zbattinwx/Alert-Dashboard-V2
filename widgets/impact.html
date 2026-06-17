@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Impact Panel - Weather Dashboard V2</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="impact.css">
+    <style>
+        html, body { height: 100%; margin: 0; padding: 0; background: transparent; overflow: hidden; }
+    </style>
+</head>
+<body>
+    <!-- Static side panel: "what's in the path" of the active warning. -->
+    <div id="impact-panel" class="impact-panel side-right hidden">
+        <div class="impact-header">
+            <div class="impact-header-kicker"><i class="fas fa-location-crosshairs"></i> IN THE PATH</div>
+            <div id="impact-event" class="impact-event">Tornado Warning</div>
+        </div>
+        <div id="impact-body" class="impact-body">
+            <!-- categories injected here -->
+        </div>
+        <div class="impact-footer">
+            <span id="impact-attribution">Data &copy; OpenStreetMap contributors</span>
+        </div>
+    </div>
+
+    <script src="widget-common.js"></script>
+    <script src="impact.js"></script>
+</body>
+</html>
+
+<!--
+Adds an on-stream "what's in the path" panel. Push data to it by clicking the
+location-crosshairs button on an alert in the dashboard.
+
+URL Parameters:
+  - side: right (default) | left   — which edge the panel pins to
+                                      (put it opposite the talent / green screen)
+
+Examples:
+  impact.html
+  impact.html?side=left
+-->

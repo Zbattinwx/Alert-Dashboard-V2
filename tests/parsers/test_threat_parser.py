@@ -51,6 +51,22 @@ class TestTornadoParsing:
 
         assert damage == "CATASTROPHIC"
 
+    def test_parse_tornado_emergency_declared(self):
+        """A 'TORNADO EMERGENCY' declaration is detected as the highest tier."""
+        text = (
+            "TORNADO EMERGENCY for LA ROSE...TOLUCA...WENONA. This is a\n"
+            "PARTICULARLY DANGEROUS SITUATION. TAKE COVER NOW!"
+        )
+
+        assert ThreatParser.parse_tornado_emergency(text) is True
+        assert ThreatParser.parse(text).tornado_emergency is True
+
+    def test_observed_tornado_is_not_emergency(self):
+        """A routine observed tornado without the declaration is not an emergency."""
+        text = "TORNADO...OBSERVED\nTORNADO DAMAGE THREAT...CONSIDERABLE"
+
+        assert ThreatParser.parse_tornado_emergency(text) is False
+
     def test_no_tornado_detection(self):
         """Test text without tornado detection."""
         text = "A severe thunderstorm is approaching."

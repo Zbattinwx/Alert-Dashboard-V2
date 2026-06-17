@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { apiUrl } from '../utils/api';
 
+type WindowKey = 'session' | '24h' | '7d';
+
 interface TimelineEvent {
   time: string;
   event_type: string;
@@ -29,9 +31,12 @@ interface LsrStats {
 }
 
 interface EventStats {
-  session_start: string;
-  session_duration: string;
-  session_duration_s: number;
+  window: string;
+  window_label?: string;
+  session_start?: string;
+  session_duration?: string;
+  session_duration_s?: number;
+  recovered_from_restart?: boolean;
   total_issued: number;
   current_active: number;
   peak_concurrent: number;
@@ -62,6 +67,12 @@ const SIG_LABELS: Record<string, string> = {
   A: 'Watches',
   Y: 'Advisories',
 };
+
+const TABS: { key: WindowKey; label: string }[] = [
+  { key: 'session', label: 'Session' },
+  { key: '24h', label: 'Last 24h' },
+  { key: '7d', label: 'Last 7 Days' },
+];
 
 function StatCard({ label, value, sub, color, icon }: {
   label: string; value: string | number; sub?: string; color?: string; icon?: string;
@@ -98,7 +109,15 @@ function timeStr(isoTime: string): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function timelineEventColor(ev: TimelineEvent): string {
+  if (ev.is_emergency) return '#ff0000';
+  if (ev.event_type === 'session_reset') return 'var(--text-secondary)';
+  if (ev.event_type === 'alert_expired') return '#666';
+  return PHENOMENON_COLORS[ev.phenomenon] || 'var(--primary-color)';
+}
+
 export const EventStatsSection: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<WindowKey>('session');
   const [stats, setStats] = useState<EventStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -106,9 +125,9 @@ export const EventStatsSection: React.FC = () => {
   const [resetMsg, setResetMsg] = useState<string | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const fetchStats = useCallback(async () => {
+  const fetchStats = useCallback(async (tab: WindowKey = activeTab) => {
     try {
-      const res = await fetch(apiUrl('/api/event-stats'));
+      const res = await fetch(apiUrl(`/api/event-stats?window=${tab}`));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: EventStats = await res.json();
       setStats(data);
@@ -118,23 +137,27 @@ export const EventStatsSection: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeTab]);
 
   useEffect(() => {
-    fetchStats();
-    refreshTimer.current = setInterval(fetchStats, 15000);
+    setLoading(true);
+    setStats(null);
+    fetchStats(activeTab);
+    if (refreshTimer.current) clearInterval(refreshTimer.current);
+    refreshTimer.current = setInterval(() => fetchStats(activeTab), 15000);
     return () => { if (refreshTimer.current) clearInterval(refreshTimer.current); };
-  }, [fetchStats]);
+  }, [activeTab, fetchStats]);
 
   const handleReset = async () => {
-    if (!window.confirm('Reset event stats? This clears all counters and starts a new session.')) return;
+    if (!window.confirm('Reset event stats? This clears all session counters and starts a new session.')) return;
     setResetting(true);
     setResetMsg(null);
     try {
       const res = await fetch(apiUrl('/api/event-stats/reset'), { method: 'POST' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setResetMsg('Session reset. Stats cleared.');
-      await fetchStats();
+      await fetchStats('session');
+      setActiveTab('session');
     } catch (e) {
       setResetMsg(e instanceof Error ? e.message : 'Reset failed');
     } finally {
@@ -142,23 +165,24 @@ export const EventStatsSection: React.FC = () => {
     }
   };
 
-  const timelineEventColor = (ev: TimelineEvent) => {
-    if (ev.is_emergency) return '#ff0000';
-    if (ev.event_type === 'session_reset') return 'var(--text-secondary)';
-    if (ev.event_type === 'alert_expired') return '#666';
-    return PHENOMENON_COLORS[ev.phenomenon] || 'var(--primary-color)';
-  };
+  const maxHail = stats
+    ? Math.max(stats.max_hail_in ?? 0, stats.lsr?.max_hail_in ?? 0)
+    : 0;
+  const maxWind = stats
+    ? Math.max(stats.max_wind_mph ?? 0, stats.lsr?.max_wind_mph ?? 0)
+    : 0;
 
   return (
     <div className="section active">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '8px' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
         <h2 className="section-title" style={{ margin: 0 }}>
           <i className="fas fa-chart-bar" style={{ marginRight: '8px', color: 'var(--primary-color)' }}></i>
           Event Statistics
         </h2>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button
-            onClick={fetchStats}
+            onClick={() => fetchStats(activeTab)}
             disabled={loading}
             style={{ padding: '5px 10px', borderRadius: '4px', border: '1px solid var(--border-color)', backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', cursor: 'pointer', fontSize: '0.8rem' }}
           >
@@ -172,6 +196,30 @@ export const EventStatsSection: React.FC = () => {
             <i className="fas fa-flag"></i> New Event
           </button>
         </div>
+      </div>
+
+      {/* Tab bar */}
+      <div style={{ display: 'flex', gap: '4px', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '0' }}>
+        {TABS.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            style={{
+              padding: '7px 16px',
+              border: 'none',
+              borderBottom: activeTab === tab.key ? '2px solid var(--primary-color)' : '2px solid transparent',
+              backgroundColor: 'transparent',
+              color: activeTab === tab.key ? 'var(--primary-color)' : 'var(--text-secondary)',
+              cursor: 'pointer',
+              fontSize: '0.85rem',
+              fontWeight: activeTab === tab.key ? 600 : 400,
+              marginBottom: '-1px',
+              transition: 'color 0.15s',
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
       {resetMsg && (
@@ -192,14 +240,26 @@ export const EventStatsSection: React.FC = () => {
         </div>
       ) : stats && (
         <>
-          {/* Session info bar */}
-          <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '16px', display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-            <span><i className="fas fa-clock" style={{ marginRight: '4px' }}></i>Session: {stats.session_duration}</span>
-            <span><i className="fas fa-calendar-alt" style={{ marginRight: '4px' }}></i>Started: {new Date(stats.session_start).toLocaleString()}</span>
+          {/* Context bar */}
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '16px', display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
+            {activeTab === 'session' && stats.session_start && (
+              <>
+                <span><i className="fas fa-clock" style={{ marginRight: '4px' }}></i>Session: {stats.session_duration}</span>
+                <span><i className="fas fa-calendar-alt" style={{ marginRight: '4px' }}></i>Started: {new Date(stats.session_start).toLocaleString()}</span>
+                {stats.recovered_from_restart && (
+                  <span style={{ color: '#88aaff', backgroundColor: 'rgba(100,120,255,0.12)', border: '1px solid rgba(100,120,255,0.3)', borderRadius: '4px', padding: '2px 8px' }}>
+                    <i className="fas fa-redo" style={{ marginRight: '4px' }}></i>Recovered from restart
+                  </span>
+                )}
+              </>
+            )}
+            {activeTab !== 'session' && (
+              <span><i className="fas fa-history" style={{ marginRight: '4px' }}></i>{stats.window_label}</span>
+            )}
             <span style={{ marginLeft: 'auto', fontSize: '0.72rem', opacity: 0.6 }}>Auto-refreshes every 15s</span>
           </div>
 
-          {/* Top-level stat cards */}
+          {/* Stat cards */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '10px', marginBottom: '20px' }}>
             <StatCard label="Total Issued" value={stats.total_issued} icon="fa-bell" color="var(--primary-color)" />
             <StatCard label="Active Now" value={stats.current_active} icon="fa-bolt" color={stats.current_active > 0 ? '#ffaa00' : undefined} />
@@ -210,32 +270,22 @@ export const EventStatsSection: React.FC = () => {
             {stats.pds_count > 0 && (
               <StatCard label="PDS Events" value={stats.pds_count} icon="fa-radiation" color="#cc0088" />
             )}
-            {(stats.max_hail_in !== null || stats.lsr?.max_hail_in !== null) && (
-              <StatCard
-                label="Max Hail"
-                value={`${Math.max(stats.max_hail_in ?? 0, stats.lsr?.max_hail_in ?? 0).toFixed(2)}"`}
-                icon="fa-cloud-meatball"
-                color="#88ccff"
-              />
+            {maxHail > 0 && (
+              <StatCard label="Max Hail" value={`${maxHail.toFixed(2)}"`} icon="fa-cloud-meatball" color="#88ccff" />
             )}
-            {(stats.max_wind_mph !== null || stats.lsr?.max_wind_mph !== null) && (
-              <StatCard
-                label="Max Wind Gust"
-                value={`${Math.max(stats.max_wind_mph ?? 0, stats.lsr?.max_wind_mph ?? 0).toFixed(0)} mph`}
-                icon="fa-wind"
-                color="#ffaa44"
-              />
+            {maxWind > 0 && (
+              <StatCard label="Max Wind Gust" value={`${maxWind.toFixed(0)} mph`} icon="fa-wind" color="#ffaa44" />
             )}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
-            {/* Alert breakdown by phenomenon */}
+            {/* Alert breakdown */}
             <div style={{ backgroundColor: 'var(--bg-secondary)', borderRadius: '8px', padding: '14px', border: '1px solid var(--border-color)' }}>
               <h3 style={{ margin: '0 0 12px', fontSize: '0.85rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 <i className="fas fa-exclamation-triangle" style={{ marginRight: '6px' }}></i>Alerts Issued
               </h3>
               {stats.by_phenomenon.length === 0 ? (
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: 0 }}>No alerts this session yet.</p>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: 0 }}>No alerts in this window.</p>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                   {stats.by_phenomenon.map(p => (
@@ -261,10 +311,11 @@ export const EventStatsSection: React.FC = () => {
             </div>
 
             {/* LSR Summary */}
-            {stats.lsr && stats.lsr.total > 0 && (
+            {stats.lsr && stats.lsr.total > 0 ? (
               <div style={{ backgroundColor: 'var(--bg-secondary)', borderRadius: '8px', padding: '14px', border: '1px solid var(--border-color)' }}>
                 <h3 style={{ margin: '0 0 12px', fontSize: '0.85rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  <i className="fas fa-bullhorn" style={{ marginRight: '6px' }}></i>Storm Reports (24h)
+                  <i className="fas fa-bullhorn" style={{ marginRight: '6px' }}></i>
+                  Storm Reports ({activeTab === '7d' ? '7 days' : '24h'})
                 </h3>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
                   {stats.lsr.tornado_reports > 0 && (
@@ -295,14 +346,18 @@ export const EventStatsSection: React.FC = () => {
                   )}
                 </div>
                 <div style={{ marginTop: '10px', fontSize: '0.75rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
-                  {stats.lsr.total} total reports in last 24 hours
+                  {stats.lsr.total} total reports
                 </div>
+              </div>
+            ) : (
+              <div style={{ backgroundColor: 'var(--bg-secondary)', borderRadius: '8px', padding: '14px', border: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: 0 }}>No storm reports in this window.</p>
               </div>
             )}
           </div>
 
-          {/* Timeline */}
-          {stats.timeline.length > 0 && (
+          {/* Timeline — session only */}
+          {activeTab === 'session' && stats.timeline.length > 0 && (
             <div style={{ backgroundColor: 'var(--bg-secondary)', borderRadius: '8px', padding: '14px', border: '1px solid var(--border-color)' }}>
               <h3 style={{ margin: '0 0 12px', fontSize: '0.85rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 <i className="fas fa-history" style={{ marginRight: '6px' }}></i>Event Timeline

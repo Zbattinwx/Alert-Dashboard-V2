@@ -90,6 +90,9 @@ class BrandConfig(BaseModel):
     social_facebook: Optional[str] = Field(default=None, description="Facebook page")
     social_youtube: Optional[str] = Field(default=None, description="YouTube channel")
 
+    # On-air talent
+    meteorologist_name: Optional[str] = Field(default=None, description="On-air meteorologist name for broadcast graphics")
+
     # Footer/Attribution
     copyright_text: Optional[str] = Field(default=None, description="Copyright text")
     powered_by_text: str = Field(
@@ -200,6 +203,7 @@ DEFAULT_BRANDS = {
         name="The Battin Front",
         short_name="TBF",
         tagline="Weather Coverage You Can Trust",
+        meteorologist_name="Zach Battin",
         logo="tbf_logo.png",
         colors=ColorScheme(
             primary="#00CED1",

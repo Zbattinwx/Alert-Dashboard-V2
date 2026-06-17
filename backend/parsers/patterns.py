@@ -210,6 +210,15 @@ PATTERN_TORNADO_DAMAGE: Pattern[str] = re.compile(
     re.IGNORECASE
 )
 
+# Tornado Emergency — the single most severe wording the NWS issues. Reserved
+# for a confirmed, catastrophic tornado threatening a populated area. Detected
+# by the explicit "TORNADO EMERGENCY" declaration phrase (e.g.
+# "TORNADO EMERGENCY for LA ROSE...TOLUCA...WENONA").
+PATTERN_TORNADO_EMERGENCY: Pattern[str] = re.compile(
+    r"TORNADO\s+EMERGENCY",
+    re.IGNORECASE
+)
+
 # Thunderstorm damage threat tag
 PATTERN_THUNDERSTORM_DAMAGE: Pattern[str] = re.compile(
     r"THUNDERSTORM\s+DAMAGE\s+THREAT\.{3}(CONSIDERABLE|DESTRUCTIVE|CATASTROPHIC)",

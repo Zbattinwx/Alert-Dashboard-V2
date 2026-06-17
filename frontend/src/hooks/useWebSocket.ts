@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import type { Alert, WSMessage, AlertBulkData, AlertRemoveData, AgentNotification } from '../types/alert';
 import type { MesoscaleDiscussion } from '../types/spc';
 import type { ChaserPosition } from '../types/chaser';
-import type { RadarFrame, RadarStatus, StormCell, LightningFlash, MCSSystem } from '../types/radar';
+import type { RadarFrame, RadarBinaryFrame, RadarStatus, StormCell, LightningFlash, MCSSystem } from '../types/radar';
+import { parseRadarBinaryFrame } from '../utils/radarBinaryParser';
 
 interface UseWebSocketOptions {
   url: string;
@@ -14,6 +15,7 @@ interface UseWebSocketOptions {
   onStatusChange?: (connected: boolean) => void;
   onChaserPosition?: (data: ChaserPosition) => void;
   onChaserDisconnect?: (data: { client_id: string }) => void;
+  onRadarBinaryFrame?: (frame: RadarBinaryFrame) => void;
   onRadarFrame?: (frame: RadarFrame) => void;
   onRadarStatus?: (status: RadarStatus) => void;
   onStormCells?: (cells: StormCell[]) => void;
@@ -41,6 +43,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onStatusChange,
     onChaserPosition,
     onChaserDisconnect,
+    onRadarBinaryFrame,
     onRadarFrame,
     onRadarStatus,
     onStormCells,
@@ -63,6 +66,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
     console.log('Connecting to WebSocket:', url);
     const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -88,8 +92,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     };
 
     ws.onmessage = (event) => {
+      // Binary frames (RDRF wire format) arrive as ArrayBuffer
+      if (event.data instanceof ArrayBuffer) {
+        try {
+          onRadarBinaryFrame?.(parseRadarBinaryFrame(event.data));
+        } catch (err) {
+          console.error('Failed to parse binary radar frame:', err);
+        }
+        return;
+      }
       try {
-        const message: WSMessage = JSON.parse(event.data);
+        const message: WSMessage = JSON.parse(event.data as string);
         handleMessage(message);
       } catch (err) {
         console.error('Failed to parse WebSocket message:', err);
@@ -202,7 +215,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       default:
         console.log('Unknown message type:', message.type);
     }
-  }, [onAlert, onAlertUpdate, onAlertRemove, onBulkAlerts, onMD, onChaserPosition, onChaserDisconnect, onRadarFrame, onRadarStatus, onStormCells, onMcsSystems, onAgentNotification, onLightningStrikes]);
+  }, [onAlert, onAlertUpdate, onAlertRemove, onBulkAlerts, onMD, onChaserPosition, onChaserDisconnect, onRadarBinaryFrame, onRadarFrame, onRadarStatus, onStormCells, onMcsSystems, onAgentNotification, onLightningStrikes]);
 
   const sendMessage = useCallback((type: string, data?: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
