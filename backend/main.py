@@ -3730,6 +3730,31 @@ async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = 
     return data
 
 
+@app.get("/api/obs/surface")
+async def get_surface_obs():
+    """National surface station obs (METAR snapshot) for the radar app's
+    Observations layer — station plots of temp/dewpoint/wind/pressure."""
+    try:
+        from .services.surface_obs_service import get_surface_obs_service
+    except ImportError:
+        from backend.services.surface_obs_service import get_surface_obs_service
+    svc = get_surface_obs_service()
+    obs = await asyncio.to_thread(svc.get_obs)
+    return {"obs": obs}
+
+
+@app.get("/api/obs/analysis")
+async def get_surface_analysis():
+    """Objective surface analysis from the obs: High/Low pressure centers + fronts
+    (thermal-gradient zones classified warm/cold/stationary by advection)."""
+    try:
+        from .services.surface_obs_service import get_surface_obs_service
+    except ImportError:
+        from backend.services.surface_obs_service import get_surface_obs_service
+    svc = get_surface_obs_service()
+    return await asyncio.to_thread(svc.get_analysis)
+
+
 @app.get("/api/glm/flashes")
 async def get_glm_flashes(minutes: int = 60):
     """Snapshot of recent GLM lightning flashes ([lat, lon, epoch_ms]) for the
