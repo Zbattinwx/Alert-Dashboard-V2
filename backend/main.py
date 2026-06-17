@@ -3755,6 +3755,18 @@ async def get_surface_analysis():
     return await asyncio.to_thread(svc.get_analysis)
 
 
+@app.get("/api/obs/wpc")
+async def get_wpc_surface():
+    """Official WPC surface analysis — hand-analyzed fronts + High/Low centers
+    (parsed from the Coded Surface Bulletin)."""
+    try:
+        from .services.wpc_fronts_service import get_wpc_fronts_service
+    except ImportError:
+        from backend.services.wpc_fronts_service import get_wpc_fronts_service
+    svc = get_wpc_fronts_service()
+    return await asyncio.to_thread(svc.get)
+
+
 @app.get("/api/glm/flashes")
 async def get_glm_flashes(minutes: int = 60):
     """Snapshot of recent GLM lightning flashes ([lat, lon, epoch_ms]) for the
