@@ -5,6 +5,7 @@ Uses Pydantic for validation and environment variable loading.
 
 import json
 import logging
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -16,15 +17,30 @@ logger = logging.getLogger(__name__)
 
 # Get project root (parent of backend directory)
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
-_ENV_FILE = _PROJECT_ROOT / ".env"
 _USER_SETTINGS_FILE = _PROJECT_ROOT / "data" / "user_settings.json"
+
+# .env resolution. When frozen (PyInstaller), __file__ lives in the unpacked
+# bundle's temp dir, so the project .env isn't reachable — and we deliberately do
+# NOT bake the .env (it holds the NWWS password) into the distributed exe. Read it
+# from beside the executable and the working directory instead, so a packaged
+# dashboard still picks up NWWS credentials. Without this the frozen backend has
+# no credentials and silently falls back to slow API-only alert polling (a
+# tornado warning takes ~2 min via the API vs. instant over NWWS). pydantic also
+# reads OS environment variables, so those keep working regardless.
+if getattr(sys, "frozen", False):
+    _ENV_FILE: tuple[str, ...] = (
+        str(Path(sys.executable).parent / ".env"),
+        str(Path.cwd() / ".env"),
+    )
+else:
+    _ENV_FILE = (str(_PROJECT_ROOT / ".env"),)
 
 
 class Settings(BaseSettings):
     """Main application settings."""
 
     model_config = SettingsConfigDict(
-        env_file=str(_ENV_FILE),
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore"
