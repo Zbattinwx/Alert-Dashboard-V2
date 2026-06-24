@@ -111,7 +111,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   }, [url, reconnectInterval, onStatusChange]);
 
   const handleMessage = useCallback((message: WSMessage) => {
-    console.log('WS Message:', message.type, message.data);
+    // Dev-only: this fires for every message (incl. high-frequency radar_frame /
+    // storm_cells / lightning_strikes / pong), so keep it out of production.
+    if (import.meta.env.DEV) console.log('WS Message:', message.type, message.data);
 
     switch (message.type) {
       case 'connection_ack':
@@ -210,6 +212,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       case 'error':
         console.error('WebSocket error message:', message.data);
+        break;
+
+      case 'alert_zones':
+        // Live zone-fill update; the React map polls /api/map/zones, so this
+        // broadcast is intentionally ignored here (not an error).
         break;
 
       default:

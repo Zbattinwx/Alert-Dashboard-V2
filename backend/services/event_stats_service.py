@@ -249,16 +249,15 @@ class EventStatsService:
             self.peak_concurrent = self.current_concurrent
 
         event_name = getattr(alert, "event_name", "") or ""
-        is_emergency = "emergency" in event_name.lower()
-        is_pds = False
+        # Canonical PDS / Tornado Emergency detection (single source of truth on
+        # the Alert model, replacing the old per-service raw_text scans).
+        is_emergency = bool(getattr(alert, "is_tornado_emergency", False))
+        is_pds = bool(getattr(alert, "is_pds", False))
         hail_val: Optional[float] = None
         wind_val: Optional[float] = None
 
         threat = getattr(alert, "threat", None)
         if threat:
-            tornado_threat = getattr(threat, "tornado_damage_threat", None)
-            if tornado_threat == "CATASTROPHIC":
-                is_emergency = True
             max_hail = getattr(threat, "max_hail_size", None)
             if max_hail:
                 try:
@@ -278,10 +277,7 @@ class EventStatsService:
 
         if is_emergency:
             self.tornado_emergency_count += 1
-
-        raw_text = getattr(alert, "raw_text", "") or ""
-        if "THIS IS A PARTICULARLY DANGEROUS SITUATION" in raw_text.upper():
-            is_pds = True
+        if is_pds:
             self.pds_count += 1
 
         location = getattr(alert, "display_locations", "") or ""

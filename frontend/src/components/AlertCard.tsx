@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import type { Alert } from '../types/alert';
 import { getAlertStyle } from '../types/alert';
+import { apiUrl } from '../utils/api';
 
 const GRAPHIC_PHENOMENA = new Set(['TO', 'SV', 'FF', 'FA', 'FL', 'BZ', 'WS', 'IS', 'EW', 'HW']);
 
@@ -40,8 +41,8 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, o
     setGeneratingGraphic(true);
     try {
       // Generate + save, then open in new tab
-      await fetch(`/api/graphics/alert/${alert.product_id}?save=true`);
-      window.open(`/api/graphics/alert/${alert.product_id}`, '_blank');
+      await fetch(apiUrl(`/api/graphics/alert/${alert.product_id}?save=true`));
+      window.open(apiUrl(`/api/graphics/alert/${alert.product_id}`), '_blank');
     } finally {
       setGeneratingGraphic(false);
     }
@@ -52,7 +53,7 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, o
     e.stopPropagation();
     setScanningImpact(true);
     try {
-      const res = await fetch(`/api/alerts/${alert.product_id}/impact-scan`, { method: 'POST' });
+      const res = await fetch(apiUrl(`/api/alerts/${alert.product_id}/impact-scan`), { method: 'POST' });
       if (res.ok) {
         const data: ImpactResult = await res.json();
         setImpactResult(data);
@@ -65,14 +66,14 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onClick, onClear, o
 
   const handleClearImpact = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    await fetch('/api/impact/clear', { method: 'POST' });
+    await fetch(apiUrl('/api/impact/clear'), { method: 'POST' });
     setImpactResult(null);
   };
 
   // Tell the radar app to zoom to + flash this alert (and show its info card).
   const handleFocusRadar = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    await fetch(`/api/alerts/${alert.product_id}/focus`, { method: 'POST' });
+    await fetch(apiUrl(`/api/alerts/${alert.product_id}/focus`), { method: 'POST' });
   };
   const formatTime = (isoString: string | null) => {
     if (!isoString) return '';

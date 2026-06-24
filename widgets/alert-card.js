@@ -134,6 +134,15 @@ class AlertCardWidget {
     // ── WebSocket ──
 
     connect() {
+        // Tear down any prior socket so its stale handlers can't fire or stack a
+        // reconnect, and guard against multiple in-flight reconnect timers.
+        if (this.ws) {
+            this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null;
+            try { this.ws.close(); } catch (e) {}
+            this.ws = null;
+        }
+        if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+
         const wsUrl = getWebSocketUrl();
         console.log('Alert Card: connecting to', wsUrl);
 
@@ -150,7 +159,7 @@ class AlertCardWidget {
             this.ws.onclose = () => {
                 console.log('Alert Card: WebSocket disconnected');
                 this.connected = false;
-                setTimeout(() => this.connect(), this.config.reconnectDelay);
+                this.scheduleReconnect();
             };
 
             this.ws.onerror = (err) => {
@@ -158,8 +167,16 @@ class AlertCardWidget {
             };
         } catch (err) {
             console.error('Alert Card: failed to connect', err);
-            setTimeout(() => this.connect(), this.config.reconnectDelay);
+            this.scheduleReconnect();
         }
+    }
+
+    scheduleReconnect() {
+        if (this._reconnectTimer) return;
+        this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null;
+            this.connect();
+        }, this.config.reconnectDelay);
     }
 
     handleMessage(data) {

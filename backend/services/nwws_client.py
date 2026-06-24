@@ -322,6 +322,22 @@ class NWWSAlertHandler:
             self._client.stop()
             self._client = None
 
+    async def restart(self):
+        """Reconnect using the current settings, keeping registered callbacks.
+
+        Used when the user supplies/changes NWWS credentials at runtime: the
+        callbacks live on this handler instance, so tearing down only the client
+        and re-running start() picks up new credentials without re-wiring.
+        """
+        if self._client:
+            try:
+                self._client.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping NWWS client during restart: {e}")
+            self._client = None
+        self._connected = False
+        await self.start()
+
     @property
     def is_connected(self) -> bool:
         """Check if connected to NWWS."""
@@ -352,3 +368,8 @@ async def stop_nwws_handler():
     if _handler:
         await _handler.stop()
         _handler = None
+
+
+async def restart_nwws_handler():
+    """Reconnect the singleton handler with current settings (keeps callbacks)."""
+    await get_nwws_handler().restart()

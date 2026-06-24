@@ -166,74 +166,75 @@ async def startup_services():
     google_chat_service = get_google_chat_service()
     google_chat_service.mark_startup_complete()
 
-    # 5. Start NWWS handler for real-time alerts (if configured)
+    # 5. Wire the NWWS handler's callbacks ALWAYS (even with no credentials yet),
+    #    then start the live client only if credentials are configured. The user
+    #    may supply credentials later via POST /api/nwws/credentials, which
+    #    restarts the client — these callbacks live on the singleton handler, so
+    #    alerts flow without re-wiring.
+    nwws_handler = get_nwws_handler()
+    alert_manager = get_alert_manager()
+    zone_service = get_zone_geometry_service()
+
+    def on_nwws_alert(alert: Alert):
+        """Handle NWWS alert: populate geometry then add to manager."""
+        async def process_alert():
+            # Always try to populate zone geometry for alerts with affected areas
+            # The populate_alert_geometry method handles the logic of when to
+            # actually populate (always for zone-based alerts like watches)
+            if alert.affected_areas:
+                await zone_service.populate_alert_geometry(alert)
+            # Add to alert manager
+            alert_manager.add_alert(alert)
+
+        # Run async task
+        asyncio.create_task(process_alert())
+
+    nwws_handler.add_alert_callback(on_nwws_alert)
+
+    # Wire NWWS products service to capture ALL raw products (monitoring + AFD)
+    await start_nwws_products_service()
+    products_service = get_nwws_products_service()
+    nwws_handler.add_raw_callback(products_service.on_raw_product)
+    logger.info("NWWS Products service wired to raw callback")
+
     if settings.nwws_username and settings.nwws_password:
         await start_nwws_handler()
-
-        # Wire NWWS alerts to Alert Manager with zone geometry population
-        nwws_handler = get_nwws_handler()
-        alert_manager = get_alert_manager()
-        zone_service = get_zone_geometry_service()
-
-        def on_nwws_alert(alert: Alert):
-            """Handle NWWS alert: populate geometry then add to manager."""
-            async def process_alert():
-                # Always try to populate zone geometry for alerts with affected areas
-                # The populate_alert_geometry method handles the logic of when to
-                # actually populate (always for zone-based alerts like watches)
-                if alert.affected_areas:
-                    await zone_service.populate_alert_geometry(alert)
-                # Add to alert manager
-                alert_manager.add_alert(alert)
-
-            # Run async task
-            asyncio.create_task(process_alert())
-
-        nwws_handler.add_alert_callback(on_nwws_alert)
-
-        # Wire NWWS products service to capture ALL raw products (monitoring + AFD)
-        await start_nwws_products_service()
-        products_service = get_nwws_products_service()
-        nwws_handler.add_raw_callback(products_service.on_raw_product)
-        logger.info("NWWS Products service wired to raw callback")
-
         logger.info("NWWS Handler started")
     else:
-        logger.warning("NWWS credentials not configured - using API-only mode")
-        await start_nwws_products_service()  # Start anyway for API fallback
+        logger.warning(
+            "NWWS credentials not configured - using API-only mode "
+            "(enter NWWS credentials in the app for instant alerts)"
+        )
 
     # 6. Start periodic API polling (backup to NWWS)
     asyncio.create_task(api_polling_loop())
 
-    # 7. Start LSR Service
-    await start_lsr_service()
-    logger.info("LSR Service started")
-
-    # 8. Start ODOT Service
-    await start_odot_service()
-    logger.info("ODOT Service started")
-
-    # 9. Start SPC Service
-    await start_spc_service()
-    logger.info("SPC Service started")
-
-    # 10. Start Wind Gusts Service
-    await start_wind_gusts_service()
-    logger.info("Wind Gusts Service started")
-
-    # 11. Start LLM Service (optional - may not be available)
-    llm_available = await start_llm_service()
-    if llm_available:
-        logger.info("LLM Service started and available")
-    else:
+    # 7-11b. Start independent data + AI services concurrently. None depend on
+    # one another, so overlapping their initial fetches and (for LLM/Agent) the
+    # Ollama health checks cuts seconds off startup vs the old sequential awaits.
+    # return_exceptions=True so one failing service can't abort the rest.
+    (_lsr, _odot, _spc, _wind, llm_available, agent_available) = await asyncio.gather(
+        start_lsr_service(),
+        start_odot_service(),
+        start_spc_service(),
+        start_wind_gusts_service(),
+        start_llm_service(),
+        start_agent_service(),
+        return_exceptions=True,
+    )
+    for name, res in (("LSR", _lsr), ("ODOT", _odot), ("SPC", _spc), ("Wind Gusts", _wind)):
+        if isinstance(res, Exception):
+            logger.error(f"{name} service failed to start: {res}")
+        else:
+            logger.info(f"{name} Service started")
+    if isinstance(llm_available, Exception) or not llm_available:
         logger.warning("LLM Service not available - Ollama may not be running")
-
-    # 11b. Start Agent Service (tool-calling AI agent)
-    agent_available = await start_agent_service()
-    if agent_available:
-        logger.info("Agent Service started and available")
     else:
+        logger.info("LLM Service started and available")
+    if isinstance(agent_available, Exception) or not agent_available:
         logger.warning("Agent Service not available - check Ollama and agent model")
+    else:
+        logger.info("Agent Service started and available")
 
     # 12. Start Google Chat Service (optional - disabled by default)
     google_chat_enabled = await start_google_chat_service()
@@ -963,6 +964,16 @@ async def fetch_initial_alerts():
 
         logger.info(f"Loaded {added} initial alerts from NWS API")
 
+        # Reconcile API-sourced alerts against the active feed so an out-of-band
+        # cancel (one we never got a CAN for) is removed instead of lingering to
+        # its expiration. Only with a confirmed non-empty feed — never mass-remove
+        # on a transient empty/partial response.
+        if alerts:
+            active_ids = {a.product_id for a in alerts if a.product_id}
+            reaped = alert_manager.reconcile_api_alerts(active_ids)
+            if reaped:
+                logger.info(f"Reconciled {reaped} out-of-feed API alert(s)")
+
     except Exception as e:
         logger.error(f"Failed to fetch initial alerts: {e}")
 
@@ -1490,6 +1501,56 @@ async def get_system_status():
             "filter_states": settings.filter_states,
             "api_poll_interval": settings.api_poll_interval_seconds,
         },
+    }
+
+
+# --- User-supplied NWWS-OI credentials -------------------------------------
+# Lets each operator enter their OWN NWWS-OI credentials in the radar app (so we
+# never ship a .env). With credentials the dashboard gets instant alerts; without
+# them it falls back to NWS-API polling. Credentials persist per-user (app-data),
+# so the app only needs to ask once.
+class NWWSCredentialsUpdate(BaseModel):
+    username: str = Field(default="", description="NWWS-OI username (blank to clear)")
+    password: str = Field(default="", description="NWWS-OI password (blank to clear)")
+
+
+@app.get("/api/nwws/status")
+async def get_nwws_status():
+    """Whether NWWS is configured and connected (for the app's setup prompt)."""
+    settings = get_settings()
+    handler = get_nwws_handler()
+    return {
+        "configured": bool(settings.nwws_username and settings.nwws_password),
+        "connected": handler.is_connected if handler else False,
+        "username": settings.nwws_username or None,
+    }
+
+
+@app.post("/api/nwws/credentials")
+async def set_nwws_credentials(update: NWWSCredentialsUpdate):
+    """Save (or clear) the user's NWWS-OI credentials and reconnect.
+
+    Blank username/password clears the stored credentials → NWS-API fallback.
+    """
+    from .config.settings import save_nwws_credentials, reload_settings
+    from .services import restart_nwws_handler
+
+    username = (update.username or "").strip()
+    password = (update.password or "").strip()
+    save_nwws_credentials(username, password)
+    reload_settings()
+    try:
+        await restart_nwws_handler()
+    except Exception as e:
+        logger.error(f"Failed to (re)start NWWS after credential change: {e}")
+
+    settings = get_settings()
+    configured = bool(settings.nwws_username and settings.nwws_password)
+    logger.info(f"NWWS credentials {'set' if configured else 'cleared'} via API")
+    return {
+        "success": True,
+        "configured": configured,
+        "username": settings.nwws_username or None,
     }
 
 
@@ -3843,7 +3904,9 @@ async def get_glm_status():
 async def get_radar_gate():
     """Get current reflectivity gate threshold (dBZ)."""
     service = get_nexrad_service()
-    return {"gate_dbz": service._gate_dbz}
+    # service can be None before NEXRAD finishes starting (or if disabled);
+    # fall back to the default threshold instead of raising a 500.
+    return {"gate_dbz": getattr(service, "_gate_dbz", 10.0)}
 
 
 class RadarGateRequest(BaseModel):
@@ -4144,6 +4207,48 @@ async def update_ticker_settings(update: TickerFilterUpdate):
         "excluded_types": normalized,
         "message": f"{len(normalized)} alert types excluded from ticker",
     }
+
+
+# ==================== Google Chat Filter Settings ====================
+
+
+class GoogleChatFilterUpdate(BaseModel):
+    send_types: list[str] = Field(
+        ..., description="Phenomenon+significance keys to send to Google Chat (e.g. 'TO_W')"
+    )
+
+
+@app.get("/api/settings/google-chat")
+async def get_google_chat_settings():
+    """Get the Google Chat alert filter — which alert types are sent to Chat."""
+    try:
+        from .services.google_chat_service import get_google_chat_filter
+    except ImportError:
+        from backend.services.google_chat_service import get_google_chat_filter
+    return get_google_chat_filter()
+
+
+@app.post("/api/settings/google-chat")
+async def update_google_chat_settings(update: GoogleChatFilterUpdate):
+    """Update which alert types are sent to Google Chat. Saves to user_settings.json."""
+    try:
+        from .config.settings import _load_user_overrides, _save_user_overrides
+        from .services.google_chat_service import get_google_chat_filter
+    except ImportError:
+        from backend.config.settings import _load_user_overrides, _save_user_overrides
+        from backend.services.google_chat_service import get_google_chat_filter
+
+    normalized = sorted(set(t.upper() for t in update.send_types))
+    overrides = _load_user_overrides()
+    overrides["google_chat_send_types"] = normalized
+    _save_user_overrides(overrides)
+
+    logger.info(f"Google Chat filter updated: {len(normalized)} types enabled")
+
+    result = get_google_chat_filter()
+    result["success"] = True
+    result["message"] = f"{len(normalized)} alert types will be sent to Google Chat"
+    return result
 
 
 # ==================== States Settings ====================

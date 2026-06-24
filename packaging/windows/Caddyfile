@@ -1,0 +1,126 @@
+# =============================================================================
+# Caddyfile - Windows host (runs ON the ONW PC)
+#
+# Routes for atmosphericx.ddns.net:
+#   /v2/*  -> V2 dashboard (this app), frozen backend on localhost:3074
+#   /v1/*  -> ONW (V1) dashboard, which serves its OWN HTTPS on :8000 / WSS :8765
+#   /api/* -> ONW (absolute API paths used by the V1 frontend)
+#   /      -> redirect to /v2/
+#
+# Requirements:
+#   - Router forwards ports 80 + 443 to this PC's LAN IP.
+#   - ONW keeps running (HTTPS :8000, WSS :8765). ONW is also still reachable
+#     directly at https://atmosphericx.ddns.net:8000 (forward 8000 if you want that).
+#
+# Caddy auto-provisions a Let's Encrypt certificate for the domain on first run
+# (needs 80/443 reachable). To instead reuse ONW's existing cert and skip ACME,
+# replace the `atmosphericx.ddns.net {` site below with the commented `tls`
+# variant at the bottom of this file.
+# =============================================================================
+
+# Optional: email for ACME/Let's Encrypt account (avoids prompts).
+# {
+#     email zbattinwx@gmail.com
+# }
+
+# --- External access (HTTPS with auto-SSL) ---
+atmosphericx.ddns.net {
+    # V2 - this dashboard. handle_path strips the /v2 prefix; one block covers
+    # both HTTP requests and the /v2/ws WebSocket upgrade.
+    handle_path /v2/* {
+        reverse_proxy localhost:3074
+    }
+
+    # V1 - ONW. It terminates its own TLS on :8000 / :8765, so proxy OVER https
+    # to the loopback and skip cert-name verification (safe on localhost).
+    redir /v1 /v1/ permanent
+
+    handle /v1/ws {
+        reverse_proxy https://localhost:8765 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+        }
+    }
+
+    handle_path /v1/* {
+        reverse_proxy https://localhost:8000 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+        }
+    }
+
+    # The V2 dashboard requests its brand logo at the ROOT path /api/brand/logo
+    # (that one URL doesn't carry the /v2 base prefix), so send just that path to
+    # V2. More specific than /api/* below, so Caddy matches it first.
+    handle /api/brand/logo {
+        reverse_proxy localhost:3074
+    }
+
+    # ONW frontend calls absolute /api/* (no /v1 prefix). V2's own API lives
+    # under /v2/api/* and is handled by the handle_path /v2/* block above, so
+    # this root /api/* only ever reaches ONW.
+    handle /api/* {
+        reverse_proxy https://localhost:8000 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+        }
+    }
+
+    # Root -> V2
+    redir / /v2/ permanent
+}
+
+# --- LAN access over plain HTTP (http://<this-pc-ip>/v2/) ---
+http:// {
+    handle_path /v2/* {
+        reverse_proxy localhost:3074
+    }
+
+    handle /v1/ws {
+        reverse_proxy https://localhost:8765 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+        }
+    }
+
+    handle_path /v1/* {
+        reverse_proxy https://localhost:8000 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+        }
+    }
+
+    handle /api/brand/logo {
+        reverse_proxy localhost:3074
+    }
+
+    handle /api/* {
+        reverse_proxy https://localhost:8000 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+        }
+    }
+
+    redir / /v2/ permanent
+}
+
+# =============================================================================
+# ALTERNATIVE: reuse ONW's existing certificate instead of Caddy's own ACME.
+# Use this if you don't want to (or can't) forward port 80, or you prefer to
+# keep a single cert. Replace the `atmosphericx.ddns.net {` opening line above
+# with:
+#
+#   atmosphericx.ddns.net {
+#       tls C:\ssl-certs\atmosphericx.ddns.net-chain.pem C:\ssl-certs\atmosphericx.ddns.net-key.pem
+#       ... (rest of the routes unchanged) ...
+#   }
+#
+# Note: with a file-based cert you must restart Caddy after each renewal so it
+# picks up the new cert; ACME (the default above) auto-renews.
+# =============================================================================

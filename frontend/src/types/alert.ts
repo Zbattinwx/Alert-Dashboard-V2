@@ -115,6 +115,7 @@ export type WSMessageType =
   | 'alert_update'
   | 'alert_remove'
   | 'alert_bulk'
+  | 'alert_zones'
   | 'md_new'
   | 'system_status'
   | 'connection_ack'

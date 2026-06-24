@@ -100,8 +100,12 @@ class MRMSRotationService:
             return
         self._running = True
         logger.info("MRMS rotation service starting")
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._poll_all_sync)
+        # Background the initial GRIB fetch so it doesn't block startup; the poll
+        # loop keeps the grids fresh and sampling returns None/0.0 until ready.
+        async def _initial_fetch():
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._poll_all_sync)
+        asyncio.create_task(_initial_fetch())
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:

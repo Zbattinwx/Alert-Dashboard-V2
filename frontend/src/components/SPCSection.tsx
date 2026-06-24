@@ -841,35 +841,16 @@ export const SPCSection: React.FC = () => {
                 {mesoscaleDiscussions.map((md) => (
                   <div
                     key={md.md_number}
-                    className={`spc-md-item ${selectedMD?.md_number === md.md_number ? 'selected' : ''}`}
-                    onClick={() => setSelectedMD(selectedMD?.md_number === md.md_number ? null : md)}
+                    className="spc-md-item"
+                    onClick={() => setSelectedMD(md)}
+                    style={{ cursor: 'pointer' }}
+                    title="Click to open the full discussion"
                   >
                     <div className="md-header">
                       <span className="md-number">MD #{md.md_number}</span>
                       <span className="md-states">{md.affected_states.join(', ')}</span>
                     </div>
                     <div className="md-title">{md.title}</div>
-                    {selectedMD?.md_number === md.md_number && (
-                      <div className="md-details">
-                        <img
-                          src={md.image_url}
-                          alt={`MD ${md.md_number}`}
-                          className="md-image"
-                          onError={(e) => {
-                            (e.target as HTMLImageElement).style.display = 'none';
-                          }}
-                        />
-                        <p className="md-description">{md.description}</p>
-                        <a
-                          href={md.link}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="md-link"
-                        >
-                          <i className="fas fa-external-link-alt"></i> View Full Discussion
-                        </a>
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
@@ -888,6 +869,47 @@ export const SPCSection: React.FC = () => {
           onCategoryChange={setMesoCategory}
           onLightbox={(url, label) => setMesoLightbox({ url, label })}
         />
+      )}
+
+      {/* Mesoscale Discussion modal — full-size image + readable text */}
+      {selectedMD && (
+        <div
+          style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}
+          onClick={() => setSelectedMD(null)}
+        >
+          <div
+            style={{ maxWidth: '1000px', width: '100%', maxHeight: '92vh', backgroundColor: 'var(--bg-primary)', borderRadius: '8px', overflow: 'hidden', boxShadow: '0 4px 32px rgba(0,0,0,0.6)', display: 'flex', flexDirection: 'column' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: '12px', flexWrap: 'wrap' }}>
+                <span style={{ fontWeight: 700, fontSize: '1rem' }}>Mesoscale Discussion #{selectedMD.md_number}</span>
+                {selectedMD.affected_states.length > 0 && (
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                    <i className="fas fa-location-dot"></i> {selectedMD.affected_states.join(', ')}
+                  </span>
+                )}
+              </div>
+              <button onClick={() => setSelectedMD(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '1.2rem' }}>
+                <i className="fas fa-times"></i>
+              </button>
+            </div>
+            <div style={{ padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <img
+                src={selectedMD.image_url}
+                alt={`MD ${selectedMD.md_number}`}
+                style={{ maxWidth: '100%', maxHeight: '60vh', objectFit: 'contain', alignSelf: 'center', borderRadius: '4px', backgroundColor: '#000' }}
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+              />
+              <p style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, fontSize: '0.9rem', color: 'var(--text-primary)', margin: 0 }}>
+                {selectedMD.description}
+              </p>
+              <a href={selectedMD.link} target="_blank" rel="noopener noreferrer" style={{ alignSelf: 'flex-start', fontSize: '0.85rem' }}>
+                <i className="fas fa-external-link-alt"></i> View full discussion on spc.noaa.gov
+              </a>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Mesoanalysis lightbox */}

@@ -91,16 +91,29 @@ def format_expiration_time(dt: Optional[datetime], office: str) -> str:
 
 
 def build_threat_summary(alert: Alert) -> str:
-    """Build a summary of threats from the alert."""
+    """Build a summary of threats / impact tags from the alert.
+
+    Mirrors the on-stream ticker's impact tags so the Google Chat card carries
+    the same information: tornado emergency, detection + damage tags,
+    thunderstorm/flood damage threats, and measured wind/hail/snow/ice.
+    """
     threats = []
     threat = alert.threat
 
-    # Tornado
-    if threat.tornado_detection:
+    # Tornado — emergency leads everything, else detection + damage threat
+    if threat.tornado_emergency:
+        threats.append("🚨 TORNADO EMERGENCY")
+    elif threat.tornado_detection:
         tornado_str = f"Tornado: {threat.tornado_detection}"
         if threat.tornado_damage_threat:
             tornado_str += f" ({threat.tornado_damage_threat})"
         threats.append(tornado_str)
+    elif threat.tornado_damage_threat:
+        threats.append(f"Tornado damage: {threat.tornado_damage_threat}")
+
+    # Thunderstorm damage threat (CONSIDERABLE / DESTRUCTIVE) — previously dropped
+    if threat.thunderstorm_damage_threat:
+        threats.append(f"Damage threat: {threat.thunderstorm_damage_threat}")
 
     # Wind
     if threat.max_wind_gust_mph:
@@ -108,6 +121,8 @@ def build_threat_summary(alert: Alert) -> str:
         if threat.wind_damage_threat:
             wind_str += f" ({threat.wind_damage_threat})"
         threats.append(wind_str)
+    elif threat.wind_damage_threat:
+        threats.append(f"Wind damage: {threat.wind_damage_threat}")
 
     # Hail
     if threat.max_hail_size_inches:
@@ -134,8 +149,34 @@ def build_threat_summary(alert: Alert) -> str:
         if threat.flash_flood_damage_threat:
             flood_str += f" ({threat.flash_flood_damage_threat})"
         threats.append(flood_str)
+    elif threat.flash_flood_damage_threat:
+        threats.append(f"Flood damage: {threat.flash_flood_damage_threat}")
 
     return ", ".join(threats) if threats else "N/A"
+
+
+def _deg_to_cardinal(deg: int) -> str:
+    """Convert a compass bearing (degrees) to a 16-point cardinal direction."""
+    dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    return dirs[round(deg / 22.5) % 16]
+
+
+def build_storm_motion_text(alert: Alert) -> Optional[str]:
+    """Human-readable storm motion, e.g. 'Moving NE at 45 mph'.
+
+    Returns None when the alert carries no usable motion vector (most watches
+    and many non-convective products).
+    """
+    motion = getattr(alert.threat, "storm_motion", None)
+    if not motion or not motion.is_valid:
+        return None
+    speed = motion.speed_mph
+    if motion.direction_degrees is not None:
+        return f"Moving {_deg_to_cardinal(motion.direction_degrees)} at {speed} mph"
+    if motion.direction_from:
+        return f"From the {motion.direction_from} at {speed} mph"
+    return f"{speed} mph"
 
 
 def get_alert_title(alert: Alert) -> str:
@@ -173,6 +214,34 @@ def build_google_chat_message(alert: Alert) -> dict:
     title = get_alert_title(alert)
     expires_text = format_expiration_time(alert.expiration_time, alert.sender_office)
     threat_summary = build_threat_summary(alert)
+    motion_text = build_storm_motion_text(alert)
+
+    # "Alert Details" widgets — built dynamically so storm motion only shows
+    # when the alert actually carries a motion vector.
+    detail_widgets = [
+        {
+            "decoratedText": {
+                "topLabel": "Expires",
+                "text": expires_text,
+                "startIcon": {"knownIcon": "CLOCK"},
+            }
+        },
+        {
+            "decoratedText": {
+                "topLabel": "Issuing Office",
+                "text": alert.sender_name or alert.sender_office,
+                "startIcon": {"knownIcon": "BOOKMARK"},
+            }
+        },
+    ]
+    if motion_text:
+        detail_widgets.append({
+            "decoratedText": {
+                "topLabel": "Storm Motion",
+                "text": motion_text,
+                "startIcon": {"knownIcon": "FLIGHT_DEPARTURE"},
+            }
+        })
 
     # Build the card message using cardsV2 format
     message = {
@@ -189,26 +258,7 @@ def build_google_chat_message(alert: Alert) -> dict:
                     {
                         "header": "Alert Details",
                         "collapsible": False,
-                        "widgets": [
-                            {
-                                "decoratedText": {
-                                    "topLabel": "Expires",
-                                    "text": expires_text,
-                                    "startIcon": {
-                                        "knownIcon": "CLOCK"
-                                    }
-                                }
-                            },
-                            {
-                                "decoratedText": {
-                                    "topLabel": "Issuing Office",
-                                    "text": alert.sender_name or alert.sender_office,
-                                    "startIcon": {
-                                        "knownIcon": "BOOKMARK"
-                                    }
-                                }
-                            }
-                        ]
+                        "widgets": detail_widgets,
                     },
                     {
                         "header": "Threats",
@@ -240,6 +290,87 @@ def build_google_chat_message(alert: Alert) -> dict:
     return message
 
 
+def should_send_to_chat(alert: Alert) -> bool:
+    """Decide whether an alert passes the Google Chat type filter.
+
+    Preference order:
+    1. User send-list configured in the dashboard (user_settings.json ->
+       ``google_chat_send_types``), an INCLUDE list of phenomenon+significance
+       keys like ``TO_W`` / ``SV_A``. This is what the Settings UI writes.
+    2. Legacy fallback: the .env ``GOOGLE_CHAT_PHENOMENA`` phenomenon-code list.
+    """
+    try:
+        from ..config.settings import _load_user_overrides
+    except ImportError:
+        from backend.config.settings import _load_user_overrides
+
+    overrides = _load_user_overrides()
+    send_types = overrides.get("google_chat_send_types")
+    if send_types is not None:
+        sig = alert.significance.value if hasattr(alert.significance, "value") else alert.significance
+        return f"{alert.phenomenon}_{sig}" in send_types
+
+    # No user override yet — fall back to the phenomenon-code list from .env.
+    return alert.phenomenon in get_settings().google_chat_phenomena
+
+
+# Alert types selectable in the dashboard's Google Chat filter. Keys are
+# phenomenon+significance (matching the ticker filter), so warnings and watches
+# can be toggled independently.
+GOOGLE_CHAT_ALERT_TYPES = [
+    {"key": "TO_W", "label": "Tornado Warning", "phenomenon": "TO"},
+    {"key": "TO_A", "label": "Tornado Watch", "phenomenon": "TO"},
+    {"key": "SV_W", "label": "Severe T-Storm Warning", "phenomenon": "SV"},
+    {"key": "SV_A", "label": "Severe T-Storm Watch", "phenomenon": "SV"},
+    {"key": "FF_W", "label": "Flash Flood Warning", "phenomenon": "FF"},
+    {"key": "FF_A", "label": "Flash Flood Watch", "phenomenon": "FF"},
+    {"key": "WS_W", "label": "Winter Storm Warning", "phenomenon": "WS"},
+    {"key": "WS_A", "label": "Winter Storm Watch", "phenomenon": "WS"},
+    {"key": "BZ_W", "label": "Blizzard Warning", "phenomenon": "BZ"},
+    {"key": "IS_W", "label": "Ice Storm Warning", "phenomenon": "IS"},
+    {"key": "SQ_W", "label": "Snow Squall Warning", "phenomenon": "SQ"},
+    {"key": "SPS_S", "label": "Special Weather Statement", "phenomenon": "SPS"},
+    {"key": "WW_Y", "label": "Winter Weather Advisory", "phenomenon": "WW"},
+    {"key": "HW_W", "label": "High Wind Warning", "phenomenon": "HW"},
+    {"key": "WI_Y", "label": "Wind Advisory", "phenomenon": "WI"},
+    {"key": "LE_W", "label": "Lake Effect Snow Warning", "phenomenon": "LE"},
+    {"key": "WC_W", "label": "Wind Chill Warning", "phenomenon": "WC"},
+    {"key": "EC_W", "label": "Extreme Cold Warning", "phenomenon": "EC"},
+    {"key": "EW_W", "label": "Extreme Wind Warning", "phenomenon": "EW"},
+]
+
+
+def get_google_chat_filter() -> dict:
+    """Return the selectable alert types with their current send-state.
+
+    ``send`` reflects the user's saved send-list, or — before any has been saved
+    — a default derived from the .env phenomenon list (so the UI opens matching
+    current behavior).
+    """
+    try:
+        from ..config.settings import _load_user_overrides
+    except ImportError:
+        from backend.config.settings import _load_user_overrides
+
+    overrides = _load_user_overrides()
+    send_types = overrides.get("google_chat_send_types")
+    using_override = send_types is not None
+
+    if using_override:
+        send_set = set(send_types)
+    else:
+        phenomena = set(get_settings().google_chat_phenomena)
+        send_set = {t["key"] for t in GOOGLE_CHAT_ALERT_TYPES if t["phenomenon"] in phenomena}
+
+    return {
+        "types": [
+            {"key": t["key"], "label": t["label"], "send": t["key"] in send_set}
+            for t in GOOGLE_CHAT_ALERT_TYPES
+        ],
+        "using_override": using_override,
+    }
+
+
 async def send_alert_to_google_chat(alert: Alert) -> bool:
     """
     Send an alert notification to Google Chat.
@@ -263,9 +394,9 @@ async def send_alert_to_google_chat(alert: Alert) -> bool:
         logger.warning("Google Chat webhook URL not configured")
         return False
 
-    # Check if this alert type should be sent
-    if alert.phenomenon not in settings.google_chat_phenomena:
-        logger.debug(f"Alert phenomenon {alert.phenomenon} not in Google Chat filter")
+    # Check if this alert type should be sent (user send-list or .env fallback)
+    if not should_send_to_chat(alert):
+        logger.debug(f"Alert {alert.phenomenon}/{alert.significance} not in Google Chat filter")
         return False
 
     # Build the message

@@ -467,6 +467,11 @@ class Alert:
 
     # Geography
     affected_areas: list[str] = field(default_factory=list)  # UGC codes
+    # UGC codes this product CANCELS/CLEARS (e.g. a Watch County Notification
+    # clearing some counties from a watch while continuing others). Transient:
+    # consumed by AlertManager.add_alert to subtract from the existing alert's
+    # affected_areas; intentionally NOT persisted in to_dict/from_dict.
+    cancelled_areas: list[str] = field(default_factory=list)
     fips_codes: list[str] = field(default_factory=list)      # 5-digit FIPS codes
     display_locations: str = ""                               # Human-readable location string
     polygon: list[list[float]] = field(default_factory=list) # [[lat, lon], ...] coordinates
@@ -550,6 +555,33 @@ class Alert:
     def is_high_priority(self) -> bool:
         """Check if this is a high priority alert (tornado/severe warning)."""
         return self.priority <= AlertPriority.FLASH_FLOOD_WARNING
+
+    @property
+    def is_tornado_emergency(self) -> bool:
+        """Tornado Emergency — the single most severe wording the NWS issues.
+
+        Single source of truth (services previously each re-derived this from
+        different fields): the structured threat flag / CATASTROPHIC damage tag,
+        or the literal declaration anywhere in the product text.
+        """
+        t = self.threat
+        if t and (getattr(t, "tornado_emergency", False) or
+                  (getattr(t, "tornado_damage_threat", None) or "").upper() == "CATASTROPHIC"):
+            return True
+        text = f"{self.description or ''}\n{self.raw_text or ''}".lower()
+        return "tornado emergency" in text
+
+    @property
+    def is_pds(self) -> bool:
+        """Particularly Dangerous Situation (a Tornado Emergency always qualifies).
+
+        Single source of truth for PDS detection — replaces the three divergent
+        raw-text scans that lived in the graphic/stats services.
+        """
+        if self.is_tornado_emergency:
+            return True
+        text = f"{self.description or ''}\n{self.raw_text or ''}".lower()
+        return "particularly dangerous" in text
 
     @property
     def time_remaining_seconds(self) -> Optional[int]:

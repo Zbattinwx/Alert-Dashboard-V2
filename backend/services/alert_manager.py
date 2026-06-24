@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 # This captures before/after state for debugging merge issues
 audit_logger = logging.getLogger("alert_audit")
 
+# Alerts with no parsed expiration_time are purged once older than this, as a
+# backstop against a missed cancellation leaving one active forever. Generous on
+# purpose — longer than any real watch/warning duration.
+NO_EXPIRY_MAX_AGE_HOURS = 24
+
 
 def setup_audit_logger():
     """Setup the audit logger with its own rotating file handler."""
@@ -52,6 +57,29 @@ def setup_audit_logger():
     audit_logger.addHandler(handler)
     audit_logger.setLevel(logging.INFO)
     audit_logger.propagate = False  # Don't also log to main log
+
+
+def _change_signature(a: Alert) -> tuple:
+    """A comparable snapshot of the fields a client renders, used to detect
+    whether a merge actually changed anything. The API poll re-adds every active
+    alert each interval; without this we re-broadcast and regenerate the
+    broadcast graphic (which can trigger a radar download) on every identical
+    re-poll. Err toward including fields — a missed field would suppress a real
+    update, an extra field only costs an occasional redundant broadcast."""
+    t = a.threat
+    return (
+        tuple(a.affected_areas or []),
+        a.expiration_time.isoformat() if a.expiration_time else None,
+        a.status.value if a.status else None,
+        a.vtec.action.value if a.vtec and a.vtec.action else None,
+        tuple(tuple(p) for p in (a.polygon or [])),
+        a.headline, a.description, a.instruction, a.display_locations,
+        t.tornado_detection, t.tornado_damage_threat,
+        t.max_wind_gust_mph, t.max_hail_size_inches,
+        t.snow_amount_min_inches, t.snow_amount_max_inches,
+        t.flash_flood_detection, t.flash_flood_damage_threat,
+        str(t.storm_motion),
+    )
 
 
 def _alert_summary(alert: Alert) -> dict:
@@ -103,6 +131,9 @@ class AlertManager:
         """
         self._alerts: dict[str, Alert] = {}
         self._recent_products: deque[dict] = deque(maxlen=max_recent_products)
+        # Per-product count of consecutive API polls an alert has been absent
+        # from the active feed (drives reconcile_api_alerts).
+        self._api_missing_counts: dict[str, int] = {}
         self._cleanup_interval = cleanup_interval
         self._persistence_path = persistence_path
         self._cleanup_task: Optional[asyncio.Task] = None
@@ -212,6 +243,33 @@ class AlertManager:
                     )
                     return False
 
+                # A watch cancellation often clears only SOME counties (a WFO's
+                # WCN cancelling its counties while the watch continues elsewhere
+                # under the same SPC ETN). Subtract the cleared counties and keep
+                # the watch alive; only fall through to full removal when none
+                # remain. Warnings are polygon-based, so they keep whole-alert
+                # cancellation behaviour.
+                if existing.significance == AlertSignificance.WATCH and alert.cancelled_areas:
+                    remaining = sorted(set(existing.affected_areas or []) - set(alert.cancelled_areas))
+                    if remaining:
+                        existing.affected_areas = remaining
+                        existing.display_locations = get_display_locations(remaining)
+                        if existing.vtec and alert.vtec:
+                            existing.vtec.action = alert.vtec.action
+                        existing.mark_updated()
+                        audit_logger.info(
+                            f"WATCH_PARTIAL_CANCEL | {alert.product_id} | "
+                            f"Cleared: {alert.cancelled_areas} | Remaining: {len(remaining)} | "
+                            f"Incoming: {json.dumps(_alert_summary(alert))}"
+                        )
+                        logger.info(
+                            f"Watch {alert.product_id}: cleared {len(alert.cancelled_areas)} "
+                            f"counties, {len(remaining)} remain"
+                        )
+                        self._notify_updated(existing)
+                        return True
+                    # else: no counties remain → fall through to full removal
+
                 # Audit log the cancellation (remove_alert will also log, but we want the incoming data)
                 audit_logger.info(
                     f"CANCEL | {alert.product_id} | "
@@ -229,8 +287,9 @@ class AlertManager:
             if alert.vtec:
                 logger.debug(f"Processing VTEC action {alert.vtec.action.value} for {alert.product_id}")
 
-            # Capture before state for audit
+            # Capture before state for audit + change detection
             existing_before = _alert_summary(existing)
+            sig_before = _change_signature(existing)
 
             # Update VTEC action on the existing alert (CON, EXT, etc.)
             # This ensures the stored alert reflects the latest action
@@ -282,13 +341,38 @@ class AlertManager:
                 if new_threat.storm_motion:
                     existing.threat.storm_motion = new_threat.storm_motion
 
-            # Merge affected_areas - NWS often issues multiple products for the same event
-            # covering different geographic areas (e.g., western half and eastern half)
-            areas_before = len(existing.affected_areas or [])
+            # Merge affected_areas.
+            areas_before_set = set(existing.affected_areas or [])
             if alert.affected_areas:
-                merged_areas = set(existing.affected_areas or [])
-                merged_areas.update(alert.affected_areas)
-                existing.affected_areas = sorted(list(merged_areas))
+                if alert.source == "api" and existing.source == "api":
+                    # The NWS API returns the COMPLETE current area set on every
+                    # poll, so replace — a shrinking watch then drops counties it
+                    # no longer covers. Gated to API-managed alerts so NWWS's
+                    # authoritative incremental state (which IS subset-per-product)
+                    # keeps the growing union below.
+                    existing.affected_areas = sorted(set(alert.affected_areas))
+                else:
+                    # NWWS issues multiple products per event covering different
+                    # areas (e.g. western/eastern halves) → accumulate the union.
+                    existing.affected_areas = sorted(areas_before_set | set(alert.affected_areas))
+
+            # A Watch County Notification can continue some counties while
+            # clearing others in the same product. Subtract any cleared counties
+            # from the watch (the union above only ever grows the set, so without
+            # this the cleared counties would stay filled until the whole watch
+            # expires). Gated to watches — warnings are polygon-based.
+            if alert.cancelled_areas and existing.significance == AlertSignificance.WATCH:
+                existing.affected_areas = sorted(set(existing.affected_areas or []) - set(alert.cancelled_areas))
+                if not existing.affected_areas:
+                    # Every county cleared → remove the whole watch.
+                    self._alerts.pop(alert.product_id, None)
+                    audit_logger.info(
+                        f"WATCH_FULLY_CLEARED | {alert.product_id} | "
+                        f"Incoming: {json.dumps(_alert_summary(alert))}"
+                    )
+                    logger.info(f"Watch {alert.product_id}: all counties cleared, removing")
+                    self._notify_removed(existing)
+                    return True
 
             # Merge issuing_offices for watches (watches share ETN across offices)
             if alert.significance == AlertSignificance.WATCH and alert.sender_office:
@@ -301,10 +385,11 @@ class AlertManager:
                     existing.sender_name = " | ".join(office_names)
                     logger.info(f"Merged watch from {alert.sender_office}: now {len(existing.issuing_offices)} offices")
 
-            # Regenerate display_locations if affected_areas changed
-            if len(existing.affected_areas or []) > areas_before:
+            # Regenerate display_locations whenever the area set actually changed
+            # (grew, shrank, or was replaced).
+            if set(existing.affected_areas or []) != areas_before_set:
                 existing.display_locations = get_display_locations(existing.affected_areas)
-                logger.debug(f"Merged affected_areas: {len(existing.affected_areas)} zones")
+                logger.debug(f"affected_areas changed: now {len(existing.affected_areas or [])} zones")
 
             # Update polygon if new alert has one
             # For storm-based warnings (CON products): REPLACE polygon because it represents
@@ -321,6 +406,14 @@ class AlertManager:
                     pass
                 else:
                     existing.polygon = alert.polygon
+
+            # Skip the re-broadcast + broadcast-graphic regeneration when nothing
+            # a client renders actually changed. The API poll re-adds every active
+            # alert every interval, so without this each warning re-broadcasts and
+            # may re-trigger a NEXRAD download on a fixed cadence for no reason.
+            if _change_signature(existing) == sig_before:
+                audit_logger.info(f"NOCHANGE | {alert.product_id} | re-add with no field change")
+                return True
 
             existing.mark_updated()
 
@@ -402,6 +495,35 @@ class AlertManager:
             self._notify_removed(alert)
             return True
         return False
+
+    def reconcile_api_alerts(self, active_ids: set, miss_threshold: int = 2) -> int:
+        """Remove API-sourced alerts that have dropped out of the NWS API active
+        feed — an out-of-band cancellation we never received as a CAN/EXP.
+
+        An alert must be absent for ``miss_threshold`` consecutive reconciliations
+        before removal, so a single transient/partial feed response doesn't wipe
+        active alerts. NWWS-sourced alerts are never reaped here — NWWS delivers
+        their cancellations directly, and the API lags it. Call this only with a
+        confirmed non-empty active feed.
+
+        Returns the number of alerts removed.
+        """
+        removed = 0
+        for alert in list(self._alerts.values()):
+            if alert.source != "api" or alert.product_id in active_ids:
+                self._api_missing_counts.pop(alert.product_id, None)
+                continue
+            misses = self._api_missing_counts.get(alert.product_id, 0) + 1
+            if misses >= miss_threshold:
+                self._api_missing_counts.pop(alert.product_id, None)
+                self.remove_alert(alert.product_id, reason="RECONCILED")
+                removed += 1
+            else:
+                self._api_missing_counts[alert.product_id] = misses
+        # Drop counters for alerts that are no longer present at all.
+        for pid in [p for p in self._api_missing_counts if p not in self._alerts]:
+            self._api_missing_counts.pop(pid, None)
+        return removed
 
     def get_alert(self, product_id: str) -> Optional[Alert]:
         """Get an alert by product_id."""
@@ -520,9 +642,17 @@ class AlertManager:
         now = datetime.now(timezone.utc)
         expired_ids = []
 
-        for product_id, alert in self._alerts.items():
+        for product_id, alert in list(self._alerts.items()):
             if alert.expiration_time and alert.expiration_time <= now:
                 expired_ids.append(product_id)
+            elif alert.expiration_time is None:
+                # Backstop: an alert with no parsed end time never trips the check
+                # above, so a missed cancellation would keep it forever. Purge it
+                # once it is older than a generous max age (longer than any real
+                # watch/warning) using the issue/parse time as the reference.
+                ref = alert.issued_time or alert.parsed_at
+                if ref and (now - ref) > timedelta(hours=NO_EXPIRY_MAX_AGE_HOURS):
+                    expired_ids.append(product_id)
 
         for product_id in expired_ids:
             alert = self._alerts.pop(product_id, None)
@@ -566,8 +696,12 @@ class AlertManager:
                 "alerts": [alert.to_dict() for alert in self._alerts.values()],
             }
 
-            with open(path, "w", encoding="utf-8") as f:
+            # Write atomically: a crash/kill mid-write must not truncate the live
+            # file (a truncated active_alerts.json fails to load → all alerts lost).
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+            tmp_path.replace(path)
 
             logger.info(f"Saved {len(self._alerts)} alerts to {path}")
 

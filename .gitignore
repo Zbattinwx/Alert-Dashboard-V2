@@ -73,3 +73,7 @@ NUL
 packaging/dist/
 packaging/build/
 packaging/*.spec
+packaging/_freeze.log
+
+# Windows server bundle output (build-windows.bat)
+dist-windows/

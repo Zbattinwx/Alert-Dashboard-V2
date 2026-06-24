@@ -47,6 +47,7 @@ class ZoneGeometryService:
         cache_ttl_hours: int = 24,
         persistence_path: Optional[Path] = None,
         nws_client: Optional[NWSAPIClient] = None,
+        max_entries: int = 4000,
     ):
         """
         Initialize the Zone Geometry Service.
@@ -55,11 +56,15 @@ class ZoneGeometryService:
             cache_ttl_hours: Hours to keep cached geometries valid
             persistence_path: Path to save/load cache (optional)
             nws_client: NWS API client instance (default: singleton)
+            max_entries: Hard cap on cached zone geometries — expired entries are
+                dropped first, then the oldest, so the cache can't grow without
+                bound across a national event (regional deploys never hit it).
         """
         self._cache: dict[str, dict[str, Any]] = {}
         self._cache_ttl = timedelta(hours=cache_ttl_hours)
         self._persistence_path = persistence_path
         self._nws_client = nws_client
+        self._max_entries = max_entries
         self._pending_fetches: dict[str, asyncio.Task] = {}
 
     def _get_client(self) -> NWSAPIClient:
@@ -101,10 +106,24 @@ class ZoneGeometryService:
                 "geometry": geometry,
                 "cached_at": datetime.now(timezone.utc).isoformat(),
             }
+            if len(self._cache) > self._max_entries:
+                self._evict()
         else:
             # Remove any existing cache entry for this zone if fetch failed
             self._cache.pop(zone_id, None)
             logger.debug(f"Not caching failed fetch for {zone_id}")
+
+    def _evict(self):
+        """Bound the cache: drop TTL-expired entries first, then the oldest by
+        cached_at until back under the cap. Cheap — only runs when over cap."""
+        for zone_id in [z for z in self._cache if not self._is_cache_valid(z)]:
+            self._cache.pop(zone_id, None)
+        overflow = len(self._cache) - self._max_entries
+        if overflow > 0:
+            oldest = sorted(self._cache.items(), key=lambda kv: kv[1].get("cached_at", ""))
+            for zone_id, _ in oldest[:overflow]:
+                self._cache.pop(zone_id, None)
+            logger.info(f"Zone geometry cache over cap — evicted {overflow} oldest entr(ies)")
 
     def clear_cache(self):
         """Clear all cached geometries."""

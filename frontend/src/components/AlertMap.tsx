@@ -16,9 +16,13 @@ import {
 import { parseRadarBinaryFrame } from '../utils/radarBinaryParser';
 import { RadarGLLayer } from './RadarGLLayer';
 import { apiUrl } from '../utils/api';
+// Bundled US state outlines — a root fetch of /us-states.json isn't served
+// behind the /v2 reverse proxy, so import it into the bundle instead.
+import usStatesGeoJSON from '../data/us-states.json';
 
-// Same dark base used by RadarSection.tsx
-const MAP_STYLE = 'https://tiles.stadiamaps.com/styles/alidade_smooth_dark.json';
+// Same dark base used by RadarSection.tsx — CARTO Dark Matter keyless vector
+// style (Stadia's free tier is localhost-only, so it didn't load in production).
+const MAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 
 const MIN_CELL_SCORE = 0; // show all cells when radar is on
 
@@ -246,16 +250,8 @@ export const AlertMap: React.FC<AlertMapProps> = ({
   const [radarEnabled, setRadarEnabled] = useState(false);
   const [radarProduct, setRadarProduct] = useState<RadarProduct>('reflectivity');
   const [radarFrameData, setRadarFrameData] = useState<RadarBinaryFrame | null>(radarFrame ?? null);
-  const [usStates, setUsStates] = useState<GeoJSON.FeatureCollection | null>(null);
+  const usStates = usStatesGeoJSON as unknown as GeoJSON.FeatureCollection;
   const [popup, setPopup] = useState<PopupTarget | null>(null);
-
-  // ── State outlines for context ─────────────────────────────────────────────
-  useEffect(() => {
-    fetch('/us-states.json')
-      .then(r => r.json())
-      .then(setUsStates)
-      .catch(err => console.error('Failed to load US states', err));
-  }, []);
 
   // ── Zone polling (live state of all active zone-based alerts) ──────────────
   const fetchZoneData = useCallback(async () => {

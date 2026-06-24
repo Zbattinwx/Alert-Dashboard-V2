@@ -959,8 +959,11 @@ class NexradService:
             logger.warning(f"Startup radar cleanup failed: {e}")
         self._last_purge_monotonic = time.monotonic()
 
-        # Initial fetch
-        await self._fetch_and_process()
+        # Initial fetch — backgrounded so it doesn't block FastAPI startup
+        # (a full volume download+decode is ~15-25 s). The poll loop sleeps one
+        # interval before its first fetch and a per-site flag prevents overlap,
+        # so the first frame still arrives shortly after the server is ready.
+        asyncio.create_task(self._fetch_and_process())
 
         # Start polling loop and watchdog
         self._poll_task = asyncio.create_task(self._poll_loop())

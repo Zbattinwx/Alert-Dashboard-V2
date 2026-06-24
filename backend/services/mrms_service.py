@@ -213,8 +213,13 @@ class MRMSService:
         self._running = True
         logger.info("MRMS service starting")
         self._sweep_orphan_temp_files()
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._fetch_sync)
+        # Background the initial GRIB fetch/decode so it doesn't block startup;
+        # the poll loop refreshes every 120 s and the cache serves the first
+        # composite as soon as this completes.
+        async def _initial_fetch():
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._fetch_sync)
+        asyncio.create_task(_initial_fetch())
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def stop(self):

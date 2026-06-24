@@ -4,6 +4,8 @@ import 'leaflet/dist/leaflet.css';
 import type { Alert } from '../types/alert';
 import type { RadarFrame } from '../types/radar';
 import { getAlertStyle } from '../types/alert';
+// Bundled US state outlines (root /us-states.json isn't served behind /v2).
+import usStatesGeoJSON from '../data/us-states.json';
 
 // ─── Contrast helper ─────────────────────────────────────────────────────────
 // Calculates readable text color (black or white) from any background hex.
@@ -310,14 +312,7 @@ interface Props {
 export const AlertMapGraphic = forwardRef<AlertMapGraphicHandle, Props>(
   ({ alert, radarFrame, onCapture }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
-    const [usStates, setUsStates] = useState<any>(null);
-
-    useEffect(() => {
-      fetch('/us-states.json')
-        .then(res => res.json())
-        .then(data => setUsStates(data))
-        .catch(() => {});
-    }, []);
+    const usStates = usStatesGeoJSON as any;
 
     // Tornado Emergency is the most severe warning the NWS issues — the header
     // turns crimson-magenta and leads with the words so the graphic is

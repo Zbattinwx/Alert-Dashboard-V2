@@ -26,17 +26,34 @@ class ImpactPanel {
     }
 
     connect() {
+        // Tear down any prior socket so its stale handlers can't fire or stack a
+        // reconnect, and guard against multiple in-flight reconnect timers.
+        if (this.ws) {
+            this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null;
+            try { this.ws.close(); } catch (e) {}
+            this.ws = null;
+        }
+        if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+
         const wsUrl = getWebSocketUrl();
         try {
             this.ws = new WebSocket(wsUrl);
             this.ws.onopen = () => console.log('[impact] WebSocket connected');
             this.ws.onmessage = (event) => this.handleMessage(event.data);
-            this.ws.onclose = () => setTimeout(() => this.connect(), this.config.reconnectDelay);
+            this.ws.onclose = () => this.scheduleReconnect();
             this.ws.onerror = (err) => console.error('[impact] WebSocket error:', err);
         } catch (err) {
             console.error('[impact] Failed to create WebSocket:', err);
-            setTimeout(() => this.connect(), this.config.reconnectDelay);
+            this.scheduleReconnect();
         }
+    }
+
+    scheduleReconnect() {
+        if (this._reconnectTimer) return;
+        this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null;
+            this.connect();
+        }, this.config.reconnectDelay);
     }
 
     handleMessage(data) {

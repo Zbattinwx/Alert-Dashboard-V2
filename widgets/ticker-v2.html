@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alert Ticker V2 - Weather Dashboard V2</title>
+    <link rel="stylesheet" href="ticker-v2.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+
+<body>
+
+    <div id="ticker-v2-wrapper">
+
+        <!-- TOP BAR: Alert info, colored by alert type -->
+        <div id="alert-bar" class="alert-bar hidden">
+            <span class="alert-bar-icon"><i class="fas fa-triangle-exclamation"></i></span>
+            <span id="alert-bar-title" class="alert-bar-title"></span>
+            <div id="alert-bar-impacts" class="alert-bar-impacts"></div>
+            <span class="alert-bar-expires">Expires: <span id="alert-bar-expires-time"></span></span>
+        </div>
+
+        <!-- BOTTOM BAR: Logo, locations, sponsor - always black -->
+        <div id="info-bar" class="info-bar">
+            <div class="info-bar-logo">
+                <img id="info-bar-logo-img" src="" alt="Logo">
+            </div>
+            <div id="info-bar-locations" class="info-bar-locations">
+                <span></span>
+            </div>
+            <div class="info-bar-sponsor empty">
+                <span class="sponsor-text"></span>
+                <img class="sponsor-logo" src="" alt="Sponsor Logo" style="display: none;">
+            </div>
+        </div>
+
+    </div>
+
+    <script src="widget-common.js"></script>
+    <script src="ticker-v2.js"></script>
+</body>
+
+</html>
+
+<!--
+Two-bar broadcast ticker (ported from the ONW dashboard's favored ticker-v2).
+
+URL Parameters:
+  - states:   comma-separated state codes to show (e.g. OH,KY,IN)
+  - exclude:  comma-separated phenomenon_significance to hide (e.g. TO_A,SV_A to hide watches)
+  - speed:    rotation speed in ms when locations fit without scrolling (default 10000)
+  - message:  custom "no active alerts" text
+  - sponsors: URL-encoded JSON array of {logo|logo_url|content|text} sponsor objects
+  - test=emergency: inject a synthetic Tornado Emergency to preview the takeover styling
+
+Examples:
+  ticker-v2.html
+  ticker-v2.html?states=OH,KY,IN&exclude=TO_A,SV_A
+  ticker-v2.html?test=emergency
+
+OBS browser source: 1920x100 recommended.
+-->

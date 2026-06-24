@@ -33,9 +33,10 @@ const MIN_SCORE_FOR_MAP = 20;
 const HISTORY_COUNT = 10;
 const ANIM_INTERVAL_MS = 500;
 
-// Stadia Alidade Smooth Dark — free for localhost / dev, gray-dark base.
-// Register at https://stadiamaps.com for a free API key before deploying.
-const MAP_STYLE = 'https://tiles.stadiamaps.com/styles/alidade_smooth_dark.json';
+// CARTO Dark Matter — keyless MapLibre vector style (no API key / signup, works
+// on any domain). Stadia's free tier only authorizes localhost, so the basemap
+// failed to load once deployed to a real domain.
+const MAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 
 interface SiteAnimState {
   history: RadarBinaryFrame[];

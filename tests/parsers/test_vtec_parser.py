@@ -121,13 +121,15 @@ class TestVTECParser:
         assert product_id == "TO.CLE.0001"
 
     def test_build_product_id_watch(self):
-        """Test building product ID for a watch (includes 'A' suffix)."""
+        """Watch product IDs use the 'A' suffix and OMIT the office — watches
+        share a single SPC ETN across all offices, so the office is dropped so
+        every office's product merges into one watch."""
         text = "/O.NEW.KWNS.TO.A.0150.250120T1800Z-250121T0000Z/"
         result = VTECParser.parse(text)
 
         product_id = VTECParser.build_product_id(result.vtec_info)
 
-        assert product_id == "TOA.WNS.0150"
+        assert product_id == "TOA.0150"
 
     def test_is_cancellation(self):
         """Test cancellation detection."""

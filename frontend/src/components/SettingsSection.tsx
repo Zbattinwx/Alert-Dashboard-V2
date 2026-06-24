@@ -113,6 +113,13 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
   const [tickerSaving, setTickerSaving] = useState(false);
   const [tickerMsg, setTickerMsg] = useState<string | null>(null);
 
+  // ── Google Chat filter state ──────────────────────────────────────────
+  const [gchatTypes, setGchatTypes] = useState<{ key: string; label: string }[]>([]);
+  const [gchatSend, setGchatSend] = useState<Set<string>>(new Set());
+  const [savedGchatSend, setSavedGchatSend] = useState<Set<string>>(new Set());
+  const [gchatSaving, setGchatSaving] = useState(false);
+  const [gchatMsg, setGchatMsg] = useState<string | null>(null);
+
   // ── Sound settings state ──────────────────────────────────────────────
   const SOUND_EVENT_TYPES: { key: SoundEventType; label: string; description: string; defaultVolume: number }[] = [
     { key: 'tornado_warning', label: 'Tornado Warning', description: 'New Tornado Warning issued', defaultVolume: 0.8 },
@@ -257,6 +264,12 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
     return false;
   })();
 
+  const gchatHasChanges = (() => {
+    if (gchatSend.size !== savedGchatSend.size) return true;
+    for (const k of gchatSend) if (!savedGchatSend.has(k)) return true;
+    return false;
+  })();
+
   // ── Fetchers ──────────────────────────────────────────────────────────
   const fetchPhenomena = useCallback(async () => {
     setPhenomenaLoading(true);
@@ -347,13 +360,28 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
     } catch { /* ignore */ }
   }, []);
 
+  const fetchGchatSettings = useCallback(async () => {
+    try {
+      const res = await fetch(apiUrl('/api/settings/google-chat'));
+      if (res.ok) {
+        const data = await res.json();
+        const types = (data.types || []) as { key: string; label: string; send: boolean }[];
+        setGchatTypes(types.map(t => ({ key: t.key, label: t.label })));
+        const sendSet = new Set<string>(types.filter(t => t.send).map(t => t.key));
+        setGchatSend(sendSet);
+        setSavedGchatSend(sendSet);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
   useEffect(() => {
     fetchPhenomena();
     fetchStates();
     fetchCounties();
     fetchGeneral();
     fetchTickerSettings();
-  }, [fetchPhenomena, fetchStates, fetchCounties, fetchGeneral, fetchTickerSettings]);
+    fetchGchatSettings();
+  }, [fetchPhenomena, fetchStates, fetchCounties, fetchGeneral, fetchTickerSettings, fetchGchatSettings]);
 
   // ── Phenomena handlers ────────────────────────────────────────────────
   const togglePhenomenon = (code: string) => {
@@ -650,6 +678,44 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
   const handleTickerCancel = () => {
     setTickerExcluded(new Set(savedTickerExcluded));
     setTickerMsg(null);
+  };
+
+  // ── Google Chat handlers ──────────────────────────────────────────────
+  const toggleGchatType = (key: string) => {
+    setGchatSend(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+    setGchatMsg(null);
+  };
+
+  const handleGchatSave = async () => {
+    setGchatSaving(true);
+    setGchatMsg(null);
+    try {
+      const res = await fetch(apiUrl('/api/settings/google-chat'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ send_types: Array.from(gchatSend) }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const types = (data.types || []) as { key: string; label: string; send: boolean }[];
+      const sendSet = new Set<string>(types.filter(t => t.send).map(t => t.key));
+      setGchatSend(sendSet);
+      setSavedGchatSend(sendSet);
+      setGchatMsg(data.message || 'Saved!');
+    } catch (err) {
+      setGchatMsg(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setGchatSaving(false);
+    }
+  };
+
+  const handleGchatCancel = () => {
+    setGchatSend(new Set(savedGchatSend));
+    setGchatMsg(null);
   };
 
   // ── Toggle component ──────────────────────────────────────────────────
@@ -1133,6 +1199,57 @@ export const SettingsSection: React.FC<SettingsSectionProps> = ({
             <button className="settings-cancel-btn" onClick={handleTickerCancel} disabled={tickerSaving}>Cancel</button>
             <button className="settings-save-btn" onClick={handleTickerSave} disabled={tickerSaving}>
               {tickerSaving ? 'Saving...' : 'Save Ticker Filter'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Google Chat Alerts ──────────────────────────────────────── */}
+      <div className="settings-section" style={{ marginBottom: '24px' }}>
+        <h3 className="settings-subtitle">Google Chat Alerts</h3>
+        <p className="settings-description">
+          Choose which alert types are sent to Google Chat. Enabled types are pushed
+          to the Chat space when a new warning is issued. Applies immediately on save.
+        </p>
+
+        {gchatMsg && (
+          <div className="settings-message settings-success" style={{ marginTop: '8px' }}>
+            <i className="fas fa-check-circle"></i> {gchatMsg}
+          </div>
+        )}
+
+        <div className="settings-category-card" style={{ marginTop: '12px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '6px' }}>
+            {gchatTypes.map(type => {
+              const phenomenon = type.key.split('_')[0];
+              const isSending = gchatSend.has(type.key);
+              const style = getAlertStyle(phenomenon);
+              const alertColor = ALERT_COLORS[phenomenon];
+              return (
+                <button
+                  key={type.key}
+                  onClick={() => toggleGchatType(type.key)}
+                  className={`settings-toggle-btn ${isSending ? 'enabled' : ''}`}
+                  style={isSending && alertColor ? {
+                    borderLeftColor: alertColor.backgroundColor,
+                    backgroundColor: `${alertColor.backgroundColor}20`,
+                    color: 'var(--text-primary)',
+                  } : { opacity: 0.4 }}
+                  title={isSending ? 'Sent to Google Chat (click to stop)' : 'Not sent (click to send)'}
+                >
+                  <span className="settings-toggle-swatch" style={{ backgroundColor: style.backgroundColor }}></span>
+                  <span className="settings-toggle-name" style={{ fontSize: '0.78rem' }}>{type.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {gchatHasChanges && (
+          <div style={{ marginTop: '12px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+            <button className="settings-cancel-btn" onClick={handleGchatCancel} disabled={gchatSaving}>Cancel</button>
+            <button className="settings-save-btn" onClick={handleGchatSave} disabled={gchatSaving}>
+              {gchatSaving ? 'Saving...' : 'Save Google Chat Filter'}
             </button>
           </div>
         )}

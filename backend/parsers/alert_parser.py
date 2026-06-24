@@ -499,6 +499,23 @@ class AlertParser:
                 if not alert.expiration_time and ugc_data.expiration_time:
                     alert.expiration_time = ugc_data.expiration_time
 
+            # Multi-segment products (e.g. a WCN that continues some watch
+            # counties while clearing others) union every county via the
+            # whole-product UGC parse above. Re-classify per $$-segment so the
+            # cleared counties are tracked separately and don't get merged in.
+            if alert.vtec and ugc_data.is_valid:
+                active_ugc, cancelled_ugc = cls._compute_segment_areas(
+                    raw_text, alert.vtec.event_tracking_number
+                )
+                if cancelled_ugc:
+                    alert.cancelled_areas = sorted(cancelled_ugc)
+                    # When some counties continue, the active set is just those
+                    # (drop the cleared ones). For a pure cancellation (no active
+                    # segment) leave affected_areas as-is — the alert is CANCELLED
+                    # and add_alert subtracts cancelled_areas from the existing one.
+                    if active_ugc:
+                        alert.affected_areas = sorted(active_ugc)
+
             # Generate consistent ID for SPS if no VTEC
             if not alert.vtec and alert.phenomenon == "SPS":
                 if alert.issued_time and alert.affected_areas:
@@ -583,6 +600,13 @@ class AlertParser:
             alert.affected_areas = cls._filter_to_target_counties(alert.affected_areas)
             if alert.affected_areas and len(alert.affected_areas) < len(original_areas):
                 alert.display_locations = ugc_get_display_locations(alert.affected_areas)
+
+            # Keep cancelled_areas filtered the same way so add_alert only ever
+            # subtracts target-area counties from the stored watch.
+            if alert.cancelled_areas:
+                alert.cancelled_areas = cls._filter_to_target_counties(
+                    cls._filter_to_target_states(alert.cancelled_areas)
+                )
 
             if not alert.affected_areas:
                 # Expected: alert touches the target state but none of the target
@@ -783,6 +807,49 @@ class AlertParser:
             description = body_match.group(1).strip()
 
         return description, instruction
+
+    @classmethod
+    def _split_product_segments(cls, raw_text: str) -> list[str]:
+        """Split a multi-segment NWS product into its $$-delimited segments.
+
+        A product with no $$ marker returns a single-element list (the whole
+        text), so single-segment warnings are handled uniformly. Each segment
+        carries its own UGC block + VTEC line at the top.
+        """
+        return re.split(r"\n\s*\$\$", raw_text)
+
+    @classmethod
+    def _compute_segment_areas(cls, raw_text: str, etn: Optional[int]) -> tuple[set, set]:
+        """Classify each segment's UGC codes as active vs cancelled for one event.
+
+        NWS Watch County Notifications (and some SVS products) continue an event
+        for some counties (CON/EXT/NEW) while cancelling it for others
+        (CAN/EXP/UPG), each in its own $$-delimited segment. ``UGCParser.parse``
+        over the whole product unions *every* county including the cancelled
+        ones, so we re-classify per segment here.
+
+        Returns ``(active_ugc, cancelled_ugc)`` where ``cancelled_ugc`` excludes
+        any county that is continued in another segment.
+        """
+        active: set[str] = set()
+        cancelled: set[str] = set()
+        for seg in cls._split_product_segments(raw_text):
+            vtec_data = VTECParser.parse(seg)
+            if not vtec_data.is_valid or not vtec_data.vtec_info:
+                continue
+            vinfo = vtec_data.vtec_info
+            # Only this event's segments (a product is normally one event, but
+            # guard against an unrelated VTEC line slipping in).
+            if etn is not None and vinfo.event_tracking_number != etn:
+                continue
+            ugc = set(UGCParser.parse(seg).ugc_codes)
+            if not ugc:
+                continue
+            if VTECParser.is_cancellation(vinfo):
+                cancelled |= ugc
+            else:
+                active |= ugc
+        return active, (cancelled - active)
 
     @classmethod
     def _parse_text_expiration(

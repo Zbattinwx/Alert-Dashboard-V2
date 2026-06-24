@@ -157,9 +157,14 @@ const Dashboard: React.FC = () => {
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return;
+        // Brand-driven browser tab title (follows the active brand, e.g. ONW).
+        document.title = `${data.name} - Alert Dashboard`;
         setBrand({
           name: data.name,
-          logo: data.logo_url || data.logo,
+          // logo_url is a root-absolute path ("/api/brand/logo"); route it
+          // through apiUrl so it gets the base prefix (e.g. "/v2/api/brand/logo")
+          // when served behind a reverse proxy, instead of hitting the host root.
+          logo: data.logo_url ? apiUrl(data.logo_url) : data.logo,
           website_url: data.website_url,
         });
         if (data.css_overrides) {

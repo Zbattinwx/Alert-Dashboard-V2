@@ -5,6 +5,7 @@ Uses Pydantic for validation and environment variable loading.
 
 import json
 import logging
+import os
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -427,6 +428,49 @@ def _save_user_overrides(overrides: dict) -> None:
         json.dump(overrides, f, indent=2)
 
 
+# --- User-supplied NWWS-OI credentials -------------------------------------
+# These are entered by the END USER in the radar app (we deliberately don't ship
+# a .env with our own credentials). They must persist in a USER-WRITABLE location
+# that survives restarts and app updates — the install dir (Program Files) is not
+# writable, so we use the per-user app-data dir, not beside the exe.
+def _nwws_creds_file() -> Path:
+    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or str(Path.home())
+    return Path(base) / "TheBattinFrontRadar" / "nwws_credentials.json"
+
+
+def load_nwws_credentials() -> Optional[dict]:
+    """Return {'username','password'} from the user creds file, or None."""
+    f = _nwws_creds_file()
+    if f.exists():
+        try:
+            with open(f, "r") as fh:
+                d = json.load(fh)
+            if d.get("username") and d.get("password"):
+                return {"username": d["username"], "password": d["password"]}
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load NWWS credentials: {e}")
+    return None
+
+
+def save_nwws_credentials(username: str, password: str) -> None:
+    """Persist (or, with blank values, clear) the user's NWWS-OI credentials."""
+    f = _nwws_creds_file()
+    if not username or not password:
+        try:
+            f.unlink(missing_ok=True)  # clear → fall back to NWS API
+        except OSError as e:
+            logger.warning(f"Failed to clear NWWS credentials: {e}")
+        return
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "w") as fh:
+        json.dump({"username": username, "password": password}, fh, indent=2)
+    # Best-effort: keep the file readable only by the owner.
+    try:
+        os.chmod(f, 0o600)
+    except OSError:
+        pass
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance, with user overrides applied."""
@@ -466,6 +510,14 @@ def get_settings() -> Settings:
         if field in overrides:
             setattr(settings, field, overrides[field])
             logger.info(f"Applied user override: {field} = {overrides[field]}")
+    # User-supplied NWWS-OI credentials override any .env/env values (in a
+    # distributed build there is no .env, so this is the only source). Never log
+    # the values.
+    creds = load_nwws_credentials()
+    if creds:
+        settings.nwws_username = creds["username"]
+        settings.nwws_password = creds["password"]
+        logger.info("Applied user-supplied NWWS credentials")
     return settings
 
 

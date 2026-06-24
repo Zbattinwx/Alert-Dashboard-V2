@@ -238,8 +238,17 @@ class SponsoredAlertTicker {
     }
 
     connect() {
-        const wsUrl = getWebSocketUrl();
+        // Tear down any prior socket first so its stale handlers can't fire or
+        // schedule their own reconnect — otherwise a flapping connection stacks
+        // orphaned sockets, each scheduling another reconnect (a slow storm).
+        if (this.ws) {
+            this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null;
+            try { this.ws.close(); } catch (e) {}
+            this.ws = null;
+        }
+        if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
 
+        const wsUrl = getWebSocketUrl();
         console.log('Connecting to WebSocket:', wsUrl);
 
         try {
@@ -259,9 +268,7 @@ class SponsoredAlertTicker {
                 console.log('WebSocket disconnected');
                 this.connected = false;
                 this.updateConnectionStatus(false);
-
-                // Attempt to reconnect
-                setTimeout(() => this.connect(), this.config.reconnectDelay);
+                this.scheduleReconnect();
             };
 
             this.ws.onerror = (error) => {
@@ -269,8 +276,17 @@ class SponsoredAlertTicker {
             };
         } catch (error) {
             console.error('Failed to create WebSocket:', error);
-            setTimeout(() => this.connect(), this.config.reconnectDelay);
+            this.scheduleReconnect();
         }
+    }
+
+    scheduleReconnect() {
+        // Guard against multiple in-flight reconnect timers.
+        if (this._reconnectTimer) return;
+        this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null;
+            this.connect();
+        }, this.config.reconnectDelay);
     }
 
     handleMessage(data) {
@@ -364,11 +380,19 @@ class SponsoredAlertTicker {
     }
 
     handleAlertExpired(alertData) {
-        const alertId = alertData.id || alertData.alert_id;
-        console.log('Alert expired:', alertId);
+        // The backend's alert_remove payload identifies the alert by product_id
+        // (not id/alert_id), so match on product_id first — mirroring
+        // handleAlertUpdate. The old id/alert_id-only lookup never matched, so
+        // expired/cancelled alerts never dropped off the ticker.
+        const alertId = alertData.product_id || alertData.id || alertData.alert_id;
+        console.log('Alert expired/removed:', alertId, alertData.reason || '');
 
         // Remove from alerts list
-        const index = this.alerts.findIndex(a => a.id === alertId || a.alert_id === alertId);
+        const index = this.alerts.findIndex(a =>
+            (a.product_id && a.product_id === alertId) ||
+            (a.id && a.id === alertId) ||
+            (a.alert_id && a.alert_id === alertId)
+        );
         if (index !== -1) {
             this.alerts.splice(index, 1);
 
@@ -580,68 +604,11 @@ class SponsoredAlertTicker {
         // V2 API uses 'phenomenon' (singular), fallback to 'phenomena' for compatibility
         const phenomena = alert.phenomenon || alert.phenomena || alert.event_code || '';
 
-        const typeInfo = {
-            'TO': { shortName: 'TOR', name: 'Tornado Warning' },
-            'TOR': { shortName: 'TOR', name: 'Tornado Warning' },
-            'TOA': { shortName: 'TOA', name: 'Tornado Watch' },
-            'SV': { shortName: 'SVR', name: 'Severe Thunderstorm Warning' },
-            'SVR': { shortName: 'SVR', name: 'Severe Thunderstorm Warning' },
-            'SVS': { shortName: 'SVS', name: 'Severe Weather Statement' },
-            'SVA': { shortName: 'SVA', name: 'Severe Thunderstorm Watch' },
-            'FF': { shortName: 'FFW', name: 'Flash Flood Warning' },
-            'FFW': { shortName: 'FFW', name: 'Flash Flood Warning' },
-            'FFS': { shortName: 'FFS', name: 'Flash Flood Statement' },
-            'FFA': { shortName: 'FFA', name: 'Flash Flood Watch' },
-            'FL': { shortName: 'FLW', name: 'Flood Warning' },
-            'FLW': { shortName: 'FLW', name: 'Flood Warning' },
-            'FLS': { shortName: 'FLS', name: 'Flood Statement' },
-            'FLA': { shortName: 'FLA', name: 'Flood Watch' },
-            'WS': { shortName: 'WSW', name: 'Winter Storm Warning' },
-            'WSW': { shortName: 'WSW', name: 'Winter Storm Warning' },
-            'WSA': { shortName: 'WSA', name: 'Winter Storm Watch' },
-            'BZ': { shortName: 'BZW', name: 'Blizzard Warning' },
-            'BZW': { shortName: 'BZW', name: 'Blizzard Warning' },
-            'IS': { shortName: 'ISW', name: 'Ice Storm Warning' },
-            'ISW': { shortName: 'ISW', name: 'Ice Storm Warning' },
-            'LE': { shortName: 'LEW', name: 'Lake Effect Snow Warning' },
-            'LEW': { shortName: 'LEW', name: 'Lake Effect Snow Warning' },
-            'WW': { shortName: 'WWA', name: 'Winter Weather Advisory' },
-            'WWA': { shortName: 'WWA', name: 'Winter Weather Advisory' },
-            'WC': { shortName: 'WCW', name: 'Wind Chill Warning' },
-            'WCW': { shortName: 'WCW', name: 'Wind Chill Warning' },
-            'CW': { shortName: 'CWA', name: 'Cold Weather Advisory' },
-            'HW': { shortName: 'HWW', name: 'High Wind Warning' },
-            'HWW': { shortName: 'HWW', name: 'High Wind Warning' },
-            'WI': { shortName: 'WIA', name: 'Wind Advisory' },
-            'EW': { shortName: 'EWW', name: 'Extreme Wind Warning' },
-            'SPS': { shortName: 'SPS', name: 'Special Weather Statement' },
-            'SQ': { shortName: 'SQW', name: 'Snow Squall Warning' },
-            'SQW': { shortName: 'SQW', name: 'Snow Squall Warning' },
-            'EH': { shortName: 'EHW', name: 'Excessive Heat Warning' },
-            'EHA': { shortName: 'EHA', name: 'Excessive Heat Watch' },
-            'HT': { shortName: 'HTA', name: 'Heat Advisory' },
-            'FW': { shortName: 'RFW', name: 'Red Flag Warning' },
-            'FWA': { shortName: 'FWA', name: 'Fire Weather Watch' },
-            'FG': { shortName: 'FGA', name: 'Dense Fog Advisory' },
-            'SM': { shortName: 'SMA', name: 'Dense Smoke Advisory' },
-            'ZF': { shortName: 'ZFA', name: 'Freezing Fog Advisory' },
-            'DS': { shortName: 'DSW', name: 'Dust Storm Warning' },
-            'FZ': { shortName: 'FZW', name: 'Freeze Warning' },
-            'FZA': { shortName: 'FZA', name: 'Freeze Watch' },
-            'FR': { shortName: 'FRA', name: 'Frost Advisory' },
-            'HZ': { shortName: 'HZW', name: 'Hard Freeze Warning' },
-            'EC': { shortName: 'ECW', name: 'Extreme Cold Warning' },
-            'ZR': { shortName: 'ZRA', name: 'Freezing Rain Advisory' },
-            'AS': { shortName: 'ASA', name: 'Air Stagnation Advisory' },
-            'TR': { shortName: 'TRW', name: 'Tropical Storm Warning' },
-            'HU': { shortName: 'HUW', name: 'Hurricane Warning' },
-            'SS': { shortName: 'SSW', name: 'Storm Surge Warning' },
-            'CF': { shortName: 'CFW', name: 'Coastal Flood Warning' },
-            'SU': { shortName: 'SUW', name: 'High Surf Warning' },
-            'TS': { shortName: 'TSW', name: 'Tsunami Warning' }
-        };
-
-        const info = typeInfo[phenomena] || { shortName: 'WX', name: 'Weather Alert' };
+        // Use the shared ALERT_TYPE_INFO map (widget-common.js) — same names /
+        // shortNames, but a module const instead of a 60-entry object rebuilt on
+        // every displayAlert call.
+        const map = (typeof ALERT_TYPE_INFO !== 'undefined') ? ALERT_TYPE_INFO : {};
+        const info = map[phenomena] || map['default'] || { shortName: 'WX', name: 'Weather Alert' };
 
         return {
             shortName: info.shortName,

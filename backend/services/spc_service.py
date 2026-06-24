@@ -667,22 +667,23 @@ class SPCService:
     ]
 
     def _extract_states(self, text: str) -> list[str]:
-        """Extract state abbreviations from text, matching both codes and full names."""
-        found_states = set()
-        text_upper = text.upper()
+        """Extract affected US states from MD text by full state/region name.
+
+        We deliberately do NOT scan for 2-letter abbreviations. SPC MD prose is
+        full of tokens that collide with state codes — ``MD`` (the product
+        abbreviation), ``IN``/``OR`` (the words *in*/*or*), ``NE``/``SW`` (compass
+        directions) — which produced bogus states like Indiana, Maryland and
+        Oregon. MD text always names affected states in full, so name matching is
+        both reliable and precise. Word boundaries also stop "arkansas" from
+        matching "kansas". MDs with no matched state are still shown
+        (see ``filter_mds_by_states``).
+        """
         text_lower = text.lower()
-
-        # Match 2-letter state abbreviations
-        for state in self.STATE_CODES:
-            if re.search(rf'\b{state}\b', text_upper):
-                found_states.add(state)
-
-        # Match full state names and region names
+        found_states = set()
         for name, code in self.STATE_NAME_TO_CODE.items():
-            if name in text_lower:
+            if re.search(rf'\b{re.escape(name)}\b', text_lower):
                 found_states.add(code)
-
-        return list(found_states)
+        return sorted(found_states)
 
     def filter_mds_by_states(
         self,

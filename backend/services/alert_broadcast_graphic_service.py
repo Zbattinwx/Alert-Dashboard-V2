@@ -440,15 +440,10 @@ def _render_left_panel(alert, radar_frame, brand_name: str,
     _sig_raw = getattr(alert, "significance", "W")
     significance = getattr(_sig_raw, "value", str(_sig_raw))
 
-    description_text = (getattr(alert, "description", "") or "") + "\n" + (getattr(alert, "raw_text", "") or "")
-    _threat = getattr(alert, "threat", None)
-    # Tornado Emergency outranks a PDS — prefer the structured flag, fall back
-    # to the literal declaration in the product text.
-    is_emergency = (
-        bool(getattr(_threat, "tornado_emergency", False)) or
-        "tornado emergency" in description_text.lower()
-    )
-    is_pds = is_emergency or "particularly dangerous" in description_text.lower()
+    # Tornado Emergency outranks a PDS — both come from the canonical Alert
+    # properties (single source of truth).
+    is_emergency = alert.is_tornado_emergency
+    is_pds = alert.is_pds
 
     # Top accent stripe — wider for PDS
     stripe_h = 8 if not is_pds else 0
@@ -1751,17 +1746,10 @@ def generate_tornado_confirmed_graphic(
     description = (getattr(alert, "description", "") or "")
 
     # Tornado Emergency is the single most severe wording the NWS issues and
-    # must always read louder than a PDS. Prefer the structured flag; fall back
-    # to the literal declaration in the product text for raw/legacy sources.
-    is_emergency = (
-        bool(getattr(threat, "tornado_emergency", False)) or
-        "tornado emergency" in description.lower()
-    )
-    is_pds = (
-        is_emergency or
-        dmg_threat == "CATASTROPHIC" or
-        "particularly dangerous" in description.lower()
-    )
+    # must always read louder than a PDS. Both come from the canonical Alert
+    # properties (single source of truth).
+    is_emergency = alert.is_tornado_emergency
+    is_pds = alert.is_pds
     is_considerable = dmg_threat == "CONSIDERABLE"
 
     state_code = ""

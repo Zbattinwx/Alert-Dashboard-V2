@@ -23,6 +23,7 @@ from .nwws_client import (
     get_nwws_handler,
     start_nwws_handler,
     stop_nwws_handler,
+    restart_nwws_handler,
 )
 from .zone_geometry_service import (
     ZoneGeometryService,
@@ -183,6 +184,7 @@ __all__ = [
     "get_nwws_handler",
     "start_nwws_handler",
     "stop_nwws_handler",
+    "restart_nwws_handler",
     # Zone Geometry
     "ZoneGeometryService",
     "get_zone_geometry_service",
