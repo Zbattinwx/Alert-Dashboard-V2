@@ -266,6 +266,12 @@ class NWSAPIClient:
             except Exception as e:
                 logger.error(f"Failed to parse API alert: {e}")
 
+        # Collapse multi-WFO watches (several features sharing one product_id)
+        # into a single alert with the union of counties BEFORE the merge layer
+        # sees them — otherwise AlertManager's api-replace path keeps only the
+        # last office's subset and the watch renders with missing counties.
+        alerts = self._coalesce_by_product_id(alerts)
+
         # Filter by state if specified
         if states:
             states_upper = {s.upper() for s in states}
@@ -281,6 +287,63 @@ class NWSAPIClient:
 
         logger.info(f"Parsed {len(alerts)} alerts from NWS API")
         return alerts
+
+    @staticmethod
+    def _coalesce_by_product_id(alerts: list[Alert]) -> list[Alert]:
+        """Collapse API features that share one VTEC product_id into a single
+        alert carrying the UNION of their areas.
+
+        The NWS API returns a multi-WFO watch (e.g. a Severe Thunderstorm Watch
+        spanning KDVN + KLOT) as several features — one per office — each listing
+        only that office's counties, but all sharing the same product_id
+        (e.g. ``SVA.0387``). AlertManager's api-source merge *replaces* the area
+        set on each add (the API is assumed to return the complete set per
+        product), so without merging the features first the watch ends up with
+        only the last office's subset of counties. Unioning here makes that
+        "complete set per product_id" assumption true, and because each poll
+        rebuilds from the current features, a shrinking watch still drops cleared
+        counties correctly.
+        """
+        from ..services.ugc_service import get_display_locations
+
+        merged: dict[str, Alert] = {}
+        order: list[str] = []
+        was_merged: set[str] = set()   # product_ids that actually absorbed >1 feature
+        passthrough: list[Alert] = []  # alerts with no product_id to group on
+        for alert in alerts:
+            pid = alert.product_id
+            if not pid:
+                passthrough.append(alert)
+                continue
+            primary = merged.get(pid)
+            if primary is None:
+                merged[pid] = alert
+                order.append(pid)
+                continue
+            was_merged.add(pid)
+            # Union the area-bearing fields into the primary alert.
+            primary.affected_areas = sorted(set(primary.affected_areas) | set(alert.affected_areas))
+            primary.fips_codes = sorted(set(primary.fips_codes) | set(alert.fips_codes))
+            if alert.expiration_time and (
+                not primary.expiration_time or alert.expiration_time > primary.expiration_time
+            ):
+                primary.expiration_time = alert.expiration_time
+            if not primary.polygon and alert.polygon:
+                primary.polygon = alert.polygon
+            if primary.centroid is None and alert.centroid is not None:
+                primary.centroid = alert.centroid
+
+        # Only for alerts we actually merged, refresh the human-readable location
+        # string from the full union (leave single-feature alerts' display string,
+        # which may come from the CAP areaDesc rather than UGC, untouched).
+        result: list[Alert] = []
+        for pid in order:
+            a = merged[pid]
+            if pid in was_merged and a.affected_areas:
+                a.display_locations = get_display_locations(a.affected_areas)
+            result.append(a)
+        result.extend(passthrough)
+        return result
 
 
 # Singleton instance
