@@ -163,20 +163,20 @@ def _deg_to_cardinal(deg: int) -> str:
 
 
 def build_storm_motion_text(alert: Alert) -> Optional[str]:
-    """Human-readable storm motion, e.g. 'Moving NE at 45 mph'.
+    """Human-readable storm motion, e.g. 'Moving SE at 30 mph'.
 
-    Returns None when the alert carries no usable motion vector (most watches
-    and many non-convective products).
+    NWS encodes motion as the meteorological bearing the storm is moving FROM
+    (the MOT field, and "moving to the N" stored as 180). ``direction_degrees``
+    holds that FROM bearing, so we reverse it (+180) to report the direction the
+    storm is actually heading TOWARD. Returns None when the alert carries no
+    usable motion vector (most watches and non-convective products).
     """
     motion = getattr(alert.threat, "storm_motion", None)
     if not motion or not motion.is_valid:
         return None
-    speed = motion.speed_mph
-    if motion.direction_degrees is not None:
-        return f"Moving {_deg_to_cardinal(motion.direction_degrees)} at {speed} mph"
-    if motion.direction_from:
-        return f"From the {motion.direction_from} at {speed} mph"
-    return f"{speed} mph"
+    # is_valid guarantees direction_degrees and speed_mph are populated.
+    toward = (motion.direction_degrees + 180) % 360
+    return f"Moving {_deg_to_cardinal(toward)} at {motion.speed_mph} mph"
 
 
 def get_alert_title(alert: Alert) -> str:

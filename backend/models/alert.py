@@ -284,8 +284,8 @@ PHENOMENON_PRIORITIES = {
 @dataclass
 class StormMotion:
     """Storm motion data extracted from alert."""
-    direction_degrees: Optional[int] = None  # 0-360, direction storm is moving TO
-    direction_from: Optional[str] = None     # Cardinal direction (FROM, e.g., "SW")
+    direction_degrees: Optional[int] = None  # 0-360, meteorological bearing the storm moves FROM (NWS MOT convention); add 180 for the heading it moves TOWARD
+    direction_from: Optional[str] = None     # Cardinal direction the storm comes FROM (e.g., "SW")
     speed_mph: Optional[int] = None          # Speed in MPH
     speed_kts: Optional[int] = None          # Speed in knots
 
