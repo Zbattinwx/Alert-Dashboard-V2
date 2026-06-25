@@ -76,17 +76,22 @@ def get_timezone_for_office(office_code: str) -> ZoneInfo:
     return ZoneInfo(tz_name)
 
 
-def format_expiration_time(dt: Optional[datetime], office: str) -> str:
-    """Format expiration time in the local timezone of the issuing office."""
+def format_local_time(dt: Optional[datetime], office: str) -> str:
+    """Format a datetime in the issuing office's local zone, e.g. '8:00 PM CDT'.
+
+    The 12-hour clock is built manually rather than via strftime('%-I') — the
+    no-leading-zero directive is Linux-only and RAISES on Windows, where the
+    frozen build runs. That exception is what previously dropped the card back
+    to showing a raw UTC time.
+    """
     if not dt:
         return "Unknown"
-
     try:
-        tz = get_timezone_for_office(office)
-        local_time = dt.astimezone(tz)
-        return local_time.strftime("%-I:%M %p %Z")
+        local_time = dt.astimezone(get_timezone_for_office(office))
+        hour = local_time.hour % 12 or 12
+        return f"{hour}:{local_time.minute:02d} {local_time.strftime('%p %Z')}"
     except Exception:
-        # Fallback to UTC
+        # Last-resort fallback (should not happen for tz-aware datetimes)
         return dt.strftime("%H:%M UTC")
 
 
@@ -212,28 +217,37 @@ def get_alert_title(alert: Alert) -> str:
 def build_google_chat_message(alert: Alert) -> dict:
     """Build a Google Chat card message for an alert."""
     title = get_alert_title(alert)
-    expires_text = format_expiration_time(alert.expiration_time, alert.sender_office)
+    office = alert.sender_office
+    issued_dt = alert.issued_time or alert.effective_time
     threat_summary = build_threat_summary(alert)
     motion_text = build_storm_motion_text(alert)
 
-    # "Alert Details" widgets — built dynamically so storm motion only shows
-    # when the alert actually carries a motion vector.
-    detail_widgets = [
-        {
+    # "Alert Details" widgets — built dynamically so the Issued row and storm
+    # motion only appear when present. Times use the issuing office's local zone
+    # (CDT/EDT/...), not UTC.
+    detail_widgets = []
+    if issued_dt:
+        detail_widgets.append({
             "decoratedText": {
-                "topLabel": "Expires",
-                "text": expires_text,
-                "startIcon": {"knownIcon": "CLOCK"},
+                "topLabel": "Issued",
+                "text": format_local_time(issued_dt, office),
+                "startIcon": {"knownIcon": "INVITE"},
             }
-        },
-        {
-            "decoratedText": {
-                "topLabel": "Issuing Office",
-                "text": alert.sender_name or alert.sender_office,
-                "startIcon": {"knownIcon": "BOOKMARK"},
-            }
-        },
-    ]
+        })
+    detail_widgets.append({
+        "decoratedText": {
+            "topLabel": "Expires",
+            "text": format_local_time(alert.expiration_time, office),
+            "startIcon": {"knownIcon": "CLOCK"},
+        }
+    })
+    detail_widgets.append({
+        "decoratedText": {
+            "topLabel": "Issuing Office",
+            "text": alert.sender_name or alert.sender_office,
+            "startIcon": {"knownIcon": "BOOKMARK"},
+        }
+    })
     if motion_text:
         detail_widgets.append({
             "decoratedText": {
