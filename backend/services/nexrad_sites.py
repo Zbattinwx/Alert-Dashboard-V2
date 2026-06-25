@@ -193,7 +193,7 @@ NEXRAD_SITES = {
     # Pennsylvania
     "KCCX": {"name": "State College, PA", "lat": 40.9231, "lon": -78.0036, "state": "PA"},
     "KDIX": {"name": "Philadelphia, PA", "lat": 39.9469, "lon": -74.4108, "state": "PA"},
-    "KPBZ": {"name": "Pittsburgh, PA", "lat": 40.5317, "lon": -80.0183, "state": "PA"},
+    "KPBZ": {"name": "Pittsburgh, PA", "lat": 40.5317, "lon": -80.2179, "state": "PA"},
 
     # Puerto Rico
     "TJUA": {"name": "San Juan, PR", "lat": 18.1156, "lon": -66.0781, "state": "PR"},
