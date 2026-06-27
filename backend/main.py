@@ -1554,31 +1554,46 @@ async def set_nwws_credentials(update: NWWSCredentialsUpdate):
     }
 
 
-@app.get("/api/brand")
-async def get_brand():
-    """Get active brand configuration for the frontend + radar app (white-label)."""
+def _resolve_brand_id(brand: Optional[str]) -> str:
+    """Resolve a requested white-label brand id, falling back to the active one
+    if none/invalid. Lets a stream overlay switch branding via ?brand=<id>."""
     settings = get_settings()
-    brand = get_brand_config(settings.brand)
+    if brand:
+        cand = brand.strip().lower()
+        if (brands_dir() / f"{cand}.json").exists():
+            return cand
+    return settings.brand
+
+
+@app.get("/api/brand")
+async def get_brand(brand: Optional[str] = Query(None, description="White-label brand override; defaults to the active brand")):
+    """Get brand configuration for the frontend + radar app (white-label).
+
+    Optional ?brand=<id> serves a specific brand (when a config exists) so a
+    stream overlay can switch branding by URL; otherwise the active brand.
+    """
+    brand_id = _resolve_brand_id(brand)
+    bcfg = get_brand_config(brand_id)
     return {
-        "name": brand.name,
-        "short_name": brand.short_name,
-        "tagline": brand.tagline,
-        "logo": brand.logo,
-        "logo_url": "/api/brand/logo",  # the radar app loads the active brand logo here
-        "logo_is_wordmark": brand.logo_is_wordmark,
-        "colors": brand.colors.model_dump(),  # semantic palette; clients map to their own CSS vars
-        "website_url": brand.website_url,
-        "social_twitter": brand.social_twitter,
-        "css_overrides": brand.css_overrides,
+        "brand_id": brand_id,
+        "name": bcfg.name,
+        "short_name": bcfg.short_name,
+        "tagline": bcfg.tagline,
+        "logo": bcfg.logo,
+        "logo_url": f"/api/brand/logo?brand={brand_id}",  # matches the returned brand
+        "logo_is_wordmark": bcfg.logo_is_wordmark,
+        "colors": bcfg.colors.model_dump(),  # semantic palette; clients map to their own CSS vars
+        "website_url": bcfg.website_url,
+        "social_twitter": bcfg.social_twitter,
+        "css_overrides": bcfg.css_overrides,
     }
 
 
 @app.get("/api/brand/logo")
-async def get_brand_logo():
-    """Serve the active brand's logo (white-label), with default/TBF fallback."""
-    settings = get_settings()
-    brand = get_brand_config(settings.brand)
-    path = brand.get_asset_path(brand.logo, brands_dir())
+async def get_brand_logo(brand: Optional[str] = Query(None, description="White-label brand override; defaults to the active brand")):
+    """Serve a brand's logo (white-label), with default/TBF fallback."""
+    bcfg = get_brand_config(_resolve_brand_id(brand))
+    path = bcfg.get_asset_path(bcfg.logo, brands_dir())
     if path.exists():
         return FileResponse(path)
     fallback = FRONTEND_DIR / "tbf_logo.png"
@@ -3659,6 +3674,32 @@ async def get_mrms_binary():
         content=svc.latest_binary,
         media_type="application/octet-stream",
         headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/goes/meso")
+async def goes_meso(sat: str = "east", sector: str = "1", band: str = "ir"):
+    """Meta for a GOES mesoscale sector frame: latest time + lat/lon bbox [w,s,e,n]."""
+    from .services.goes_meso_service import get_goes_meso_service
+    ent = await get_goes_meso_service().get(sat, sector, band)
+    if not ent:
+        raise HTTPException(status_code=503, detail="GOES meso not available")
+    return {"time": ent["time"], "bbox": ent["bbox"]}
+
+
+@app.get("/api/goes/meso/image")
+async def goes_meso_image(sat: str = "east", sector: str = "1", band: str = "ir", t: str = ""):
+    """Reprojected GOES mesoscale sector PNG (web-mercator) for a MapLibre image source.
+    `t` only cache-busts when the frame advances; the latest cached frame is served."""
+    from fastapi.responses import Response as FastResponse
+    from .services.goes_meso_service import get_goes_meso_service
+    ent = await get_goes_meso_service().get(sat, sector, band)
+    if not ent:
+        raise HTTPException(status_code=503, detail="GOES meso not available")
+    return FastResponse(
+        content=ent["png"],
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=60"},
     )
 
 
