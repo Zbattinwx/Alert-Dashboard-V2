@@ -38,6 +38,11 @@ ROOT_WIN="$(pwd -W 2>/dev/null || pwd)"
   --collect-all cmweather \
   --collect-all open_radar_data \
   --collect-all xarray \
+  --collect-all h5netcdf \
+  --collect-all h5py \
+  --collect-all boto3 \
+  --collect-all botocore \
+  --collect-all PIL \
   --collect-all eccodes \
   --collect-all findlibs \
   --collect-submodules backend \
