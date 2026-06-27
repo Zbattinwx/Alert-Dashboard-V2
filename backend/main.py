@@ -3679,7 +3679,7 @@ async def get_mrms_binary():
 
 @app.get("/api/goes/meso")
 async def goes_meso(sat: str = "east", sector: str = "1", band: str = "ir"):
-    """Meta for a GOES mesoscale sector frame: latest time + lat/lon bbox [w,s,e,n]."""
+    """Meta for the latest GOES mesoscale sector frame: time + lat/lon bbox [w,s,e,n]."""
     from .services.goes_meso_service import get_goes_meso_service
     ent = await get_goes_meso_service().get(sat, sector, band)
     if not ent:
@@ -3687,19 +3687,34 @@ async def goes_meso(sat: str = "east", sector: str = "1", band: str = "ir"):
     return {"time": ent["time"], "bbox": ent["bbox"]}
 
 
+@app.get("/api/goes/meso/frames")
+async def goes_meso_frames(sat: str = "east", sector: str = "1", band: str = "ir", n: int = 8):
+    """The last `n` GOES mesoscale frames [{time, bbox}], oldest→newest — for looping.
+    The sector floats, so each frame carries its own bbox."""
+    from .services.goes_meso_service import get_goes_meso_service
+    frames = await get_goes_meso_service().get_frames(sat, sector, band, n)
+    if not frames:
+        raise HTTPException(status_code=503, detail="GOES meso not available")
+    return {"frames": frames}
+
+
 @app.get("/api/goes/meso/image")
 async def goes_meso_image(sat: str = "east", sector: str = "1", band: str = "ir", t: str = ""):
-    """Reprojected GOES mesoscale sector PNG (web-mercator) for a MapLibre image source.
-    `t` only cache-busts when the frame advances; the latest cached frame is served."""
+    """Reprojected GOES mesoscale PNG for a MapLibre image source. `t` selects the
+    frame time (from /frames); empty serves the latest."""
     from fastapi.responses import Response as FastResponse
     from .services.goes_meso_service import get_goes_meso_service
-    ent = await get_goes_meso_service().get(sat, sector, band)
-    if not ent:
+    svc = get_goes_meso_service()
+    png = await svc.get_image(sat, sector, band, t) if t else None
+    if png is None:
+        ent = await svc.get(sat, sector, band)
+        png = ent["png"] if ent else None
+    if png is None:
         raise HTTPException(status_code=503, detail="GOES meso not available")
     return FastResponse(
-        content=ent["png"],
+        content=png,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=60"},
+        headers={"Cache-Control": "public, max-age=120"},
     )
 
 
