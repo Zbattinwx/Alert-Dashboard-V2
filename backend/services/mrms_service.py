@@ -21,7 +21,7 @@ import io
 import logging
 import os
 import tempfile
-from collections import deque
+from collections import deque, OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
@@ -39,6 +39,39 @@ MRMS_BUCKET  = "noaa-mrms-pds"
 MRMS_PRODUCT = "CONUS/MergedReflectivityQCComposite_00.50"
 MRMS_VMIN    = -20.0
 MRMS_VMAX    =  80.0
+
+# ── Product registry (id → S3 folder + display range/transform) ───────────────
+# All MRMS CONUS products share the same 0.01° grid + S3 layout, so adding a
+# product is just an entry here. `scale` maps the raw GRIB value to the display
+# unit (mm→in 0.0393701, km→kft 3.28084, else 1.0); `vmin/vmax` are in DISPLAY
+# units (they drive the app legend); `nodata_below` packs display values under it
+# as transparent — which also drops the −999/−3 MRMS sentinels (and, for the
+# rotation products, anticyclonic/weak values so only real rotation shows).
+# Reflectivity stays on the dedicated continuously-polled path below; everything
+# else is fetched on demand. Verified ranges/units against live S3 (2026-06-28).
+MRMS_PRODUCTS: dict[str, dict] = {
+    "reflectivity": {"s3": "CONUS/MergedReflectivityQCComposite_00.50", "vmin": -20.0, "vmax": 80.0, "scale": 1.0, "nodata_below": -15.0, "units": "dBZ"},
+    "qpe_1h":   {"s3": "CONUS/MultiSensor_QPE_01H_Pass2_00.00", "vmin": 0.0, "vmax": 4.0,  "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    "qpe_3h":   {"s3": "CONUS/MultiSensor_QPE_03H_Pass2_00.00", "vmin": 0.0, "vmax": 6.0,  "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    "qpe_6h":   {"s3": "CONUS/MultiSensor_QPE_06H_Pass2_00.00", "vmin": 0.0, "vmax": 8.0,  "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    "qpe_12h":  {"s3": "CONUS/MultiSensor_QPE_12H_Pass2_00.00", "vmin": 0.0, "vmax": 10.0, "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    "qpe_24h":  {"s3": "CONUS/MultiSensor_QPE_24H_Pass2_00.00", "vmin": 0.0, "vmax": 15.0, "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    "precip_rate": {"s3": "CONUS/PrecipRate_00.00", "vmin": 0.0, "vmax": 6.0, "scale": 0.0393701, "nodata_below": 0.01, "units": "in/hr"},
+    "mesh":     {"s3": "CONUS/MESH_00.50",            "vmin": 0.0, "vmax": 4.0, "scale": 0.0393701, "nodata_below": 0.05, "units": "in"},
+    "mesh_30":  {"s3": "CONUS/MESH_Max_30min_00.50",  "vmin": 0.0, "vmax": 4.0, "scale": 0.0393701, "nodata_below": 0.05, "units": "in"},
+    "mesh_60":  {"s3": "CONUS/MESH_Max_60min_00.50",  "vmin": 0.0, "vmax": 4.0, "scale": 0.0393701, "nodata_below": 0.05, "units": "in"},
+    "mesh_120": {"s3": "CONUS/MESH_Max_120min_00.50", "vmin": 0.0, "vmax": 4.0, "scale": 0.0393701, "nodata_below": 0.05, "units": "in"},
+    "mesh_240": {"s3": "CONUS/MESH_Max_240min_00.50", "vmin": 0.0, "vmax": 4.0, "scale": 0.0393701, "nodata_below": 0.05, "units": "in"},
+    "posh":     {"s3": "CONUS/POSH_00.50", "vmin": 0.0, "vmax": 100.0, "scale": 1.0, "nodata_below": 1.0, "units": "%"},
+    "azshear_low": {"s3": "CONUS/MergedAzShear_0-2kmAGL_00.50", "vmin": 0.0, "vmax": 20.0, "scale": 1.0, "nodata_below": 1.0, "units": "×10⁻³ s⁻¹"},
+    "azshear_mid": {"s3": "CONUS/MergedAzShear_3-6kmAGL_00.50", "vmin": 0.0, "vmax": 15.0, "scale": 1.0, "nodata_below": 1.0, "units": "×10⁻³ s⁻¹"},
+    "rot_30":   {"s3": "CONUS/RotationTrack30min_00.50",  "vmin": 0.0, "vmax": 30.0, "scale": 1.0, "nodata_below": 1.0, "units": "×10⁻³ s⁻¹"},
+    "rot_60":   {"s3": "CONUS/RotationTrack60min_00.50",  "vmin": 0.0, "vmax": 30.0, "scale": 1.0, "nodata_below": 1.0, "units": "×10⁻³ s⁻¹"},
+    "rot_120":  {"s3": "CONUS/RotationTrack120min_00.50", "vmin": 0.0, "vmax": 30.0, "scale": 1.0, "nodata_below": 1.0, "units": "×10⁻³ s⁻¹"},
+    "rot_240":  {"s3": "CONUS/RotationTrack240min_00.50", "vmin": 0.0, "vmax": 30.0, "scale": 1.0, "nodata_below": 1.0, "units": "×10⁻³ s⁻¹"},
+    "vil":      {"s3": "CONUS/VIL_00.50",      "vmin": 0.0, "vmax": 70.0, "scale": 1.0,     "nodata_below": 0.1, "units": "kg/m²"},
+    "echotop_18": {"s3": "CONUS/EchoTop_18_00.50", "vmin": 0.0, "vmax": 60.0, "scale": 3.28084, "nodata_below": 0.5, "units": "kft"},
+}
 
 # ── Dependency check ──────────────────────────────────────────────────────────
 
@@ -92,6 +125,9 @@ class MRMSService:
         self._latest_iso:    Optional[str]   = None
         # Rolling 60-min history: deque of (ts_str, iso_str, binary_bytes)
         self._history: deque = deque(maxlen=30)
+        # On-demand per-product cache (everything except the polled reflectivity):
+        #   pid → {ts, binary, fetched_at, frames: OrderedDict[ts → binary]}
+        self._pcache: dict[str, dict] = {}
         self._running = False
         self._poll_task: Optional[asyncio.Task] = None
 
@@ -403,36 +439,140 @@ class MRMSService:
           [48:52] float32 vmax
           [52:]   uint8[] gate values row-major; 0=no-data, 1-255=normalised
         """
+        return self._pack_grid(data, MRMS_VMIN, MRMS_VMAX, 1.0, -15.0)
+
+    def _pack_grid(self, data: np.ndarray, vmin: float, vmax: float,
+                   scale: float = 1.0, nodata_below: float = -15.0) -> bytes:
+        """Generalized packer (any product): 2× subsample, transform to display
+        units via `scale`, normalize to uint8 over [vmin, vmax], 0 = no-data."""
         import struct
 
-        # 2× subsample; keep row 0 = northernmost (La1=54.995°N)
-        sub = data[::2, ::2]
+        # Subsample to ~3500 columns regardless of native resolution — most
+        # products are 0.01° (7000 wide → step 2), but az-shear / rotation are
+        # 0.005° (14000 wide → step 4); normalizing keeps every payload ~6 MB.
+        step = max(1, round(data.shape[1] / 3500))
+        sub = data[::step, ::step] * float(scale)  # subsample + raw → display units
         nj2, ni2 = sub.shape
+        grid_north, grid_south, grid_west, grid_east = 54.995, 20.005, -129.995, -60.005
 
-        # Compute the correct lat/lon bounds AFTER subsampling
-        grid_north = 54.995
-        grid_south = 20.005
-        grid_west  = -129.995
-        grid_east  = -60.005
-
-        # Normalise to uint8 (same sentinel-0 convention as NEXRAD)
-        vmin, vmax = float(MRMS_VMIN), float(MRMS_VMAX)
-        span = vmax - vmin
-        norm = np.clip((sub - vmin) / span, 0.0, 1.0)
+        span = (float(vmax) - float(vmin)) or 1.0
+        norm = np.clip((sub - float(vmin)) / span, 0.0, 1.0)
         gate = (norm * 255.0).astype(np.uint8)
-        # Sentinel: missing values (-999 or NaN) → 0
-        gate[~np.isfinite(sub) | (sub < -15.0)] = 0
-        # Bump valid values that round to 0 up to 1
-        valid = np.isfinite(sub) & (sub >= -15.0)
-        gate[valid & (gate == 0)] = 1
+        invalid = ~np.isfinite(sub) | (sub < float(nodata_below))  # NaN + −999/−3 sentinels
+        gate[invalid] = 0
+        gate[~invalid & (gate == 0)] = 1  # bump valid-but-rounds-to-0 up to 1
 
         header = (
             self.BINARY_MAGIC
             + struct.pack("<II", ni2, nj2)
             + struct.pack("<dddd", grid_north, grid_south, grid_west, grid_east)
-            + struct.pack("<ff", vmin, vmax)
+            + struct.pack("<ff", float(vmin), float(vmax))
         )
         return header + gate.tobytes()
+
+    # ── On-demand multi-product access (everything except polled reflectivity) ──
+    @staticmethod
+    def _ts_of(key: str) -> str:
+        return key.split("/")[-1].rsplit("_", 1)[-1].replace(".grib2.gz", "")
+
+    @staticmethod
+    def _iso_of(ts: str) -> str:
+        try:
+            return datetime.strptime(ts, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            return ts
+
+    def _list_keys(self, s3_prefix: str, lookback_min: int = 180, max_keys: int = 300) -> list[str]:
+        """Recent .grib2.gz keys for a product (today, falling back to yesterday)."""
+        s3 = self._get_s3()
+        short = s3_prefix.split("/")[-1]
+        now = datetime.now(timezone.utc)
+        for day_back in (0, 1):
+            d = now - timedelta(days=day_back)
+            prefix = f"{s3_prefix}/{d.strftime('%Y%m%d')}/"
+            kwargs = {"Bucket": MRMS_BUCKET, "Prefix": prefix, "MaxKeys": max_keys}
+            if day_back == 0:
+                cutoff = (now - timedelta(minutes=lookback_min)).strftime("%Y%m%d-%H%M%S")
+                kwargs["StartAfter"] = f"{prefix}MRMS_{short}_{cutoff}"
+            resp = s3.list_objects_v2(**kwargs)
+            keys = sorted(o["Key"] for o in resp.get("Contents", []) if o["Key"].endswith(".grib2.gz"))
+            if keys:
+                return keys
+        return []
+
+    def _fetch_pack(self, spec: dict, key: str) -> Optional[bytes]:
+        raw = gzip.decompress(self._get_s3().get_object(Bucket=MRMS_BUCKET, Key=key)["Body"].read())
+        data = self._parse_grib2(raw)
+        if data is None:
+            return None
+        return self._pack_grid(data, spec["vmin"], spec["vmax"], spec.get("scale", 1.0), spec.get("nodata_below", -15.0))
+
+    def _pc(self, pid: str) -> dict:
+        return self._pcache.setdefault(pid, {"ts": None, "binary": None, "fetched_at": 0.0, "frames": OrderedDict()})
+
+    def get_product_binary(self, pid: str) -> Optional[bytes]:
+        """Latest packed binary for a product (cached ~60 s, fetched on demand)."""
+        import time
+        spec = MRMS_PRODUCTS.get(pid)
+        if not spec or not _check_eccodes():
+            return None
+        pc = self._pc(pid)
+        if pc["binary"] is not None and time.time() - pc["fetched_at"] < 60:
+            return pc["binary"]
+        try:
+            keys = self._list_keys(spec["s3"], lookback_min=180, max_keys=50)
+            if not keys:
+                return pc["binary"]
+            key = keys[-1]
+            ts = self._ts_of(key)
+            if ts == pc["ts"]:
+                pc["fetched_at"] = time.time()
+                return pc["binary"]
+            binary = self._fetch_pack(spec, key)
+            if binary is None:
+                return pc["binary"]
+            pc.update(ts=ts, binary=binary, fetched_at=time.time())
+            pc["frames"][ts] = binary
+            while len(pc["frames"]) > 40:
+                pc["frames"].popitem(last=False)
+            return binary
+        except Exception as e:
+            logger.warning("MRMS %s latest failed: %s", pid, e)
+            return pc["binary"]
+
+    def get_product_frames(self, pid: str, n: int = 30) -> list[dict]:
+        """Recent frame timestamps for a product (for looping), oldest→newest."""
+        spec = MRMS_PRODUCTS.get(pid)
+        if not spec:
+            return []
+        try:
+            keys = self._list_keys(spec["s3"], lookback_min=240, max_keys=300)[-max(1, n):]
+            return [{"ts": self._ts_of(k), "iso": self._iso_of(self._ts_of(k))} for k in keys]
+        except Exception as e:
+            logger.warning("MRMS %s frames failed: %s", pid, e)
+            return []
+
+    def get_product_frame(self, pid: str, ts: str) -> Optional[bytes]:
+        """Packed binary for one product frame timestamp (cached on demand)."""
+        spec = MRMS_PRODUCTS.get(pid)
+        if not spec or not _check_eccodes():
+            return None
+        pc = self._pc(pid)
+        if ts in pc["frames"]:
+            pc["frames"].move_to_end(ts)
+            return pc["frames"][ts]
+        try:
+            short = spec["s3"].split("/")[-1]
+            key = f"{spec['s3']}/{ts.split('-')[0]}/MRMS_{short}_{ts}.grib2.gz"
+            binary = self._fetch_pack(spec, key)
+            if binary is not None:
+                pc["frames"][ts] = binary
+                while len(pc["frames"]) > 40:
+                    pc["frames"].popitem(last=False)
+            return binary
+        except Exception as e:
+            logger.warning("MRMS %s frame %s failed: %s", pid, ts, e)
+            return None
 
     def _render_png(self, data: np.ndarray) -> Optional[bytes]:
         """

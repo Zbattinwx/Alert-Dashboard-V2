@@ -23,11 +23,21 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-METAR_URL = (
-    "https://aviationweather.gov/api/data/metar"
-    "?format=json&bbox=23,-126,50,-66"
-)
+METAR_BASE = "https://aviationweather.gov/api/data/metar?format=json"
+# aviationweather.gov caps a METAR query at ~400 stations, so the national bbox
+# is sparse (most stations missing). Use it ONLY for the synoptic H/L + fronts
+# analysis (gridded/smoothed — sparse is fine); the station PLOTS + card fetch a
+# site-centered bbox instead, which returns the full dense local set.
+NATIONAL_BBOX = (23.0, -126.0, 50.0, -66.0)  # S, W, N, E
+DEFAULT_RADIUS_KM = 400.0
 CACHE_TTL = 300  # 5 min
+
+
+def _bbox_for(lat: float, lon: float, radius_km: float) -> tuple[float, float, float, float]:
+    """S, W, N, E box of ~radius_km around (lat, lon)."""
+    dlat = radius_km / 111.0
+    dlon = radius_km / (111.0 * max(0.2, math.cos(math.radians(lat))))
+    return (lat - dlat, lon - dlon, lat + dlat, lon + dlon)
 
 # Analysis grid (regular lat/lon over CONUS).
 G_W, G_E, G_S, G_N = -125.0, -66.5, 23.5, 50.0
@@ -39,56 +49,77 @@ MESH_X, MESH_Y = np.meshgrid(GX, GY)
 
 class SurfaceObsService:
     def __init__(self) -> None:
-        self._obs: list[dict] = []
-        self._obs_ts = 0.0
+        self._cache: dict[str, tuple[list[dict], float]] = {}  # bbox key → (obs, ts)
         self._analysis: Optional[dict] = None
         self._analysis_ts = 0.0
 
     # ── Fetch ───────────────────────────────────────────────────────────────
-    def _fetch(self) -> list[dict]:
+    def _fetch_bbox(self, s: float, w: float, n: float, e: float) -> list[dict]:
         import requests  # bundled (used elsewhere)
-        r = requests.get(METAR_URL, timeout=20, headers={"User-Agent": "TBF-Radar"})
+        url = f"{METAR_BASE}&bbox={s:.2f},{w:.2f},{n:.2f},{e:.2f}"
+        r = requests.get(url, timeout=20, headers={"User-Agent": "TBF-Radar"})
         r.raise_for_status()
-        rows = r.json()
         out = []
-        for o in rows:
+        for o in r.json():
             lat, lon = o.get("lat"), o.get("lon")
-            t, alt = o.get("temp"), o.get("altim")
-            if lat is None or lon is None or t is None:
+            if lat is None or lon is None:
                 continue
+            t = o.get("temp")
             out.append({
                 "id": o.get("icaoId", ""),
                 "name": o.get("name", ""),
                 "lat": float(lat),
                 "lon": float(lon),
-                "tempC": float(t),
+                "tempC": None if t is None else float(t),
                 "dewpC": None if o.get("dewp") is None else float(o["dewp"]),
                 "wdir": None if not isinstance(o.get("wdir"), (int, float)) else float(o["wdir"]),
                 "wspd": None if o.get("wspd") is None else float(o["wspd"]),  # kt
                 "gust": None if o.get("wgst") is None else float(o["wgst"]),
-                "altim": None if alt is None else float(alt),  # hPa (sea-level)
+                "altim": None if o.get("altim") is None else float(o["altim"]),  # hPa (sea-level)
                 "elev": None if o.get("elev") is None else float(o["elev"]),  # m
-                "obsTime": o.get("obsTime"),
+                "visib": o.get("visib"),          # statute miles (number, or "10+")
+                "clouds": o.get("clouds") or [],  # [{cover, base(ft)}] — for ceiling
+                "wx": o.get("wxString"),          # present weather (e.g. "-RA BR")
+                "fltCat": o.get("fltCat"),        # VFR/MVFR/IFR/LIFR (AWC-computed)
+                "raw": o.get("rawOb"),            # raw METAR text
+                "obsTime": o.get("obsTime"),      # epoch seconds
             })
         return out
 
-    def get_obs(self) -> list[dict]:
+    def _cached(self, key: str, fetch) -> list[dict]:
         now = time.time()
-        if now - self._obs_ts > CACHE_TTL or not self._obs:
-            try:
-                self._obs = self._fetch()
-                self._obs_ts = now
-                self._analysis = None  # invalidate
-            except Exception as e:
-                logger.warning("surface obs fetch failed: %s", e)
-        return self._obs
+        ent = self._cache.get(key)
+        if ent and now - ent[1] < CACHE_TTL:
+            return ent[0]
+        try:
+            obs = fetch()
+            self._cache[key] = (obs, now)
+            if len(self._cache) > 24:  # bound (a handful of sites + national)
+                self._cache.pop(min(self._cache, key=lambda k: self._cache[k][1]), None)
+            return obs
+        except Exception as e:
+            logger.warning("surface obs fetch failed (%s): %s", key, e)
+            return ent[0] if ent else []
+
+    def get_obs(self, lat: Optional[float] = None, lon: Optional[float] = None,
+                radius_km: float = DEFAULT_RADIUS_KM) -> list[dict]:
+        """Station obs. With lat/lon → a dense site-centered box (for plots/cards);
+        without → the national set (sparse, for the analysis)."""
+        if lat is None or lon is None:
+            return self._national()
+        s, w, n, e = _bbox_for(float(lat), float(lon), float(radius_km))
+        key = f"{round(float(lat), 1)},{round(float(lon), 1)},{int(radius_km)}"
+        return self._cached(key, lambda: self._fetch_bbox(s, w, n, e))
+
+    def _national(self) -> list[dict]:
+        return self._cached("natl", lambda: self._fetch_bbox(*NATIONAL_BBOX))
 
     # ── Objective analysis ──────────────────────────────────────────────────
     def get_analysis(self) -> dict:
         now = time.time()
         if self._analysis is not None and now - self._analysis_ts < CACHE_TTL:
             return self._analysis
-        obs = self.get_obs()
+        obs = self._national()  # synoptic-scale → national set (sparse is fine)
         try:
             self._analysis = self._analyze(obs)
         except Exception as e:

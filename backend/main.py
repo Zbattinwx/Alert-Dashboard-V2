@@ -3637,25 +3637,35 @@ async def get_mrms_status():
     }
 
 
+def _mrms_is_reflectivity(product: str | None) -> bool:
+    return product is None or product == "reflectivity"
+
+
 @app.get("/api/mrms/frames")
-async def list_mrms_frames():
-    """List all cached MRMS frames (oldest first, up to 30 = ~60 min)."""
+async def list_mrms_frames(product: str | None = None):
+    """List recent MRMS frames (oldest first) for looping. `product` selects which
+    MRMS product (default = composite reflectivity, served from the live poll)."""
     svc = get_mrms_service()
     if not svc or not svc.available:
         raise HTTPException(status_code=503, detail="MRMS service not available")
-    return svc.get_frame_list()
+    if _mrms_is_reflectivity(product):
+        return svc.get_frame_list()
+    return await asyncio.to_thread(svc.get_product_frames, product, 30)
 
 
 @app.get("/api/mrms/frame/{ts}")
-async def get_mrms_frame_by_ts(ts: str):
+async def get_mrms_frame_by_ts(ts: str, product: str | None = None):
     """Return a specific MRMS frame binary by timestamp (YYYYMMDD-HHMMSS)."""
     from fastapi.responses import Response as FastResponse
     svc = get_mrms_service()
     if not svc or not svc.available:
         raise HTTPException(status_code=503, detail="MRMS service not available")
-    binary = svc.get_frame_binary(ts)
+    if _mrms_is_reflectivity(product):
+        binary = svc.get_frame_binary(ts)
+    else:
+        binary = await asyncio.to_thread(svc.get_product_frame, product, ts)
     if not binary:
-        raise HTTPException(status_code=404, detail=f"Frame {ts} not in cache")
+        raise HTTPException(status_code=404, detail=f"Frame {ts} not available")
     return FastResponse(
         content=binary,
         media_type="application/octet-stream",
@@ -3664,14 +3674,21 @@ async def get_mrms_frame_by_ts(ts: str):
 
 
 @app.get("/api/mrms/binary")
-async def get_mrms_binary():
-    """Return the latest MRMS grid as a compact binary for the WebGL custom layer."""
+async def get_mrms_binary(product: str | None = None):
+    """Return the latest MRMS grid as a compact binary for the WebGL custom layer.
+    `product` selects the MRMS product (default = composite reflectivity)."""
     from fastapi.responses import Response as FastResponse
     svc = get_mrms_service()
-    if not svc or not svc.available or svc.latest_binary is None:
+    if not svc or not svc.available:
+        raise HTTPException(status_code=503, detail="MRMS service not available")
+    if _mrms_is_reflectivity(product):
+        binary = svc.latest_binary
+    else:
+        binary = await asyncio.to_thread(svc.get_product_binary, product)
+    if binary is None:
         raise HTTPException(status_code=503, detail="MRMS binary not available")
     return FastResponse(
-        content=svc.latest_binary,
+        content=binary,
         media_type="application/octet-stream",
         headers={"Cache-Control": "no-store"},
     )
@@ -3848,15 +3865,18 @@ async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = 
 
 
 @app.get("/api/obs/surface")
-async def get_surface_obs():
-    """National surface station obs (METAR snapshot) for the radar app's
-    Observations layer — station plots of temp/dewpoint/wind/pressure."""
+async def get_surface_obs(lat: float | None = None, lon: float | None = None, radius_km: float = 400.0):
+    """Surface station obs (METAR) for the radar app's Observations layer. With
+    lat/lon → a dense box around the active radar site (aviationweather.gov caps a
+    query at ~400 stations, so a site-centered box returns far more local stations
+    than the national snapshot); without → the national set. Each ob includes
+    decoded extras (visibility, clouds/ceiling, flight category, raw METAR)."""
     try:
         from .services.surface_obs_service import get_surface_obs_service
     except ImportError:
         from backend.services.surface_obs_service import get_surface_obs_service
     svc = get_surface_obs_service()
-    obs = await asyncio.to_thread(svc.get_obs)
+    obs = await asyncio.to_thread(svc.get_obs, lat, lon, radius_km)
     return {"obs": obs}
 
 

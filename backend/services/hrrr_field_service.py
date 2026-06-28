@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 HRRR_BUCKET = "noaa-hrrr-bdp-pds"
 BINARY_MAGIC = b"HRRR"
-CACHE_MAX = 80  # LRU entries (~2 MB each → ~160 MB cap)
+CACHE_MAX = 130  # LRU entries (~2 MB each → ~260 MB cap); fits a full GFS F0–120 loop
 
 # eccodes is NOT thread-safe: its .def parser (flex) keeps global buffer state,
 # so concurrent codes_new_from_message() calls corrupt it ("end of buffer
@@ -130,7 +130,29 @@ def _rrfs_fields() -> dict[str, dict]:
 
 RRFS_FIELDS: dict[str, dict] = _rrfs_fields()
 
-# ── Model registry (HRRR + RRFS-A) ──────────────────────────────────────────
+# ── GFS registry (0.25° global; already a regular lat/lon grid) ──────────────
+# GFS is a single pgrb2.0p25 file (all surface + pressure levels in one object),
+# so there's no sfc/prs split — its `key` ignores the file token. It carries a
+# SUBSET of the HRRR fields: no 0–6 km shear *components* (→ no shear06/SCP/STP),
+# no 0–1 km SRH (→ no ehi01), no 4LFTX, no updraft helicity, no ASNOW. Verified
+# against the live .idx. The generic KDTree regrid handles its lat/lon grid.
+_GFS_KEEP = (
+    "t2m", "td2m", "refc",
+    "sbcape", "mlcape", "mucape", "sbcin", "srh03", "pwat", "ehi03",
+    "t850", "rh850", "wspd850", "t700", "rh700",
+    "z500", "t500", "wspd500", "z300", "wspd250",
+    "vort500", "omega700", "wspd300",
+    "snod", "ptype",
+)
+GFS_FIELDS: dict[str, dict] = {k: dict(HRRR_FIELDS[k]) for k in _GFS_KEEP}
+
+# ── NAM-NEST registry (3 km CONUS nest; Lambert-Conformal) ──────────────────
+# The 3 km CONUS nest carries nearly the full HRRR field set in one file
+# (surface + pressure levels together, incl. updraft helicity) — only ASNOW is
+# absent. Single file → `key` ignores the token; generic KDTree regrid.
+NAM_FIELDS: dict[str, dict] = {k: dict(v) for k, v in HRRR_FIELDS.items() if k != "asnow"}
+
+# ── Model registry (HRRR + RRFS-A + GFS + NAM-NEST) ─────────────────────────
 MODELS: dict[str, dict] = {
     "hrrr": {
         "label": "HRRR", "bucket": "noaa-hrrr-bdp-pds", "fields": HRRR_FIELDS,
@@ -145,6 +167,20 @@ MODELS: dict[str, dict] = {
         "max_fhour": (lambda hh: 84 if hh % 6 == 0 else 18),  # synoptic runs to F84
         "default_file": "2dfld", "mslp": (":MSLET:mean sea level:", "2dfld"),
         "key": (lambda date, hh, f, tok: f"rrfs_a/rrfs.{date}/{hh:02d}/rrfs.t{hh:02d}z.{tok}.3km.f{f:03d}.conus.grib2"),
+    },
+    "gfs": {
+        "label": "GFS", "bucket": "noaa-gfs-bdp-pds", "fields": GFS_FIELDS,
+        "run_hours": (0, 6, 12, 18), "fhour_offset": 0,
+        "max_fhour": (lambda hh: 120),  # 0.25° is hourly to F120 (3-hourly after — not exposed)
+        "default_file": "", "mslp": (":PRMSL:mean sea level:", ""),  # single file → token unused
+        "key": (lambda date, hh, f, tok: f"gfs.{date}/{hh:02d}/atmos/gfs.t{hh:02d}z.pgrb2.0p25.f{f:03d}"),
+    },
+    "nam": {
+        "label": "NAM-NEST", "bucket": "noaa-nam-pds", "fields": NAM_FIELDS,
+        "run_hours": (0, 6, 12, 18), "fhour_offset": 0,
+        "max_fhour": (lambda hh: 60),  # 3 km CONUS nest, hourly to F60
+        "default_file": "", "mslp": (":MSLET:mean sea level:", ""),  # single file → token unused
+        "key": (lambda date, hh, f, tok: f"nam.{date}/nam.t{hh:02d}z.conusnest.hiresf{f:02d}.tm00.grib2"),
     },
 }
 
@@ -333,19 +369,22 @@ class HRRRFieldService:
         derive = spec.get("derive")
         if derive:
             kind = derive[0]
-            if kind in ("mag", "ptype"):
+            if kind == "mag":
+                uv = self._get_uv(model, key, lines, derive[1], derive[2])
+                if uv is None:
+                    return self._zero_or_none(spec, fhour)
+                u, v, lats, lons = uv
+                values = np.sqrt(u ** 2 + v ** 2)
+            elif kind == "ptype":
                 msgs = [self._range_get(model, key, lines, m) for m in derive[1:]]
                 if any(g is None for g in msgs):
                     return self._zero_or_none(spec, fhour)
                 decoded = [self._decode(g) for g in msgs]
                 lats, lons = decoded[0][1], decoded[0][2]
                 arrs = [d[0] for d in decoded]
-                if kind == "mag":
-                    values = np.sqrt(arrs[0] ** 2 + arrs[1] ** 2)
-                else:  # ptype: rain, snow, icep, frzr → 1/2/3/4 (later wins)
-                    values = np.zeros_like(arrs[0])
-                    for code, a in enumerate(arrs, start=1):
-                        values = np.where(a > 0.5, float(code), values)
+                values = np.zeros_like(arrs[0])  # rain, snow, icep, frzr → 1/2/3/4 (later wins)
+                for code, a in enumerate(arrs, start=1):
+                    values = np.where(a > 0.5, float(code), values)
             elif kind == "calc":
                 name, inputs = derive[1], derive[2]
                 arrs, lats, lons = [], None, None
@@ -407,12 +446,10 @@ class HRRRFieldService:
         date, hh = run[:8], int(run[8:10])
         key = self._key(model, date, hh, fhour, spec.get("file"))
         lines = self._read_idx(model, key)
-        gu = self._range_get(model, key, lines, u_idx)
-        gv = self._range_get(model, key, lines, v_idx)
-        if gu is None or gv is None:
+        uv = self._get_uv(model, key, lines, u_idx, v_idx)
+        if uv is None:
             return None
-        u, lats, lons, _, _ = self._decode(gu)
-        v, _, _, _, _ = self._decode(gv)
+        u, v, lats, lons = uv
         self._ensure_mapping(lats, lons, model)
         ug = u[self._mapping].reshape(T_NJ, T_NI)
         vg = v[self._mapping].reshape(T_NJ, T_NI)
@@ -499,20 +536,62 @@ class HRRRFieldService:
         idx = s3.get_object(Bucket=MODELS[model]["bucket"], Key=key + ".idx")["Body"].read().decode("utf-8", "replace")
         return idx.splitlines()
 
-    def _range_get(self, model: str, key: str, lines: list[str], idx_match: str) -> Optional[bytes]:
-        """Byte-range GET the single GRIB record whose .idx line contains idx_match."""
-        start = end = None
+    @staticmethod
+    def _idx_range(lines: list[str], idx_match: str) -> tuple[Optional[int], Optional[int]]:
+        """(start, end) byte range of the record matching idx_match. `end` is the
+        next record's offset, SKIPPING idx sub-entries that share this offset —
+        some models (NAM) pack u & v as `n.1`/`n.2` at one offset, so a naive
+        next-line `end` would be empty/backwards and S3 would serve the whole
+        file. None end → open-ended (last record)."""
+        start = None
+        idx = -1
         for i, line in enumerate(lines):
             if idx_match in line:
                 start = int(line.split(":")[1])
-                if i + 1 < len(lines):
-                    end = int(lines[i + 1].split(":")[1])
+                idx = i
                 break
+        if start is None:
+            return None, None
+        end = None
+        for line in lines[idx + 1:]:
+            o = int(line.split(":")[1])
+            if o > start:
+                end = o
+                break
+        return start, end
+
+    def _range_get(self, model: str, key: str, lines: list[str], idx_match: str) -> Optional[bytes]:
+        """Byte-range GET the single GRIB record whose .idx line contains idx_match."""
+        start, end = self._idx_range(lines, idx_match)
         if start is None:
             logger.warning("field %s not in idx for %s", idx_match, key)
             return None
         rng = f"bytes={start}-" + (str(end - 1) if end else "")
         return self._get_s3().get_object(Bucket=MODELS[model]["bucket"], Key=key, Range=rng)["Body"].read()
+
+    def _get_uv(self, model: str, key: str, lines: list[str], u_idx: str, v_idx: str):
+        """Decode a u/v wind pair → (u, v, lats, lons). Handles models (NAM nest)
+        that pack u & v in ONE combined GRIB message (same .idx byte offset) by
+        multi-decoding both submessages; otherwise fetches the two records."""
+        us, _ = self._idx_range(lines, u_idx)
+        vs, _ = self._idx_range(lines, v_idx)
+        if us is None or vs is None:
+            return None
+        if us == vs:  # combined message → both components live in one record
+            grib = self._range_get(model, key, lines, u_idx)
+            if grib is None:
+                return None
+            comps = self._decode_multi(grib)
+            if len(comps) < 2:
+                return None
+            return comps[0][0], comps[1][0], comps[0][1], comps[0][2]
+        gu = self._range_get(model, key, lines, u_idx)
+        gv = self._range_get(model, key, lines, v_idx)
+        if gu is None or gv is None:
+            return None
+        u, lats, lons, _, _ = self._decode(gu)
+        v, _, _, _, _ = self._decode(gv)
+        return u, v, lats, lons
 
     def _decode(self, grib: bytes):
         # Decode straight from the in-memory message (no temp file → avoids
@@ -538,6 +617,47 @@ class HRRRFieldService:
                 eccodes.codes_release(gid)
         lons = np.where(lons > 180.0, lons - 360.0, lons)  # → [-180,180]
         return values, lats, lons, ni, nj
+
+    def _decode_multi(self, grib: bytes):
+        """Decode EVERY submessage in a combined GRIB record (e.g. NAM's u/v pair)
+        → [(values, lats, lons, ni, nj), ...] in order. eccodes can't iterate
+        submessages from memory, so this round-trips through a temp file (only
+        used for the rare combined-message case, not the hot scalar path)."""
+        import eccodes
+        out = []
+        with _DECODE_LOCK:
+            eccodes.codes_grib_multi_support_on()
+            fd, path = tempfile.mkstemp(suffix=".grib2")
+            try:
+                os.write(fd, grib)
+                os.close(fd)
+                with open(path, "rb") as f:
+                    while True:
+                        gid = eccodes.codes_grib_new_from_file(f)
+                        if gid is None:
+                            break
+                        try:
+                            values = np.asarray(eccodes.codes_get_values(gid), dtype=np.float64)
+                            lats = np.asarray(eccodes.codes_get_array(gid, "latitudes"), dtype=np.float64)
+                            lons = np.asarray(eccodes.codes_get_array(gid, "longitudes"), dtype=np.float64)
+                            ni = int(eccodes.codes_get(gid, "Ni"))
+                            nj = int(eccodes.codes_get(gid, "Nj"))
+                            try:
+                                mv = eccodes.codes_get(gid, "missingValue")
+                                values = np.where(values == mv, np.nan, values)
+                            except Exception:
+                                pass
+                            lons = np.where(lons > 180.0, lons - 360.0, lons)
+                            out.append((values, lats, lons, ni, nj))
+                        finally:
+                            eccodes.codes_release(gid)
+            finally:
+                eccodes.codes_grib_multi_support_off()
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        return out
 
     def _ensure_mapping(self, lats: np.ndarray, lons: np.ndarray, model: str) -> None:
         # Per-model (HRRR & RRFS-A share the 1799×1059 size but are distinct grids).
