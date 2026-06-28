@@ -15,6 +15,13 @@ PYI="$VENV/Scripts/pyinstaller.exe"
 [ -x "$PYI" ] || PYI="$VENV/bin/pyinstaller"
 
 cd "$ROOT"
+
+# Rebuild the dashboard frontend so the bundled dist always matches source.
+# PyInstaller below only copies frontend/dist (--add-data) — it never builds it,
+# so without this the bundled dashboard quietly drifts behind the frontend code.
+echo "Building dashboard frontend (frontend/dist)..."
+( cd "$ROOT/frontend" && { [ -d node_modules ] || npm ci; } && npm run build )
+
 # PyInstaller is Windows Python — it needs a native path for --add-data, not the
 # MSYS /c/... form git-bash's pwd returns (that mangles to C:\c\...).
 ROOT_WIN="$(pwd -W 2>/dev/null || pwd)"
