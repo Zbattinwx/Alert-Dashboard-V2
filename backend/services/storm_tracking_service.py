@@ -56,6 +56,20 @@ SCIT_THRESHOLDS = [60, 55, 50, 45, 40, 35, 30]  # dBZ
 CELL_DETECT_DBZ = 35  # Used for MCS classification filter (not identification)
 CELL_MIN_AREA_KM2 = 5  # Minimum component area to reject noise pixels
 MAX_MATCH_DISTANCE_KM = 20  # Max distance for cell matching across scans
+
+# ── Volumetric SCIT identification (Johnson et al. 1998 + WSR-88D ROC specs) ──
+# Per-tilt 2D component extraction on the polar reflectivity of every elevation,
+# then vertical association across tilts into 3D cells.  Defaults are the ROC
+# algorithm's adaptable parameters.
+SCIT_SEG_MIN_LEN_KM = 1.9        # min along-radial run length for a segment
+SCIT_SEG_DROPOUT_GATES = 2       # gates below threshold bridged within a segment
+SCIT_COMP_MIN_AREA_KM2 = 10.0    # min 2D component area (per tilt)
+SCIT_COMP_MIN_SEGMENTS = 2       # min radials spanned by a component
+SCIT_VERT_RADII_KM = (5.0, 7.5, 10.0)   # escalating vertical-association search radii
+SCIT_CELL_MIN_COMPONENTS = 2     # min components (tilts) for a valid 3D cell
+SCIT_MERGE_HORIZ_KM = 10.0       # merge cells whose centroids are within this
+SCIT_DECROWD_KM = 5.0            # of two cells closer than this, keep the stronger
+SCIT_MAX_ELEV_DEG = 20.0         # ignore tilts above this (no convective core info)
 # Minimum time between motion vector updates.  When two active sites
 # produce scans only seconds apart, cross-site parallax (3–5 km) divided
 # by a tiny Δt produces physically impossible speeds (300–600 kph).
@@ -614,6 +628,7 @@ class StormTrackingService:
                 motion = self._compute_mean_storm_motion(cells)
                 if motion is not None:
                     await self.on_motion_update(motion[0], motion[1])
+        return cells or []
 
     def _compute_mean_storm_motion(
         self, cells: list["TrackedStormCell"]
@@ -643,8 +658,6 @@ class StormTrackingService:
         )
         return float(avg_dir), avg_speed
 
-        return cells or []
-
     def _process_sync(self, volume_data) -> Optional[list[TrackedStormCell]]:
         """Synchronous processing pipeline (runs in thread)."""
         try:
@@ -664,8 +677,8 @@ class StormTrackingService:
             # Extract grid coordinate arrays
             self._extract_grid_coords(grid)
 
-            # Step 1: Identify cells from reflectivity
-            raw_cells = self._identify_cells(grid)
+            # Step 1: Identify cells from reflectivity (volumetric SCIT; 2D fallback)
+            raw_cells = self._identify_cells(grid, radar)
             if not raw_cells:
                 # No cells found — only expire cells owned by this site so that
                 # storms tracked by a different active radar are not wiped out.
@@ -843,7 +856,24 @@ class StormTrackingService:
         except Exception as e:
             logger.warning(f"Could not extract grid coords: {e}")
 
-    def _identify_cells(self, grid) -> list[_InternalCell]:
+    def _identify_cells(self, grid, radar=None) -> list[_InternalCell]:
+        """SCIT cell identification.
+
+        Prefers the canonical **volumetric** path (per-tilt 2D components on the
+        polar reflectivity of every elevation → 3D vertical association); falls
+        back to the single-level 2D Cartesian method if no radar is supplied or
+        the volumetric pass fails, so the pipeline never goes dark.
+        """
+        if radar is not None:
+            try:
+                cells = self._identify_cells_volumetric(grid, radar)
+                if cells is not None:
+                    return cells
+            except Exception as e:  # never break tracking on an identification edge case
+                logger.warning(f"Volumetric SCIT identification failed ({e}); using 2D fallback", exc_info=True)
+        return self._identify_cells_2d(grid)
+
+    def _identify_cells_2d(self, grid) -> list[_InternalCell]:
         """
         SCIT multi-threshold feature core extraction (Johnson et al. 1998, WAF §2b).
 
@@ -898,8 +928,19 @@ class StormTrackingService:
                     continue
 
                 ys, xs = np.where(mask)
-                cy = int(round(float(ys.mean())))
-                cx = int(round(float(xs.mean())))
+                cell_refl = refl_filled[ys, xs]
+                max_dbz = float(np.nanmax(cell_refl))
+                # Reflectivity-mass-weighted centroid (SCIT spec): weight by linear
+                # reflectivity factor so the centroid sits on the core, not the
+                # geometric middle of the thresholded blob.
+                w = np.power(10.0, np.clip(cell_refl, 0.0, 75.0) / 10.0)
+                wsum = float(w.sum())
+                if wsum > 0:
+                    cy = int(round(float((w * ys).sum() / wsum)))
+                    cx = int(round(float((w * xs).sum() / wsum)))
+                else:
+                    cy = int(round(float(ys.mean())))
+                    cx = int(round(float(xs.mean())))
 
                 # ── Feature core extraction ───────────────────────────────────
                 # "If the centroid of a higher-reflectivity thresholded component
@@ -914,10 +955,8 @@ class StormTrackingService:
                 if redundant:
                     continue
 
-                # This component is a new unique cell at this threshold
-                cell_refl = refl_filled[ys, xs]
-                max_dbz = float(np.nanmax(cell_refl))
-
+                # This component is a new unique cell at this threshold (max_dbz +
+                # cell_refl computed above for the mass-weighted centroid).
                 try:
                     lat, lon = self._grid_to_image_latlon(cy, cx)
                 except (IndexError, TypeError, ValueError):
@@ -950,6 +989,279 @@ class StormTrackingService:
             f"across {len(SCIT_THRESHOLDS)} thresholds"
         )
         return final_cells
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Volumetric SCIT identification (Johnson et al. 1998 + WSR-88D ROC specs)
+    # ──────────────────────────────────────────────────────────────────────
+    def _identify_cells_volumetric(self, grid, radar) -> Optional[list[_InternalCell]]:
+        """Canonical volumetric SCIT.
+
+        Extracts 2D reflectivity components per elevation from the *polar* radar
+        (7 thresholds high→low, mass-weighted centroids), associates them
+        vertically into 3D cells (escalating search radii + vertical coherence),
+        de-crowds, then maps each cell onto the Cartesian grid and synthesises a
+        per-cell pixel mask so the existing dual-pol / rotation / hail / scoring
+        pipeline runs unchanged.
+        """
+        from scipy import ndimage
+
+        if "reflectivity" not in radar.fields:
+            return None
+        if self._grid_shape is None or self._range_m is None:
+            return None
+
+        rng_km = np.asarray(radar.range["data"], dtype=np.float32) / 1000.0
+        ngates = rng_km.size
+        if ngates < 2:
+            return None
+        gate_km = float(rng_km[1] - rng_km[0])
+
+        # ── Step 1: per-tilt 2D components on the polar reflectivity ───────────
+        tilt_comps: list[dict] = []
+        try:
+            fixed = list(radar.fixed_angle["data"])
+        except Exception:
+            fixed = [0.0] * radar.nsweeps
+
+        seen_elev: list[float] = []
+        layer = 0
+        for sweep in range(radar.nsweeps):
+            try:
+                elev = float(fixed[sweep])
+            except (TypeError, ValueError, IndexError):
+                elev = 0.0
+            if elev > SCIT_MAX_ELEV_DEG or elev < 0:
+                continue
+            if any(abs(elev - e) < 0.15 for e in seen_elev):
+                continue  # skip duplicate split-cut elevations
+            try:
+                refl = radar.get_field(sweep, "reflectivity")
+                az = radar.get_azimuth(sweep)
+            except Exception:
+                continue
+            if refl is None or refl.shape[1] != ngates:
+                continue
+            comps = self._tilt_components(ndimage, refl, az, rng_km, gate_km, elev, layer)
+            if comps:
+                tilt_comps.extend(comps)
+                seen_elev.append(elev)
+                layer += 1
+
+        if not tilt_comps:
+            return []
+
+        # ── Step 2: vertical association into 3D cells, then de-crowd ──────────
+        cells_xy = self._associate_3d(tilt_comps)
+        if not cells_xy:
+            return []
+
+        # ── Step 3: build grid-compatible _InternalCell list ──────────────────
+        return self._cells_from_xy(ndimage, grid, cells_xy)
+
+    def _tilt_components(self, ndimage, refl, az, rng_km, gate_km, elev, layer) -> list[dict]:
+        """Extract 2D reflectivity components for one elevation (polar, vectorized).
+
+        Returns dicts with mass-weighted (x, y) centroids in km east/north of the
+        radar, plus max dBZ, footprint area, the elevation and a vertical layer index.
+        """
+        filled = np.ma.filled(refl, -999.0).astype(np.float32)   # (nray, ngate)
+        nray = filled.shape[0]
+        if nray < SCIT_COMP_MIN_SEGMENTS:
+            return []
+        order = np.argsort(az)
+        filled = filled[order]
+        azs = np.asarray(az, dtype=np.float32)[order]
+        az_step_rad = math.radians(360.0 / max(nray, 1))
+        azr = np.radians(azs)                                      # (nray,)
+
+        struct_close = np.ones((1, 2 * SCIT_SEG_DROPOUT_GATES + 1), dtype=bool)
+        struct_lbl = np.ones((3, 3), dtype=bool)                  # 8-connectivity
+
+        identified: list[tuple[float, float]] = []                # higher-thr centroids
+        comps: list[dict] = []
+        for T in SCIT_THRESHOLDS:
+            binary = filled >= T
+            if not binary.any():
+                continue
+            binary = ndimage.binary_closing(binary, structure=struct_close)
+            labeled, n = ndimage.label(binary, structure=struct_lbl)
+            if n == 0:
+                continue
+            # Per-label stats in one vectorized pass (bincount) — no per-label rescans.
+            rr, gg = np.nonzero(labeled)
+            if rr.size == 0:
+                continue
+            labs = labeled[rr, gg].astype(np.int64)
+            vals = filled[rr, gg]
+            rk = rng_km[gg]
+            a = azr[rr]
+            w = np.power(10.0, np.clip(vals, 0.0, 75.0) / 10.0)
+            garea = gate_km * (rk * az_step_rad)
+            nlab = n + 1
+            sw = np.bincount(labs, weights=w, minlength=nlab)
+            swx = np.bincount(labs, weights=w * (rk * np.sin(a)), minlength=nlab)
+            swy = np.bincount(labs, weights=w * (rk * np.cos(a)), minlength=nlab)
+            sar = np.bincount(labs, weights=garea, minlength=nlab)
+            smax = np.full(nlab, -999.0)
+            np.maximum.at(smax, labs, vals)
+            # distinct radials per label (segment count)
+            ukey = np.unique(labs * nray + rr.astype(np.int64))
+            nrad = np.bincount((ukey // nray).astype(np.int64), minlength=nlab)
+            for lid in range(1, nlab):
+                if nrad[lid] < SCIT_COMP_MIN_SEGMENTS:
+                    continue
+                area = float(sar[lid])
+                if area < SCIT_COMP_MIN_AREA_KM2 or sw[lid] <= 0:
+                    continue
+                cx = float(swx[lid] / sw[lid])
+                cy = float(swy[lid] / sw[lid])
+                eff_r = math.sqrt(area / math.pi)
+                # Nested-threshold core extraction: discard this (lower) component if
+                # a higher-threshold centroid lies within its footprint.
+                if any((px - cx) ** 2 + (py - cy) ** 2 <= eff_r * eff_r for (px, py) in identified):
+                    continue
+                comps.append({
+                    "x": cx, "y": cy, "maxdbz": float(smax[lid]),
+                    "area": area, "elev": elev, "layer": layer,
+                })
+                identified.append((cx, cy))
+        return comps
+
+    def _associate_3d(self, comps: list[dict]) -> list[dict]:
+        """Associate per-tilt components into 3D cells (union-find on horizontal
+        proximity across elevations, escalating radii), apply the vertical-coherence
+        gate, mass-weight the centroid, and de-crowd."""
+        n = len(comps)
+        parent = list(range(n))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(i, j):
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[ri] = rj
+
+        # Bind each component to its nearest neighbour on a *different* tilt within
+        # the escalating search radius (tight first → stacked cores bind before sheared).
+        for radius in SCIT_VERT_RADII_KM:
+            r2 = radius * radius
+            for i in range(n):
+                ci = comps[i]
+                best_j, best_d = -1, r2
+                for j in range(n):
+                    cj = comps[j]
+                    if i == j or cj["layer"] == ci["layer"] or find(i) == find(j):
+                        continue
+                    d = (ci["x"] - cj["x"]) ** 2 + (ci["y"] - cj["y"]) ** 2
+                    if d <= best_d:
+                        best_d, best_j = d, j
+                if best_j >= 0:
+                    union(i, best_j)
+
+        groups: dict[int, list[int]] = {}
+        for i in range(n):
+            groups.setdefault(find(i), []).append(i)
+
+        cells: list[dict] = []
+        for members in groups.values():
+            layers = {comps[m]["layer"] for m in members}
+            maxd = max(comps[m]["maxdbz"] for m in members)
+            # Vertical coherence: need ≥2 tilts, unless it's a strong core only the
+            # lowest tilt can see (distant storms the higher beams overshoot).
+            if len(layers) < SCIT_CELL_MIN_COMPONENTS and maxd < 40.0:
+                continue
+            wsum = sx = sy = 0.0
+            for m in members:
+                c = comps[m]
+                wt = c["area"] * (10.0 ** (min(c["maxdbz"], 75.0) / 10.0))
+                wsum += wt; sx += wt * c["x"]; sy += wt * c["y"]
+            if wsum <= 0:
+                continue
+            low_layer = min(comps[m]["layer"] for m in members)
+            area = max(comps[m]["area"] for m in members if comps[m]["layer"] == low_layer)
+            cells.append({"x": sx / wsum, "y": sy / wsum, "maxdbz": maxd,
+                          "area": area, "ntilts": len(layers)})
+
+        # De-crowd: keep the stronger of any two cells closer than SCIT_DECROWD_KM.
+        cells.sort(key=lambda c: (c["maxdbz"], c["area"]), reverse=True)
+        kept: list[dict] = []
+        dc2 = SCIT_DECROWD_KM * SCIT_DECROWD_KM
+        for c in cells:
+            if all((c["x"] - k["x"]) ** 2 + (c["y"] - k["y"]) ** 2 > dc2 for k in kept):
+                kept.append(c)
+        return kept
+
+    def _cells_from_xy(self, ndimage, grid, cells_xy: list[dict]) -> list[_InternalCell]:
+        """Map 3D cells (x,y km from radar) onto the grid + synthesise pixel masks
+        (grid ≥30 dBZ blob, Voronoi-split when cells share a blob)."""
+        from collections import defaultdict
+
+        if "reflectivity" not in grid.fields:
+            return []
+        grid_refl = np.ma.filled(grid.fields["reflectivity"]["data"][0], -999.0).astype(np.float32)
+        gshape = grid_refl.shape[0]
+        res_m = self._grid_res_km * 1000.0
+        range_m = self._range_m
+        pixel_area = self._grid_res_km ** 2
+
+        def to_grid(c):
+            gx = int(round((c["x"] * 1000.0 + range_m) / res_m))
+            gy = int(round((c["y"] * 1000.0 + range_m) / res_m))
+            return (max(0, min(gshape - 1, gy)), max(0, min(gshape - 1, gx)))
+
+        blobs, _ = ndimage.label(grid_refl >= 30.0)
+        cell_pos = [to_grid(c) for c in cells_xy]
+        blob_of = [int(blobs[gy, gx]) for (gy, gx) in cell_pos]
+        shared: dict[int, list[int]] = defaultdict(list)
+        for idx, b in enumerate(blob_of):
+            if b > 0:
+                shared[b].append(idx)
+
+        cells: list[_InternalCell] = []
+        for idx, c in enumerate(cells_xy):
+            gy, gx = cell_pos[idx]
+            b = blob_of[idx]
+            if b > 0 and len(shared[b]) == 1:
+                mask = blobs == b
+            elif b > 0:
+                bys, bxs = np.where(blobs == b)
+                members = shared[b]
+                cyx = np.array([cell_pos[m] for m in members])         # (k, 2) = (y, x)
+                d = (bys[:, None] - cyx[None, :, 0]) ** 2 + (bxs[:, None] - cyx[None, :, 1]) ** 2
+                mine = np.argmin(d, axis=1) == members.index(idx)
+                mask = np.zeros((gshape, gshape), dtype=bool)
+                mask[bys[mine], bxs[mine]] = True
+            else:
+                eff_px = max(2, int(round(math.sqrt(max(c["area"], 1.0) / math.pi) / self._grid_res_km)))
+                yy, xx = np.ogrid[:gshape, :gshape]
+                mask = (yy - gy) ** 2 + (xx - gx) ** 2 <= eff_px * eff_px
+
+            if not mask.any():
+                mask = np.zeros((gshape, gshape), dtype=bool)
+                mask[gy, gx] = True
+
+            ys, xs = np.where(mask)
+            cell_refl = grid_refl[ys, xs]
+            try:
+                lat, lon = self._grid_to_image_latlon(gy, gx)
+            except (IndexError, TypeError, ValueError):
+                continue
+            cells.append(_InternalCell(
+                centroid_y=gy, centroid_x=gx, lat=lat, lon=lon,
+                max_dbz=float(c["maxdbz"]),
+                area_km2=float(mask.sum()) * pixel_area,
+                pixel_mask=mask,
+                bbox=(int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())),
+                dbz_50_area_km2=float(np.count_nonzero(cell_refl >= 50)) * pixel_area,
+                dbz_55_area_km2=float(np.count_nonzero(cell_refl >= 55)) * pixel_area,
+                dbz_60_area_km2=float(np.count_nonzero(cell_refl >= 60)) * pixel_area,
+            ))
+        logger.debug(f"Volumetric SCIT: {len(cells)} cells from {len(cells_xy)} 3D candidates")
+        return cells
 
     def _analyze_dual_pol(self, grid, radar, cells: list[_InternalCell]):
         """
@@ -1021,16 +1333,30 @@ class StormTrackingService:
         # Build list of existing cells with predicted positions
         existing = list(self._tracked_cells.values())
 
-        # Match by nearest centroid distance
+        # Match against each existing cell's PROJECTED position (SCIT first-guess:
+        # advance the cell along its own motion to where it *should* be this volume,
+        # then match to the nearest detection). This stops a fast cell from being
+        # mis-paired to a closer-but-different cell, which inflated motion vectors.
+        def _projected(old_cell) -> tuple[float, float]:
+            if old_cell.scan_count >= 2 and old_cell.motion_speed_kph > 0:
+                try:
+                    dt_h = max((datetime.fromisoformat(now) - datetime.fromisoformat(old_cell.last_updated)).total_seconds() / 3600.0, 0.0)
+                except (ValueError, TypeError):
+                    dt_h = 5.0 / 60.0
+                dist = old_cell.motion_speed_kph * dt_h
+                br = math.radians(old_cell.motion_direction_deg)
+                plat = old_cell.lat + (dist * math.cos(br)) / 111.0
+                plon = old_cell.lon + (dist * math.sin(br)) / (111.0 * math.cos(math.radians(old_cell.lat)) or 1.0)
+                return plat, plon
+            return old_cell.lat, old_cell.lon
+
         if existing and new_cells:
-            # Compute distance matrix
+            # Distance from each existing cell's projected position to each detection.
             distances = np.zeros((len(existing), len(new_cells)))
             for i, old_cell in enumerate(existing):
+                plat, plon = _projected(old_cell)
                 for j, new_cell in enumerate(new_cells):
-                    distances[i, j] = self._haversine_km(
-                        old_cell.lat, old_cell.lon,
-                        new_cell.lat, new_cell.lon,
-                    )
+                    distances[i, j] = self._haversine_km(plat, plon, new_cell.lat, new_cell.lon)
 
             # Greedy matching: pick closest pairs under threshold
             while True:
