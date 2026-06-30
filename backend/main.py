@@ -1728,6 +1728,35 @@ async def proxy_mesoanalysis(
         raise HTTPException(status_code=502, detail=f"Failed to fetch from SPC: {e}")
 
 
+@app.get("/api/placefile")
+async def proxy_placefile(url: str = Query(..., description="GR placefile (or icon image) URL")):
+    """Proxy a GR placefile or its icon image so the browser can load it despite
+    CORS. Presents a GR-compatible User-Agent (placefile hosts gate on it).
+    Single-operator local dashboard; only http/https are allowed (SSRF guard)."""
+    from urllib.parse import urlparse
+    from fastapi.responses import Response
+
+    p = urlparse(url)
+    if p.scheme not in ("http", "https") or not p.netloc:
+        raise HTTPException(status_code=400, detail="Only http/https URLs are allowed")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=20),
+                headers={"User-Agent": "GRLevel3 2.0 (TheBattinFront Radar placefile client)"},
+                allow_redirects=True,
+            ) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
+                data = await resp.read()
+                ctype = resp.headers.get("Content-Type", "text/plain; charset=utf-8")
+        return Response(content=data, media_type=ctype, headers={"Cache-Control": "no-store"})
+    except aiohttp.ClientError as e:
+        logger.error(f"Placefile proxy fetch failed for {url}: {e}")
+        raise HTTPException(status_code=502, detail=f"Fetch failed: {e}")
+
+
 @app.get("/api/lsr/summary-graphic")
 async def get_lsr_summary_graphic(
     hours: int = Query(24, ge=1, le=168, description="Lookback hours"),
