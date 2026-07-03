@@ -1036,6 +1036,14 @@ class AlertParser:
             "HIGH WIND WARNING": "HW",
             "LAKE EFFECT SNOW WARNING": "LE",
             "SNOW SQUALL WARNING": "SQ",
+            # Heat. NWS 2024 hazard simplification renamed EH from "Excessive
+            # Heat" to "Extreme Heat" (same VTEC code) — accept both the new and
+            # old display names so non-VTEC products still classify correctly.
+            "EXTREME HEAT WARNING": "EH",
+            "EXCESSIVE HEAT WARNING": "EH",
+            "EXTREME HEAT WATCH": "EH",
+            "EXCESSIVE HEAT WATCH": "EH",
+            "HEAT ADVISORY": "HT",
         }
 
         for name, code in mappings.items():

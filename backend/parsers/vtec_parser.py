@@ -54,7 +54,7 @@ class VTECParser:
     # Known phenomenon codes (not exhaustive, but covers common ones)
     KNOWN_PHENOMENA = {
         "TO", "SV", "FF", "FA", "FL", "WS", "BZ", "IS", "LE", "WW",
-        "WC", "EC", "HT", "EH", "FG", "SM", "HW", "EW", "WI", "DS",
+        "WC", "CW", "EC", "HT", "EH", "FG", "SM", "HW", "EW", "WI", "DS",
         "FR", "FZ", "HZ", "AS", "CF", "LS", "SU", "RP", "BW", "SC",
         "SW", "RB", "SI", "GL", "SE", "SR", "HF", "TR", "HU", "TY",
         "SS", "TS", "MA", "SQ", "AF", "LO", "ZF", "ZR", "UP", "ZY",

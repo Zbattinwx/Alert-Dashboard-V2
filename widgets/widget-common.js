@@ -90,9 +90,9 @@ const ALERT_TYPE_INFO = {
     // Extreme Wind
     'EW': { color: '#FF8C00', name: 'Extreme Wind Warning', shortName: 'EWW' },
 
-    // Excessive Heat
-    'EH': { color: '#C71585', name: 'Excessive Heat Warning', shortName: 'EHW' },
-    'EHA': { color: '#800000', name: 'Excessive Heat Watch', shortName: 'EHA' },
+    // Extreme Heat (NWS 2024 simplification: EH renamed from "Excessive Heat")
+    'EH': { color: '#C71585', name: 'Extreme Heat Warning', shortName: 'EHW' },
+    'EHA': { color: '#800000', name: 'Extreme Heat Watch', shortName: 'EHA' },
 
     // Heat Advisory
     'HT': { color: '#FF7F50', name: 'Heat Advisory', shortName: 'HTA' },

@@ -200,9 +200,9 @@ export const PHENOMENON_NAMES: Record<string, string> = {
   HWA: 'High Wind Watch',
   // Wind Advisory
   WI: 'Wind Advisory',
-  // Heat
-  EH: 'Excessive Heat Warning',
-  EHA: 'Excessive Heat Watch',
+  // Heat (NWS 2024 simplification: EH is "Extreme Heat", same VTEC code)
+  EH: 'Extreme Heat Warning',
+  EHA: 'Extreme Heat Watch',
   HT: 'Heat Advisory',
   // Fire Weather
   FW: 'Fire Weather Warning',

@@ -222,7 +222,10 @@ PHENOMENON_NAMES = {
     "CW": "Cold Weather",
     "EC": "Extreme Cold",
     "HT": "Heat",
-    "EH": "Excessive Heat",
+    # NWS 2024 hazard simplification renamed the EH phenomenon from
+    # "Excessive Heat" to "Extreme Heat" (same VTEC code). EH.W = Extreme Heat
+    # Warning, EH.A = Extreme Heat Watch. HT.Y stays "Heat Advisory".
+    "EH": "Extreme Heat",
     "FG": "Dense Fog",
     "SM": "Dense Smoke",
     "HW": "High Wind",
