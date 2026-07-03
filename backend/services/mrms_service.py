@@ -21,11 +21,15 @@ import io
 import logging
 import os
 import tempfile
+import threading
+import time
 from collections import deque, OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 import numpy as np
+
+from .grib_lock import GRIB_DECODE_LOCK
 
 logger = logging.getLogger(__name__)
 
@@ -118,16 +122,23 @@ class MRMSService:
 
     def __init__(self):
         self._s3 = None
+        self._s3_lock = threading.Lock()  # lazy boto3 init races across to_thread workers
         self._cmap = None           # matplotlib colormap, built lazily
         self._latest_binary: Optional[bytes] = None
         self._latest_png:    Optional[bytes] = None
+        self._latest_grid   = None  # raw grid held for the lazy legacy-PNG render
+        self._png_wanted_until = 0.0  # last PNG request + 10 min
         self._latest_ts:     Optional[str]   = None  # YYYYMMDD-HHMMSS
         self._latest_iso:    Optional[str]   = None
         # Rolling 60-min history: deque of (ts_str, iso_str, binary_bytes)
         self._history: deque = deque(maxlen=30)
         # On-demand per-product cache (everything except the polled reflectivity):
-        #   pid → {ts, binary, fetched_at, frames: OrderedDict[ts → binary]}
+        #   pid → {ts, binary, fetched_at, last_access, frames: OrderedDict[ts → binary]}
+        # Guarded by _pcache_lock (read-modify-write from concurrent to_thread
+        # workers) and bounded GLOBALLY — each packed frame is ~6 MB, so a
+        # per-product cap alone allows multi-GB growth across 20 products.
         self._pcache: dict[str, dict] = {}
+        self._pcache_lock = threading.Lock()
         self._running = False
         self._poll_task: Optional[asyncio.Task] = None
 
@@ -155,6 +166,11 @@ class MRMSService:
 
     @property
     def latest_png(self) -> Optional[bytes]:
+        # Marks the PNG "wanted" so subsequent polls keep it fresh; renders on
+        # demand for the first request after a quiet spell (legacy endpoint).
+        self._png_wanted_until = time.time() + 600
+        if self._latest_png is None and self._latest_grid is not None:
+            self._latest_png = self._render_png(self._latest_grid)
         return self._latest_png
 
     @property
@@ -162,12 +178,13 @@ class MRMSService:
         return self._latest_iso
 
     def _get_s3(self):
-        if self._s3 is None:
-            import boto3
-            from botocore import UNSIGNED
-            from botocore.config import Config
-            self._s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
-        return self._s3
+        with self._s3_lock:
+            if self._s3 is None:
+                import boto3
+                from botocore import UNSIGNED
+                from botocore.config import Config
+                self._s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+            return self._s3
 
     def _get_cmap(self):
         """Build (once) the same NWS reflectivity colormap used by nexrad_service."""
@@ -344,8 +361,11 @@ class MRMSService:
             # Pack binary (primary — used by WebGL layer for native-resolution rendering)
             binary = self._pack_binary(data)
 
-            # Also render PNG (fallback / legacy image source)
-            png = self._render_png(data)
+            # Legacy PNG (/api/mrms/latest.png only): the scipy reproject + PIL
+            # encode is the most expensive step of this poll — render it only
+            # while something has actually requested the PNG recently.
+            self._latest_grid = data
+            png = self._render_png(data) if time.time() < self._png_wanted_until else None
 
             # Parse a human-readable ISO timestamp
             try:
@@ -383,7 +403,9 @@ class MRMSService:
                 f.write(grib_bytes)
                 tmp = f.name
 
-            with open(tmp, "rb") as f:
+            # eccodes is NOT thread-safe — serialize against the HRRR field
+            # service and the rotation poller (see services/grib_lock.py).
+            with GRIB_DECODE_LOCK, open(tmp, "rb") as f:
                 msg_id = eccodes.codes_grib_new_from_file(f)
                 if msg_id is None:
                     logger.warning("MRMS GRIB2: no messages found")
@@ -507,38 +529,69 @@ class MRMSService:
             return None
         return self._pack_grid(data, spec["vmin"], spec["vmax"], spec.get("scale", 1.0), spec.get("nodata_below", -15.0))
 
+    # Global frame budget: each packed frame is ~6 MB, so bounding per product
+    # alone (40 frames × 20 products) allows multi-GB growth over a session.
+    _PCACHE_MAX_FRAMES = 48        # ≈290 MB worst case across all products
+    _PCACHE_IDLE_SEC = 30 * 60     # drop products untouched this long
+
     def _pc(self, pid: str) -> dict:
-        return self._pcache.setdefault(pid, {"ts": None, "binary": None, "fetched_at": 0.0, "frames": OrderedDict()})
+        """Get/create a product's cache slot. Caller must hold _pcache_lock."""
+        pc = self._pcache.setdefault(
+            pid, {"ts": None, "binary": None, "fetched_at": 0.0, "last_access": 0.0, "frames": OrderedDict()}
+        )
+        pc["last_access"] = time.time()
+        return pc
+
+    def _prune_pcache_locked(self) -> None:
+        """Enforce the global budget. Caller must hold _pcache_lock."""
+        now = time.time()
+        for pid in [p for p, pc in self._pcache.items() if now - pc.get("last_access", 0.0) > self._PCACHE_IDLE_SEC]:
+            del self._pcache[pid]
+        total = sum(len(pc["frames"]) for pc in self._pcache.values())
+        while total > self._PCACHE_MAX_FRAMES:
+            victim = min(
+                (pc for pc in self._pcache.values() if pc["frames"]),
+                key=lambda pc: pc.get("last_access", 0.0),
+                default=None,
+            )
+            if victim is None:
+                break
+            victim["frames"].popitem(last=False)
+            total -= 1
 
     def get_product_binary(self, pid: str) -> Optional[bytes]:
         """Latest packed binary for a product (cached ~60 s, fetched on demand)."""
-        import time
         spec = MRMS_PRODUCTS.get(pid)
         if not spec or not _check_eccodes():
             return None
-        pc = self._pc(pid)
-        if pc["binary"] is not None and time.time() - pc["fetched_at"] < 60:
-            return pc["binary"]
+        # Lock only around cache access — S3 list/fetch run unlocked.
+        with self._pcache_lock:
+            pc = self._pc(pid)
+            cached_ts, cached_binary = pc["ts"], pc["binary"]
+            if cached_binary is not None and time.time() - pc["fetched_at"] < 60:
+                return cached_binary
         try:
             keys = self._list_keys(spec["s3"], lookback_min=180, max_keys=50)
             if not keys:
-                return pc["binary"]
+                return cached_binary
             key = keys[-1]
             ts = self._ts_of(key)
-            if ts == pc["ts"]:
-                pc["fetched_at"] = time.time()
-                return pc["binary"]
+            if ts == cached_ts:
+                with self._pcache_lock:
+                    self._pc(pid)["fetched_at"] = time.time()
+                return cached_binary
             binary = self._fetch_pack(spec, key)
             if binary is None:
-                return pc["binary"]
-            pc.update(ts=ts, binary=binary, fetched_at=time.time())
-            pc["frames"][ts] = binary
-            while len(pc["frames"]) > 40:
-                pc["frames"].popitem(last=False)
+                return cached_binary
+            with self._pcache_lock:
+                pc = self._pc(pid)
+                pc.update(ts=ts, binary=binary, fetched_at=time.time())
+                pc["frames"][ts] = binary
+                self._prune_pcache_locked()
             return binary
         except Exception as e:
             logger.warning("MRMS %s latest failed: %s", pid, e)
-            return pc["binary"]
+            return cached_binary
 
     def get_product_frames(self, pid: str, n: int = 30) -> list[dict]:
         """Recent frame timestamps for a product (for looping), oldest→newest."""
@@ -557,18 +610,20 @@ class MRMSService:
         spec = MRMS_PRODUCTS.get(pid)
         if not spec or not _check_eccodes():
             return None
-        pc = self._pc(pid)
-        if ts in pc["frames"]:
-            pc["frames"].move_to_end(ts)
-            return pc["frames"][ts]
+        with self._pcache_lock:
+            pc = self._pc(pid)
+            if ts in pc["frames"]:
+                pc["frames"].move_to_end(ts)
+                return pc["frames"][ts]
         try:
             short = spec["s3"].split("/")[-1]
             key = f"{spec['s3']}/{ts.split('-')[0]}/MRMS_{short}_{ts}.grib2.gz"
             binary = self._fetch_pack(spec, key)
             if binary is not None:
-                pc["frames"][ts] = binary
-                while len(pc["frames"]) > 40:
-                    pc["frames"].popitem(last=False)
+                with self._pcache_lock:
+                    pc = self._pc(pid)
+                    pc["frames"][ts] = binary
+                    self._prune_pcache_locked()
             return binary
         except Exception as e:
             logger.warning("MRMS %s frame %s failed: %s", pid, ts, e)

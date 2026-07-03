@@ -9,6 +9,7 @@ API Documentation: https://publicapi.ohgo.com/docs/v1/
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 from dataclasses import dataclass, field, asdict
@@ -96,6 +97,9 @@ class ODOTService:
         self._sensors_cache_time: Optional[datetime] = None
 
         self._fetch_lock = asyncio.Lock()
+        # monotonic ts of the last honored force_refresh (cameras / sensors)
+        self._last_forced_cams = 0.0
+        self._last_forced_sensors = 0.0
 
     def _get_headers(self) -> dict[str, str]:
         """Get API request headers."""
@@ -126,6 +130,14 @@ class ODOTService:
         Returns:
             List of ODOTCamera objects
         """
+        # ?refresh=true is client-triggerable and re-pulls the full page-all
+        # list — demote repeated forces to cached reads (≥120 s apart).
+        if force_refresh:
+            now = time.monotonic()
+            if now - self._last_forced_cams < 120.0:
+                force_refresh = False
+            else:
+                self._last_forced_cams = now
         if not force_refresh and self._is_cameras_cache_valid():
             return self._cameras
 
@@ -203,6 +215,12 @@ class ODOTService:
         Returns:
             List of RoadSensor objects
         """
+        if force_refresh:  # same client-triggerable-force demotion as cameras
+            now = time.monotonic()
+            if now - self._last_forced_sensors < 120.0:
+                force_refresh = False
+            else:
+                self._last_forced_sensors = now
         if not force_refresh and self._is_sensors_cache_valid():
             return self._sensors
 

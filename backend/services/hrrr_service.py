@@ -19,6 +19,8 @@ import io
 import logging
 import threading
 import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import numpy as np
@@ -76,13 +78,31 @@ def _patch_sounderpy_units() -> None:
 
 
 class HRRRSoundingService:
+    # Bounded LRU: entries are several-hundred-KB PNGs and TTL was only checked
+    # on READ, so distinct stations / clicked points accumulated forever.
+    _CACHE_CAP = 30
+    _POINT_CACHE_CAP = 40
+
     def __init__(self) -> None:
         self._ids: list[str] = []
         self._coords: Optional[np.ndarray] = None  # (N, 2) lat, lon
         self._loaded = False
         self._lock = threading.Lock()  # serialize matplotlib + SounderPy (not thread-safe)
-        self._cache: dict[str, tuple[float, bytes, str]] = {}  # station -> (ts, png, run)
-        self._point_cache: dict[str, tuple[float, bytes]] = {}  # latlon/valid -> (ts, png)
+        self._cache: "OrderedDict[str, tuple[float, bytes, str]]" = OrderedDict()  # station -> (ts, png, run)
+        self._point_cache: "OrderedDict[str, tuple[float, bytes]]" = OrderedDict()  # latlon/valid -> (ts, png)
+        # SounderPy renders take ~30 s; a dedicated small pool keeps them from
+        # starving the loop's default executor (which also serves MRMS/obs).
+        self.render_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sounding")
+
+    @staticmethod
+    def _cache_put(cache: "OrderedDict", key, value, cap: int) -> None:
+        now = time.time()
+        for k in [k for k, v in cache.items() if now - v[0] >= CACHE_TTL_S]:
+            del cache[k]
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > cap:
+            cache.popitem(last=False)
 
     # ── station index ──────────────────────────────────────────────────────
     def _ensure_stations(self) -> None:
@@ -149,6 +169,7 @@ class HRRRSoundingService:
                 # serve a recent cached render for this station/run
                 cached = self._cache.get(f"{sid}:{fhour}")
                 if cached and (time.time() - cached[0]) < CACHE_TTL_S:
+                    self._cache.move_to_end(f"{sid}:{fhour}")
                     return cached[1], stn
 
                 try:
@@ -187,7 +208,7 @@ class HRRRSoundingService:
                     except OSError:
                         pass
                     run = "-".join(clean.get("site_info", {}).get("run-time", []))
-                    self._cache[f"{sid}:{fhour}"] = (time.time(), png, run)
+                    self._cache_put(self._cache, f"{sid}:{fhour}", (time.time(), png, run), self._CACHE_CAP)
                     logger.info(
                         f"HRRR sounding: {stn} ({len(png)} bytes) in {time.time() - t0:.0f}s"
                     )
@@ -226,6 +247,7 @@ class HRRRSoundingService:
         with self._lock:
             cached = self._point_cache.get(ckey)
             if cached and (time.time() - cached[0]) < CACHE_TTL_S:
+                self._point_cache.move_to_end(ckey)
                 return cached[1], ckey
 
         # Fetch the exact-point profile (all levels + surface) for the valid hour.
@@ -308,7 +330,7 @@ class HRRRSoundingService:
                 os.unlink(png_path)
             except OSError:
                 pass
-            self._point_cache[ckey] = (time.time(), png)
+            self._cache_put(self._point_cache, ckey, (time.time(), png), self._POINT_CACHE_CAP)
         logger.info(f"HRRR point sounding {ckey} ({len(png)} bytes)")
         return png, ckey
 

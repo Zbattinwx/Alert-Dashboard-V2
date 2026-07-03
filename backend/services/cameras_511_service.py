@@ -19,6 +19,7 @@ CAMERAS_511_KEYS env var as JSON.
 
 import asyncio
 import logging
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -67,6 +68,7 @@ class Cameras511Service:
         self._cameras: list[Camera511] = []
         self._cache_time: Optional[datetime] = None
         self._lock = asyncio.Lock()
+        self._last_forced = 0.0  # monotonic ts of the last honored force_refresh
 
     def _cache_valid(self) -> bool:
         if not self._cache_time:
@@ -74,6 +76,14 @@ class Cameras511Service:
         return datetime.now(timezone.utc) - self._cache_time < self._ttl
 
     async def fetch_all(self, force_refresh: bool = False) -> list[Camera511]:
+        # ?refresh=true is client-triggerable and fans out to every configured
+        # state API — demote repeated forces to cached reads (≥120 s apart).
+        if force_refresh:
+            now = time.monotonic()
+            if now - self._last_forced < 120.0:
+                force_refresh = False
+            else:
+                self._last_forced = now
         if not force_refresh and self._cache_valid():
             return self._cameras
 

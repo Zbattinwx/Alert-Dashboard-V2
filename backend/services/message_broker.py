@@ -344,17 +344,11 @@ class MessageBroker:
 
     async def broadcast_radar_frame_binary(self, frame_bytes: bytes) -> None:
         """Broadcast a raw binary radar frame (RDRF wire format) to all clients."""
-        if not self._connections:
-            return
-        disconnected = []
-        for client_id, connection in self._connections.items():
-            try:
-                await connection.websocket.send_bytes(frame_bytes)
-            except Exception as e:
-                logger.warning(f"Failed to send binary frame to {client_id}: {e}")
-                disconnected.append(client_id)
-        for client_id in disconnected:
-            await self.disconnect(client_id)
+        await self._fan_out(
+            lambda conn: conn.websocket.send_bytes(frame_bytes),
+            timeout=10.0,
+            what="binary frame",
+        )
 
     async def broadcast_radar_status(self, status_data: dict):
         """Broadcast radar status update to all clients."""
@@ -400,22 +394,35 @@ class MessageBroker:
             msg_type: Message type
             data: Message data
         """
+        message = self._format_message(msg_type, data)
+        await self._fan_out(
+            lambda conn: conn.websocket.send_text(message),
+            timeout=5.0,
+            what=str(msg_type),
+        )
+
+    async def _fan_out(self, send, timeout: float, what: str) -> None:
+        """Send to every client CONCURRENTLY with a per-send timeout. Sequential
+        awaits head-of-line block the whole broadcast on one backpressured
+        client's full TCP buffer — a live alert feed can't afford that. Slow or
+        dead clients are dropped."""
         if not self._connections:
             return
 
-        message = self._format_message(msg_type, data)
-        disconnected = []
+        clients = list(self._connections.items())
 
-        for client_id, connection in self._connections.items():
+        async def one(client_id: str, connection) -> Optional[str]:
             try:
-                await connection.websocket.send_text(message)
+                await asyncio.wait_for(send(connection), timeout=timeout)
+                return None
             except Exception as e:
-                logger.warning(f"Failed to send to {client_id}: {e}")
-                disconnected.append(client_id)
+                logger.warning(f"Failed to send {what} to {client_id}: {e}")
+                return client_id
 
-        # Clean up disconnected clients
-        for client_id in disconnected:
-            await self.disconnect(client_id)
+        results = await asyncio.gather(*(one(cid, conn) for cid, conn in clients))
+        for client_id in results:
+            if client_id is not None:
+                await self.disconnect(client_id)
 
     async def _send_to_client(
         self,

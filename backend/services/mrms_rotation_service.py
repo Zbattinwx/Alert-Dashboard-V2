@@ -35,6 +35,8 @@ from typing import Optional
 
 import numpy as np
 
+from .grib_lock import GRIB_DECODE_LOCK
+
 logger = logging.getLogger(__name__)
 
 
@@ -283,7 +285,9 @@ class MRMSRotationService:
             ) as f:
                 f.write(grib_bytes)
                 tmp = f.name
-            with open(tmp, "rb") as f:
+            # eccodes is NOT thread-safe — serialize against the MRMS poller and
+            # the HRRR field service (see services/grib_lock.py).
+            with GRIB_DECODE_LOCK, open(tmp, "rb") as f:
                 msg_id = eccodes.codes_grib_new_from_file(f)
                 if msg_id is None:
                     return None

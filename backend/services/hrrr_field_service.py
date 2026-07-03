@@ -23,24 +23,25 @@ import os
 import struct
 import tempfile
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import numpy as np
 
+from .grib_lock import GRIB_DECODE_LOCK as _DECODE_LOCK
+
 logger = logging.getLogger(__name__)
 
 HRRR_BUCKET = "noaa-hrrr-bdp-pds"
 BINARY_MAGIC = b"HRRR"
 CACHE_MAX = 130  # LRU entries (~2 MB each → ~260 MB cap); fits a full GFS F0–120 loop
-
-# eccodes is NOT thread-safe: its .def parser (flex) keeps global buffer state,
-# so concurrent codes_new_from_message() calls corrupt it ("end of buffer
-# missed" / template syntax errors). The app prefetches with several workers and
-# derived fields decode 2+ messages each, so we serialize the eccodes decode
-# (the slow S3 byte-range fetches stay parallel — they run outside this lock).
-_DECODE_LOCK = threading.Lock()
+RUNS_CACHE_TTL_S = 60   # list_runs makes a burst of HEADs — reuse briefly
+IDX_CACHE_MAX = 200     # .idx files are tiny (~KB); bounded LRU
+IDX_CACHE_TTL_S = 300   # the newest hour's .idx can grow while NOMADS uploads —
+                        # a short uniform TTL is the simple robust choice (one
+                        # tiny re-read per 5 min per file is negligible)
 
 # ── Field registry (extend by adding entries) ───────────────────────────────
 # Each entry needs either an `idx` (one GRIB record, matched as a substring of
@@ -246,9 +247,14 @@ _CALCS = {"ehi": _calc_ehi, "scp": _calc_scp, "stp": _calc_stp}
 class HRRRFieldService:
     def __init__(self) -> None:
         self._s3 = None
-        self._mapping: Optional[np.ndarray] = None  # [T_NJ*T_NI] native flat indices
-        self._mapping_sig: Optional[str] = None
+        # sig → [T_NJ*T_NI] native flat indices. Cached per model/grid-size so
+        # concurrent requests for different models can't swap the mapping out
+        # from under each other (IndexError / wrong grids); bounded (~15 MB ea).
+        self._mappings: "OrderedDict[str, np.ndarray]" = OrderedDict()
+        self._map_lock = threading.Lock()
         self._cache: "OrderedDict[str, bytes]" = OrderedDict()
+        self._runs_cache: dict[str, tuple[float, list[dict]]] = {}  # model → (ts, runs)
+        self._idx_cache: "OrderedDict[str, tuple[float, list[str]]]" = OrderedDict()
         self._lock = threading.Lock()
         self._map_dir = os.path.join(tempfile.gettempdir(), "tbf_hrrr")
         os.makedirs(self._map_dir, exist_ok=True)
@@ -281,9 +287,14 @@ class HRRRFieldService:
 
     def list_runs(self, model: str = "hrrr", limit: int = 10) -> list[dict]:
         """The most recent `limit` runs for the model (newest first). Walks back
-        from now to the latest available run hour, then enumerates prior runs."""
+        from now to the latest available run hour, then enumerates prior runs.
+        Cached briefly — each call probes S3 with a burst of HEADs."""
         if model not in MODELS:
             return []
+        with self._lock:
+            cached = self._runs_cache.get(model)
+            if cached and time.time() - cached[0] < RUNS_CACHE_TTL_S:
+                return cached[1]
         m = MODELS[model]
         now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
         latest: Optional[datetime] = None
@@ -302,6 +313,8 @@ class HRRRFieldService:
                 runs.append({"run": t.strftime("%Y%m%d%H"), "iso": t.isoformat(),
                              "max_fhour": m["max_fhour"](t.hour)})
             t -= timedelta(hours=1)
+        with self._lock:
+            self._runs_cache[model] = (time.time(), runs)
         return runs
 
     def fields(self, model: str = "hrrr") -> list[dict]:
@@ -404,8 +417,8 @@ class HRRRFieldService:
             values, lats, lons, _, _ = self._decode(grib)
 
         values = _conv(spec.get("conv"), values)
-        self._ensure_mapping(lats, lons, model)
-        return values[self._mapping].reshape(T_NJ, T_NI).astype(np.float32)
+        mapping = self._get_mapping(lats, lons, model)
+        return values[mapping].reshape(T_NJ, T_NI).astype(np.float32)
 
     def _timeagg_grid(self, model: str, run: str, param: str, fhour: int, spec: dict):
         """Aggregate a base field over a forecast-hour window (e.g. UH run/3-h max)."""
@@ -450,9 +463,9 @@ class HRRRFieldService:
         if uv is None:
             return None
         u, v, lats, lons = uv
-        self._ensure_mapping(lats, lons, model)
-        ug = u[self._mapping].reshape(T_NJ, T_NI)
-        vg = v[self._mapping].reshape(T_NJ, T_NI)
+        mapping = self._get_mapping(lats, lons, model)
+        ug = u[mapping].reshape(T_NJ, T_NI)
+        vg = v[mapping].reshape(T_NJ, T_NI)
         rs = np.arange(stride // 2, T_NJ, stride)
         cs = np.arange(stride // 2, T_NI, stride)
         U = ug[np.ix_(rs, cs)]
@@ -476,8 +489,8 @@ class HRRRFieldService:
         if grib is None:
             return None
         vals, lats, lons, _, _ = self._decode(grib)
-        self._ensure_mapping(lats, lons, model)
-        grid = vals[self._mapping].reshape(T_NJ, T_NI) / 100.0  # Pa → hPa
+        mapping = self._get_mapping(lats, lons, model)
+        grid = vals[mapping].reshape(T_NJ, T_NI) / 100.0  # Pa → hPa
 
         from scipy.ndimage import gaussian_filter
         from contourpy import contour_generator, LineType
@@ -532,9 +545,24 @@ class HRRRFieldService:
         return {"type": "FeatureCollection", "features": feats, "fhour": fhour}
 
     def _read_idx(self, model: str, key: str) -> list[str]:
+        # Cached with a short uniform TTL: .idx files are immutable once the
+        # hour is fully uploaded, but the newest hour's can still be growing
+        # (see IDX_CACHE_TTL_S) — TTL-ing everything is the simple robust option.
+        ck = f"{model}:{key}"
+        with self._lock:
+            ent = self._idx_cache.get(ck)
+            if ent and time.time() - ent[0] < IDX_CACHE_TTL_S:
+                self._idx_cache.move_to_end(ck)
+                return ent[1]
         s3 = self._get_s3()
         idx = s3.get_object(Bucket=MODELS[model]["bucket"], Key=key + ".idx")["Body"].read().decode("utf-8", "replace")
-        return idx.splitlines()
+        lines = idx.splitlines()
+        with self._lock:
+            self._idx_cache[ck] = (time.time(), lines)
+            self._idx_cache.move_to_end(ck)
+            while len(self._idx_cache) > IDX_CACHE_MAX:
+                self._idx_cache.popitem(last=False)
+        return lines
 
     @staticmethod
     def _idx_range(lines: list[str], idx_match: str) -> tuple[Optional[int], Optional[int]]:
@@ -659,28 +687,38 @@ class HRRRFieldService:
                     pass
         return out
 
-    def _ensure_mapping(self, lats: np.ndarray, lons: np.ndarray, model: str) -> None:
+    def _get_mapping(self, lats: np.ndarray, lons: np.ndarray, model: str) -> np.ndarray:
         # Per-model (HRRR & RRFS-A share the 1799×1059 size but are distinct grids).
+        # Returns the mapping array (never stored in a single mutable slot) so a
+        # concurrent request for another model can't swap it mid-regrid; the lock
+        # only guards cache access — a rare duplicate KDTree build is acceptable.
         sig = f"{model}:{lats.size}"
-        if self._mapping is not None and self._mapping_sig == sig:
-            return
+        with self._map_lock:
+            cached = self._mappings.get(sig)
+            if cached is not None:
+                self._mappings.move_to_end(sig)
+                return cached
         cache_path = os.path.join(self._map_dir, f"map_{model}_{lats.size}_{T_NI}x{T_NJ}.npy")
         if os.path.exists(cache_path):
-            self._mapping = np.load(cache_path)
-            self._mapping_sig = sig
-            return
-        from scipy.spatial import cKDTree
-        tree = cKDTree(np.column_stack([lons, lats]))
-        tx = T_W + (np.arange(T_NI) + 0.5) * T_RES
-        ty = T_N - (np.arange(T_NJ) + 0.5) * T_RES  # N→S rows
-        gx, gy = np.meshgrid(tx, ty)
-        _, idx = tree.query(np.column_stack([gx.ravel(), gy.ravel()]))
-        self._mapping = idx.astype(np.int64)
-        self._mapping_sig = sig
-        try:
-            np.save(cache_path, self._mapping)
-        except Exception:
-            pass
+            mapping = np.load(cache_path)
+        else:
+            from scipy.spatial import cKDTree
+            tree = cKDTree(np.column_stack([lons, lats]))
+            tx = T_W + (np.arange(T_NI) + 0.5) * T_RES
+            ty = T_N - (np.arange(T_NJ) + 0.5) * T_RES  # N→S rows
+            gx, gy = np.meshgrid(tx, ty)
+            _, idx = tree.query(np.column_stack([gx.ravel(), gy.ravel()]))
+            mapping = idx.astype(np.int64)
+            try:
+                np.save(cache_path, mapping)
+            except Exception:
+                pass
+        with self._map_lock:
+            self._mappings[sig] = mapping
+            self._mappings.move_to_end(sig)
+            while len(self._mappings) > 8:  # 4 models × occasional grid change
+                self._mappings.popitem(last=False)
+        return mapping
 
     def _encode(self, grid: np.ndarray, vmin: float, vmax: float, nodata_below: Optional[float]) -> bytes:
         span = (vmax - vmin) or 1.0

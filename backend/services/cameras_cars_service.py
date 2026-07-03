@@ -18,6 +18,7 @@ bbox + maxZoom) down to individual cameras and dedupe by uri.
 
 import asyncio
 import logging
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -83,6 +84,7 @@ class CamerasCARSService:
         self._cameras: list[CameraCARS] = []
         self._cache_time: Optional[datetime] = None
         self._lock = asyncio.Lock()
+        self._last_forced = 0.0  # monotonic ts of the last honored force_refresh
 
     def _cache_valid(self) -> bool:
         if not self._cache_time:
@@ -90,6 +92,14 @@ class CamerasCARSService:
         return datetime.now(timezone.utc) - self._cache_time < self._ttl
 
     async def fetch_all(self, force_refresh: bool = False) -> list[CameraCARS]:
+        # ?refresh=true is client-triggerable and re-runs the recursive cluster
+        # expansion (~4400 cams, 7 states) — demote repeated forces (≥120 s apart).
+        if force_refresh:
+            now = time.monotonic()
+            if now - self._last_forced < 120.0:
+                force_refresh = False
+            else:
+                self._last_forced = now
         if not force_refresh and self._cache_valid():
             return self._cameras
 
