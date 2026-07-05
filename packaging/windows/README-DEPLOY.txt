@@ -7,7 +7,9 @@ WHAT'S IN HERE
   caddy.exe            Reverse proxy that puts the app on /v2 over HTTPS
   Caddyfile            Caddy routing config (atmosphericx.ddns.net)
   start-server.bat     Starts Caddy + the backend (with auto-restart)
-  update.bat           Installs a newer build (see UPDATING below)
+  update.bat           Installs a newer build by hand (see MANUAL UPDATE below)
+  apply-update.ps1     Used by the in-dashboard auto-updater (see AUTOMATIC UPDATES)
+  version.json         This build's id (the updater compares it to the latest)
   .env.example         Settings template -> rename to .env (or copy your real one)
 
 
@@ -47,7 +49,29 @@ SPONSOR LOGOS ON THE TICKER (ticker-v2)
   (URL-encoded).
 
 
-UPDATING TO A NEW BUILD
+AUTOMATIC UPDATES (recommended)
+  Once you're running a build that includes apply-update.ps1 + version.json (this
+  one and newer), the dashboard updates itself from GitHub - no more copying zips.
+
+  How it works:
+    - The dashboard checks the release channel every ~30 min. When a newer build
+      is published it shows a blue "Dashboard update available" banner at the top.
+    - Click "Update now" (from the dashboard on THIS PC or your LAN - the button is
+      blocked over the public /v2 URL so nobody outside can force a restart). It
+      downloads the new bundle, verifies its SHA-256, backs up the current app to
+      _backup\, swaps it in, and restarts. Your .env / data\ / Caddyfile are kept.
+    - The page reconnects on the new version automatically.
+
+  Nothing to install - it's built in. To publish a new build from the dev PC:
+      bash packaging/windows/build ... (build-windows.bat) then
+      bash packaging/windows/publish-dashboard-bundle.sh
+  which uploads the zip + manifest to the dashboard-releases GitHub repo. Within
+  ~30 min (or on next dashboard load) the banner appears here.
+
+  Turn it off:  set  DASHBOARD_UPDATE_ENABLED=false  in .env.
+
+
+MANUAL UPDATE (fallback / first-time bootstrap)
   1. On the dev PC run build-windows.bat -> produces AlertDashboardV2-Server.zip
   2. Copy that zip to this PC and extract it.
   3. Make a folder named  _update  next to start-server.bat, and put the new
