@@ -243,32 +243,39 @@ class AlertManager:
                     )
                     return False
 
-                # A watch cancellation often clears only SOME counties (a WFO's
-                # WCN cancelling its counties while the watch continues elsewhere
-                # under the same SPC ETN). Subtract the cleared counties and keep
-                # the watch alive; only fall through to full removal when none
-                # remain. Warnings are polygon-based, so they keep whole-alert
-                # cancellation behaviour.
-                if existing.significance == AlertSignificance.WATCH and alert.cancelled_areas:
+                # A cancellation often clears only SOME areas while the event
+                # continues in others under the same ETN — a WFO's WCN clearing a
+                # watch's counties, or a warning follow-up (SVS) whose storm has
+                # left one county while it continues for the rest. Subtract the
+                # cleared areas and keep the alert alive; only fall through to full
+                # removal when none remain. Warnings are polygon-based, so also
+                # adopt the shrunk polygon from the follow-up if it carries one, so
+                # the map matches the (now smaller) county list.
+                if alert.cancelled_areas:
                     remaining = sorted(set(existing.affected_areas or []) - set(alert.cancelled_areas))
                     if remaining:
                         existing.affected_areas = remaining
                         existing.display_locations = get_display_locations(remaining)
                         if existing.vtec and alert.vtec:
                             existing.vtec.action = alert.vtec.action
+                        is_zone_based = existing.significance in (
+                            AlertSignificance.WATCH, AlertSignificance.ADVISORY
+                        )
+                        if alert.polygon and not is_zone_based:
+                            existing.polygon = alert.polygon
                         existing.mark_updated()
                         audit_logger.info(
-                            f"WATCH_PARTIAL_CANCEL | {alert.product_id} | "
+                            f"PARTIAL_CANCEL | {alert.product_id} | "
                             f"Cleared: {alert.cancelled_areas} | Remaining: {len(remaining)} | "
                             f"Incoming: {json.dumps(_alert_summary(alert))}"
                         )
                         logger.info(
-                            f"Watch {alert.product_id}: cleared {len(alert.cancelled_areas)} "
-                            f"counties, {len(remaining)} remain"
+                            f"Alert {alert.product_id}: cleared {len(alert.cancelled_areas)} "
+                            f"areas, {len(remaining)} remain"
                         )
                         self._notify_updated(existing)
                         return True
-                    # else: no counties remain → fall through to full removal
+                    # else: no areas remain → fall through to full removal
 
                 # Audit log the cancellation (remove_alert will also log, but we want the incoming data)
                 audit_logger.info(
@@ -356,21 +363,24 @@ class AlertManager:
                     # areas (e.g. western/eastern halves) → accumulate the union.
                     existing.affected_areas = sorted(areas_before_set | set(alert.affected_areas))
 
-            # A Watch County Notification can continue some counties while
-            # clearing others in the same product. Subtract any cleared counties
-            # from the watch (the union above only ever grows the set, so without
-            # this the cleared counties would stay filled until the whole watch
-            # expires). Gated to watches — warnings are polygon-based.
-            if alert.cancelled_areas and existing.significance == AlertSignificance.WATCH:
+            # A follow-up product can continue the event for some areas while
+            # clearing others in the same transmission — a WCN continuing some
+            # watch counties, or a warning SVS that CANs the county the storm has
+            # left while CONtinuing the rest. Subtract any cleared areas (the union
+            # above only ever grows the set, so without this a county the NWS
+            # dropped would stay filled — and every widget with it — until the
+            # whole event expires). Applies to warnings too: the polygon is
+            # replaced below, and this keeps the county list in step with it.
+            if alert.cancelled_areas:
                 existing.affected_areas = sorted(set(existing.affected_areas or []) - set(alert.cancelled_areas))
                 if not existing.affected_areas:
-                    # Every county cleared → remove the whole watch.
+                    # Every area cleared → remove the whole alert.
                     self._alerts.pop(alert.product_id, None)
                     audit_logger.info(
-                        f"WATCH_FULLY_CLEARED | {alert.product_id} | "
+                        f"FULLY_CLEARED | {alert.product_id} | "
                         f"Incoming: {json.dumps(_alert_summary(alert))}"
                     )
-                    logger.info(f"Watch {alert.product_id}: all counties cleared, removing")
+                    logger.info(f"Alert {alert.product_id}: all areas cleared, removing")
                     self._notify_removed(existing)
                     return True
 
