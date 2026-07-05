@@ -21,7 +21,7 @@ ZIP="$ROOT/dist-windows/AlertDashboardV2-Server.zip"
 [ -f "$ZIP" ] || { echo "ERROR: $ZIP not found — run build-windows.bat first."; exit 1; }
 [ -f "$BUNDLE_DIR/version.json" ] || { echo "ERROR: $BUNDLE_DIR/version.json not found (old build?)."; exit 1; }
 
-BUILD="$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['build'])" "$BUNDLE_DIR/version.json")"
+BUILD="$(python -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8-sig'))['build'])" "$BUNDLE_DIR/version.json")"
 [ -n "$BUILD" ] || { echo "ERROR: could not read build id from version.json"; exit 1; }
 
 echo "==> Computing SHA-256 of the bundle ..."

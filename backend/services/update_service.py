@@ -76,7 +76,9 @@ class UpdateService:
         vf = self._version_file()
         try:
             if vf.exists():
-                data = json.loads(vf.read_text(encoding="utf-8"))
+                # utf-8-sig: build-windows.bat writes version.json via PowerShell
+                # Set-Content, which prepends a UTF-8 BOM that plain utf-8 chokes on.
+                data = json.loads(vf.read_text(encoding="utf-8-sig"))
                 build = str(data.get("build") or "").strip()
                 return build or None
         except Exception as e:
