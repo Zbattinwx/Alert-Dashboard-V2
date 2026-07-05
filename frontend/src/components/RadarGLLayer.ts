@@ -222,6 +222,11 @@ export class RadarGLLayer implements CustomLayerInterface {
   private _azTex:   WebGLTexture | null = null;
   private _rngTex:  WebGLTexture | null = null;
   private _gateTex: WebGLTexture | null = null;
+  // Dimensions the data textures are currently allocated at — the polar grid is
+  // constant across frames of a product, so we keep the textures and update them
+  // in place (texSubImage2D), reallocating only when these actually change.
+  private _texRays  = 0;
+  private _texGates = 0;
 
   // Frame state
   private _pending:  RadarBinaryFrame | null = null;
@@ -504,11 +509,10 @@ export class RadarGLLayer implements CustomLayerInterface {
     if (this._azTex)   { gl.deleteTexture(this._azTex);   this._azTex   = null; }
     if (this._rngTex)  { gl.deleteTexture(this._rngTex);  this._rngTex  = null; }
     if (this._gateTex) { gl.deleteTexture(this._gateTex); this._gateTex = null; }
+    this._texRays = this._texGates = 0;
   }
 
   private _uploadFrame(gl: WebGL2RenderingContext, frame: RadarBinaryFrame): void {
-    this._clearDataTex(gl);
-
     if (this._lutProd !== frame.product) {
       gl.bindTexture(gl.TEXTURE_2D, this._lut);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 1, 0,
@@ -516,19 +520,38 @@ export class RadarGLLayer implements CustomLayerInterface {
       this._lutProd = frame.product;
     }
 
-    this._azTex = makeTex(gl);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, frame.n_rays, 1, 0,
-      gl.RED, gl.FLOAT, frame.azimuths);
+    // Reuse the data textures across frames — only (re)allocate when the polar
+    // grid dimensions change (product switch, super-res 720↔360). Looping steps
+    // frames several times/sec for hours; recreating textures each time thrashed
+    // the driver allocator (a GPU-TDR aggravator). texSubImage2D updates in place.
+    const realloc =
+      !this._azTex || !this._rngTex || !this._gateTex ||
+      this._texRays !== frame.n_rays || this._texGates !== frame.n_gates;
 
-    this._rngTex = makeTex(gl);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, frame.n_gates, 1, 0,
-      gl.RED, gl.FLOAT, frame.ranges_m);
-
-    this._gateTex = makeTex(gl);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, frame.n_gates, frame.n_rays, 0,
-      gl.RED_INTEGER, gl.UNSIGNED_BYTE, frame.gate_values);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    if (realloc) {
+      this._clearDataTex(gl);
+      this._azTex = makeTex(gl);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, frame.n_rays, 1, 0, gl.RED, gl.FLOAT, frame.azimuths);
+      this._rngTex = makeTex(gl);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, frame.n_gates, 1, 0, gl.RED, gl.FLOAT, frame.ranges_m);
+      this._gateTex = makeTex(gl);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, frame.n_gates, frame.n_rays, 0,
+        gl.RED_INTEGER, gl.UNSIGNED_BYTE, frame.gate_values);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      this._texRays = frame.n_rays;
+      this._texGates = frame.n_gates;
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, this._azTex);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.n_rays, 1, gl.RED, gl.FLOAT, frame.azimuths);
+      gl.bindTexture(gl.TEXTURE_2D, this._rngTex);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.n_gates, 1, gl.RED, gl.FLOAT, frame.ranges_m);
+      gl.bindTexture(gl.TEXTURE_2D, this._gateTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.n_gates, frame.n_rays,
+        gl.RED_INTEGER, gl.UNSIGNED_BYTE, frame.gate_values);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    }
 
     // Update radar quad to match new frame bounds
     const b = frame.bounds;

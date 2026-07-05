@@ -139,6 +139,10 @@ export class MRMSGLLayer implements CustomLayerInterface {
   private _posBuf:  WebGLBuffer             | null = null;
   private _lut:     WebGLTexture            | null = null;
   private _dataTex: WebGLTexture            | null = null;
+  // Dimensions the data texture is currently allocated at — updated in place
+  // (texSubImage2D) unless the CONUS grid size changes.
+  private _texNi = 0;
+  private _texNj = 0;
   private _u:       Record<string, WebGLUniformLocation | null> = {};
 
   private _frame:          MRMSFrame | null = null;
@@ -258,11 +262,10 @@ export class MRMSGLLayer implements CustomLayerInterface {
 
   private _clearData(gl: WebGL2RenderingContext): void {
     if (this._dataTex) { gl.deleteTexture(this._dataTex); this._dataTex = null; }
+    this._texNi = this._texNj = 0;
   }
 
   private _uploadFrame(gl: WebGL2RenderingContext, frame: MRMSFrame): void {
-    this._clearData(gl);
-
     const { ni, nj, north, south, west, east } = frame;
 
     // Update vertex quad to cover the MRMS bounding box in Mercator
@@ -280,19 +283,26 @@ export class MRMSGLLayer implements CustomLayerInterface {
     // Upload data as R8 (normalised float) with LINEAR filtering.
     // GL_LINEAR lets the GPU handle bilinear interpolation between grid points —
     // this is the key to getting smooth WeatherWise-quality rendering.
-    this._dataTex = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, this._dataTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    // R8 (not R8UI) — normalised uint8 so GL_LINEAR works and shader gets [0,1]
-    gl.texImage2D(
-      gl.TEXTURE_2D, 0, gl.R8,
-      ni, nj, 0,
-      gl.RED, gl.UNSIGNED_BYTE,
-      frame.gate,
-    );
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    // Reuse the (large, 3500×1750) CONUS texture across frames — MRMS loops with
+    // the radar, so recreating this 6 MB texture every step thrashed the driver
+    // allocator. Reallocate only when the grid dimensions change.
+    if (!this._dataTex || this._texNi !== ni || this._texNj !== nj) {
+      this._clearData(gl);
+      this._dataTex = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, this._dataTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      // R8 (not R8UI) — normalised uint8 so GL_LINEAR works and shader gets [0,1]
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, ni, nj, 0, gl.RED, gl.UNSIGNED_BYTE, frame.gate);
+      this._texNi = ni;
+      this._texNj = nj;
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, this._dataTex);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, ni, nj, gl.RED, gl.UNSIGNED_BYTE, frame.gate);
+    }
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
   }
 }
