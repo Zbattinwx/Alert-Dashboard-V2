@@ -31,6 +31,7 @@ import type { MesoscaleDiscussion } from './types/spc';
 import type { ChaserPosition } from './types/chaser';
 import type { RadarFrame, RadarBinaryFrame, RadarStatus, StormCell, LightningFlash, MCSSystem } from './types/radar';
 import { apiUrl, wsUrl } from './utils/api';
+import { UpdateBanner } from './components/UpdateBanner';
 import './styles/main.css';
 import './styles/social.css';
 import './styles/radar.css';
@@ -223,6 +224,7 @@ const Dashboard: React.FC = () => {
 
   return (
     <>
+      <UpdateBanner />
       <div className="app-layout">
         <Sidebar
           activeSection={activeSection}

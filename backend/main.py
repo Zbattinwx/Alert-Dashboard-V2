@@ -57,6 +57,7 @@ try:
     from .services.nexrad_sites import NEXRAD_SITES, get_nearest_sites
     from .services.glm_service import get_glm_service, start_glm_service, stop_glm_service
     from .services.mrms_service import get_mrms_service, start_mrms_service, stop_mrms_service
+    from .services.update_service import get_update_service
 except ImportError:
     # Direct execution: python backend/main.py
     import sys
@@ -93,6 +94,7 @@ except ImportError:
     from backend.services.nexrad_sites import NEXRAD_SITES, get_nearest_sites
     from backend.services.glm_service import get_glm_service, start_glm_service, stop_glm_service
     from backend.services.mrms_service import get_mrms_service, start_mrms_service, stop_mrms_service
+    from backend.services.update_service import get_update_service
 
 logger = logging.getLogger(__name__)
 
@@ -1237,6 +1239,48 @@ async def get_stats():
     """Get alert statistics."""
     alert_manager = get_alert_manager()
     return alert_manager.get_statistics()
+
+
+def _client_is_local(request: Request) -> bool:
+    """True if the request originates from the same machine or the LAN.
+
+    Caddy proxies /v2 from loopback, so trust the real client via
+    X-Forwarded-For when present. Public (internet) callers are rejected so a
+    server restart can only be triggered from the operator's own network.
+    """
+    ip = request.client.host if request.client else ""
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        ip = fwd.split(",")[0].strip()
+    if ip in ("127.0.0.1", "::1", "localhost"):
+        return True
+    return (
+        ip.startswith("192.168.")
+        or ip.startswith("10.")
+        or ip.startswith("169.254.")
+        or any(ip.startswith(f"172.{n}.") for n in range(16, 32))
+    )
+
+
+@app.get("/api/update/status")
+async def update_status():
+    """Report the deployed build vs the latest published build (self-updater)."""
+    return await get_update_service().status()
+
+
+@app.post("/api/update/apply")
+async def update_apply(request: Request):
+    """Trigger an in-place self-update (packaged Windows build only).
+
+    Restricted to same-machine / LAN callers so the public /v2 URL can't force a
+    restart. Applies only when a newer, checksum-verified build is available.
+    """
+    if not _client_is_local(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Updates can only be started from the dashboard on this PC or its local network.",
+        )
+    return await get_update_service().apply()
 
 
 @app.get("/api/event-stats")

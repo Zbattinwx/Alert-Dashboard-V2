@@ -67,6 +67,20 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, description="HTTP server port")
     websocket_port: int = Field(default=8765, description="WebSocket server port")
 
+    # Self-update (standalone Windows deployment only). The dashboard checks this
+    # manifest for a newer packaged build and, on operator confirmation, downloads
+    # + verifies + applies it in place. See backend/services/update_service.py.
+    dashboard_update_enabled: bool = Field(
+        default=True, description="Enable the in-dashboard self-updater (packaged Windows build)"
+    )
+    dashboard_update_manifest_url: str = Field(
+        default="https://github.com/Zbattinwx/dashboard-releases/releases/latest/download/latest.json",
+        description="URL of the update manifest (version + sha256 + zip URL)",
+    )
+    dashboard_update_check_interval_minutes: int = Field(
+        default=30, description="How often to re-check the update manifest (minutes)"
+    )
+
     # NWWS-OI (Weather Wire) credentials
     nwws_username: Optional[str] = Field(default=None, description="NWWS-OI username")
     nwws_password: Optional[str] = Field(default=None, description="NWWS-OI password")

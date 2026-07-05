@@ -3,6 +3,12 @@ title Alert Dashboard V2 - Server
 color 0A
 cd /d "%~dp0"
 
+REM Promote updater scripts staged by a previous auto-update (a running script
+REM can't overwrite itself, so apply-update.ps1 leaves them as *.new).
+if exist "apply-update.ps1.new" ( move /y "apply-update.ps1.new" "apply-update.ps1" >nul )
+if exist "update.bat.new" ( move /y "update.bat.new" "update.bat" >nul )
+if exist ".updating" ( del /q ".updating" >nul 2>&1 )
+
 echo ============================================
 echo    Alert Dashboard V2 - Server
 echo ============================================
@@ -59,6 +65,11 @@ echo.
 
 :loop
 dashboard-backend\dashboard-backend.exe
+if exist ".updating" (
+    echo.
+    echo [INFO] Update in progress - the updater will relaunch the server. Closing this window.
+    exit /b 0
+)
 echo.
 echo [WARN] Backend exited. Restarting in 5s...  (close window to stop)
 timeout /t 5 /nobreak >nul

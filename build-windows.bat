@@ -15,6 +15,10 @@ cd /d "%~dp0"
 
 set BUNDLE=dist-windows\AlertDashboardV2-Server
 
+REM Build id = UTC timestamp (sortable / monotonic). Stamped into the bundle so
+REM the in-dashboard self-updater can compare the deployed build to the published one.
+for /f %%i in ('powershell -NoProfile -Command "(Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss')"') do set BUILD=%%i
+
 if not exist ".venv-build\Scripts\pyinstaller.exe" (
     echo [ERROR] .venv-build\Scripts\pyinstaller.exe not found.
     echo         The build virtualenv with PyInstaller + radar deps is required.
@@ -66,8 +70,13 @@ if exist caddy.exe ( copy /y caddy.exe "%BUNDLE%\caddy.exe" >nul ) else ( echo [
 copy /y "packaging\windows\Caddyfile"         "%BUNDLE%\Caddyfile" >nul
 copy /y "packaging\windows\start-server.bat"  "%BUNDLE%\start-server.bat" >nul
 copy /y "packaging\windows\update.bat"        "%BUNDLE%\update.bat" >nul
+copy /y "packaging\windows\apply-update.ps1"  "%BUNDLE%\apply-update.ps1" >nul
 copy /y "packaging\windows\.env.example"      "%BUNDLE%\.env.example" >nul
 copy /y "packaging\windows\README-DEPLOY.txt" "%BUNDLE%\README-DEPLOY.txt" >nul
+
+REM Stamp the build id so the deployed server knows its own version.
+powershell -NoProfile -Command "[ordered]@{app='2.0.0';build='%BUILD%';built_at=(Get-Date).ToUniversalTime().ToString('o')} | ConvertTo-Json | Set-Content -Encoding utf8 '%BUNDLE%\version.json'"
+echo    build id: %BUILD%
 
 echo.
 echo [4/4] Zipping bundle...
