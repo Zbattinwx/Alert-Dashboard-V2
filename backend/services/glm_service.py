@@ -1,13 +1,23 @@
 """
-GOES-16 Geostationary Lightning Mapper (GLM) service.
+GOES-East Geostationary Lightning Mapper (GLM) service.
 
 Downloads near-realtime lightning flash data from NOAA's open AWS S3 bucket
-(noaa-goes16). GLM detects optical lightning (IC + CG) across CONUS with
+(noaa-goes19 — GOES-19, the operational GOES-East at 75.2°W since 2025-04-04,
+replacing GOES-16). GLM detects optical lightning (IC + CG) across CONUS with
 ~20 second latency and ~8 km spatial resolution.
 
-Maintains a rolling 15-minute window of flash positions + energies.
-Broadcasts new flashes via WebSocket and exposes flash-rate data for
-storm cell scoring.
+**Satellite choice matters for detection efficiency.** GLM's DE falls off toward
+the edge of the satellite's disk. GOES-East puts the eastern/central US (our
+Ohio-based coverage) near nadir (~40° earth-central angle → good DE), whereas
+GOES-West (noaa-goes18, 137.2°W) sees Ohio ~63° off-nadir near the edge of the
+usable field, missing most flashes there — measured live, GOES-West saw 0 flashes
+over Dayton in a 2-min window where GOES-East saw 14 (and 4× more across the
+eastern US). Use GOES-West only for a Pacific/far-west-focused deployment.
+
+Maintains a rolling 60-minute window of flash positions + energies. Each poll
+processes EVERY new granule since the last (GLM emits one file per ~20 s), not
+just the newest. Broadcasts new flashes via WebSocket and exposes flash-rate data
+for storm cell scoring.
 """
 
 import asyncio
@@ -20,8 +30,11 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# AWS S3 bucket for GOES-16 GLM data (public, no credentials needed)
-GLM_BUCKET = "noaa-goes18"
+# AWS S3 bucket for GOES-East GLM data (public, no credentials needed). GOES-19
+# is the operational GOES-East (75.2°W); it covers the eastern/central US (our
+# audience) near nadir. noaa-goes18 (GOES-West, 137.2°W) badly under-detects
+# lightning over the eastern US — see the module docstring.
+GLM_BUCKET = "noaa-goes19"
 GLM_PREFIX = "GLM-L2-LCFA"   # Lightning Cluster-Filter Algorithm Level 2
 
 # How many minutes of flashes to keep in the rolling window. 60 so the radar
@@ -128,40 +141,50 @@ class GLMService:
             # Files are produced every ~20s so an hour has ~180 objects.
             # List with a suffix marker so we only fetch the last few objects,
             # avoiding a full bucket listing.
+            # Gather granule keys across the current + previous UTC hour (a poll can
+            # straddle an hour boundary). Keys embed the scan time, so lexical order
+            # is chronological.
             now = datetime.now(timezone.utc)
-            key = None
-            for hour_offset in [0, -1, -2]:
+            all_keys: list[str] = []
+            for hour_offset in (-1, 0):
                 t = now + timedelta(hours=hour_offset)
                 doy = t.timetuple().tm_yday
                 prefix = f"{GLM_PREFIX}/{t.year}/{doy:03d}/{t.hour:02d}/"
                 try:
-                    resp = s3.list_objects_v2(
-                        Bucket=GLM_BUCKET,
-                        Prefix=prefix,
-                        MaxKeys=200,   # up to ~180 files per hour
-                    )
-                    objects = resp.get("Contents", [])
-                    if objects:
-                        objects.sort(key=lambda o: o["Key"])
-                        key = objects[-1]["Key"]
-                        break
+                    resp = s3.list_objects_v2(Bucket=GLM_BUCKET, Prefix=prefix, MaxKeys=300)
+                    all_keys += [o["Key"] for o in resp.get("Contents", [])]
                 except Exception as e:
                     logger.debug(f"GLM list error for hour offset {hour_offset}: {e}")
+            all_keys.sort()
 
-            if not key:
+            if not all_keys:
                 logger.debug("GLM: no files found in the last 2 hours")
                 return []
 
-            if key == self._last_file_key:
-                return []   # already processed
+            # Process EVERY new granule since the last poll — GLM emits a file per
+            # ~20 s, so grabbing only the newest each 30 s poll dropped ~1/3 of
+            # flashes. First run: seed with just the latest few (don't backfill a
+            # whole hour on startup).
+            if self._last_file_key is None:
+                new_keys = all_keys[-3:]
+            else:
+                new_keys = [k for k in all_keys if k > self._last_file_key]
+            if not new_keys:
+                return []   # nothing new since last poll
+            # Bound the work if we ever fall behind (e.g. after a stall/restart).
+            MAX_GRANULES = 12
+            if len(new_keys) > MAX_GRANULES:
+                new_keys = new_keys[-MAX_GRANULES:]
 
-            logger.info(f"GLM: downloading {key.split('/')[-1]}")
-            obj = s3.get_object(Bucket=GLM_BUCKET, Key=key)
-            data = obj["Body"].read()
-            self._last_file_key = key
-
-            flashes = self._parse_nc(data, key)
-            logger.info(f"GLM: parsed {len(flashes)} flashes")
+            flashes: list[LightningFlash] = []
+            for key in new_keys:
+                try:
+                    data = s3.get_object(Bucket=GLM_BUCKET, Key=key)["Body"].read()
+                    flashes += self._parse_nc(data, key)
+                except Exception as e:
+                    logger.debug(f"GLM fetch/parse error {key.split('/')[-1]}: {e}")
+            self._last_file_key = new_keys[-1]
+            logger.info(f"GLM: {len(new_keys)} granule(s) → {len(flashes)} flashes")
             return flashes
 
         except ImportError as e:
