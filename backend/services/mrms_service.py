@@ -55,11 +55,18 @@ MRMS_VMAX    =  80.0
 # else is fetched on demand. Verified ranges/units against live S3 (2026-06-28).
 MRMS_PRODUCTS: dict[str, dict] = {
     "reflectivity": {"s3": "CONUS/MergedReflectivityQCComposite_00.50", "vmin": -20.0, "vmax": 80.0, "scale": 1.0, "nodata_below": -15.0, "units": "dBZ"},
-    "qpe_1h":   {"s3": "CONUS/MultiSensor_QPE_01H_Pass2_00.00", "vmin": 0.0, "vmax": 4.0,  "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
-    "qpe_3h":   {"s3": "CONUS/MultiSensor_QPE_03H_Pass2_00.00", "vmin": 0.0, "vmax": 6.0,  "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
-    "qpe_6h":   {"s3": "CONUS/MultiSensor_QPE_06H_Pass2_00.00", "vmin": 0.0, "vmax": 8.0,  "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
-    "qpe_12h":  {"s3": "CONUS/MultiSensor_QPE_12H_Pass2_00.00", "vmin": 0.0, "vmax": 10.0, "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
-    "qpe_24h":  {"s3": "CONUS/MultiSensor_QPE_24H_Pass2_00.00", "vmin": 0.0, "vmax": 15.0, "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    # QPE: use the RADAR-ONLY accumulations, not MultiSensor *Pass2*. Pass2 waits
+    # ~1 h to fold in hourly gauge data (and the MultiSensor accumulations publish
+    # only hourly), so the app showed precip "an hour+ behind." RadarOnly_QPE_01H
+    # updates every ~2 min (near-real-time); the multi-hour ones publish right on
+    # the hour. Trade-off: radar-derived (no gauge bias correction), which is the
+    # right call for a live radar view — freshness over gauge totals that land an
+    # hour late. Same 0.01° grid + GRIB2 format, so only the S3 path changes.
+    "qpe_1h":   {"s3": "CONUS/RadarOnly_QPE_01H_00.00", "vmin": 0.0, "vmax": 4.0,  "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    "qpe_3h":   {"s3": "CONUS/RadarOnly_QPE_03H_00.00", "vmin": 0.0, "vmax": 6.0,  "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    "qpe_6h":   {"s3": "CONUS/RadarOnly_QPE_06H_00.00", "vmin": 0.0, "vmax": 8.0,  "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    "qpe_12h":  {"s3": "CONUS/RadarOnly_QPE_12H_00.00", "vmin": 0.0, "vmax": 10.0, "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
+    "qpe_24h":  {"s3": "CONUS/RadarOnly_QPE_24H_00.00", "vmin": 0.0, "vmax": 15.0, "scale": 0.0393701, "nodata_below": 0.01, "units": "in"},
     "precip_rate": {"s3": "CONUS/PrecipRate_00.00", "vmin": 0.0, "vmax": 6.0, "scale": 0.0393701, "nodata_below": 0.01, "units": "in/hr"},
     "mesh":     {"s3": "CONUS/MESH_00.50",            "vmin": 0.0, "vmax": 4.0, "scale": 0.0393701, "nodata_below": 0.05, "units": "in"},
     "mesh_30":  {"s3": "CONUS/MESH_Max_30min_00.50",  "vmin": 0.0, "vmax": 4.0, "scale": 0.0393701, "nodata_below": 0.05, "units": "in"},
