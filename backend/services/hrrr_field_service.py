@@ -104,11 +104,21 @@ HRRR_FIELDS: dict[str, dict] = {
     "snod":  {"idx": ":SNOD:surface:",  "label": "Snow Depth",        "conv": "m2in", "vmin": 0.0, "vmax": 24.0, "units": "in", "lut": "snow", "group": "Winter", "nodata_below": 0.1},
     "asnow": {"idx": ":ASNOW:surface:", "label": "Accumulated Snow",  "conv": "m2in", "vmin": 0.0, "vmax": 18.0, "units": "in", "lut": "snow", "group": "Winter", "nodata_below": 0.1},
     "ptype": {"derive": ("ptype", ":CRAIN:surface:", ":CSNOW:surface:", ":CICEP:surface:", ":CFRZR:surface:"), "label": "Precip Type", "conv": None, "vmin": 0.0, "vmax": 4.0, "units": "", "lut": "ptype", "group": "Winter", "nodata_below": 0.5},
+
+    # ── Smoke (HRRR-Smoke, operational since HRRRv4) ──
+    # MASSDEN = lowest-model-level (~8 m AGL) smoke mass density, GRIB stores
+    # kg/m³ → ×1e9 = µg/m³. COLMD = vertically integrated smoke, kg/m² → ×1e6 =
+    # mg/m². Both live in the wrfsfc file (verified in the live .idx).
+    # vmax 400: Canadian-wildfire events push near-surface smoke past 200 µg/m³.
+    "smoke_sfc": {"idx": ":MASSDEN:8 m above ground:", "label": "Near-Surface Smoke", "conv": "x1e9", "vmin": 0.0, "vmax": 400.0, "units": "µg/m³", "lut": "smoke", "group": "Smoke", "nodata_below": 1.0},
+    "smoke_col": {"idx": ":COLMD:entire atmosphere",   "label": "Vertically Integrated Smoke", "conv": "x1e6", "vmin": 0.0, "vmax": 500.0, "units": "mg/m²", "lut": "smoke", "group": "Smoke", "nodata_below": 5.0},
 }
 
 # Mark pressure-level fields (wrfprs file) — everything at an "mb" level.
 for _id, _spec in HRRR_FIELDS.items():
     _m = _spec.get("idx") or (_spec.get("derive") or (None, ""))[1]
+    if isinstance(_m, tuple):
+        _m = _m[0]  # multi-part matcher → the var:level part carries the level
     if isinstance(_m, str) and " mb:" in _m:
         _spec["file"] = "prs"
 
@@ -127,6 +137,16 @@ def _rrfs_fields() -> dict[str, dict]:
     out["omega700"] = {"idx": ":DZDT:700 mb:", "label": "700 mb Vertical Velocity",
                        "conv": None, "vmin": -3.0, "vmax": 3.0, "units": "m/s",
                        "lut": "omega_up", "group": "Dynamics", "file": "prslev"}
+    # RRFS disambiguates aerosol species with GRIB2 attributes appended to the
+    # idx line (smoke vs dust vs total share :MASSDEN:8 m above ground:), so the
+    # smoke fields need multi-part matchers — every part must be in the line.
+    # Verified live in rrfs.tXXz.2dfld f000/f006 idx (prslev carries NO smoke).
+    out["smoke_sfc"] = {**out["smoke_sfc"], "idx": (":MASSDEN:8 m above ground:", "aerosol=Particulate organic matter dry")}
+    out["smoke_col"] = {**out["smoke_col"], "idx": (":COLMD:entire atmosphere", "aerosol=Particulate organic matter dry")}
+    # RRFS bonus: total-aerosol 1-h averages = PM2.5 / PM10 (µg/m³). No record at
+    # f000 (an average needs an hour) → zero_at_f0 keeps loop prefetch unstalled.
+    out["pm25"] = {"idx": (":MASSDEN:8 m above ground:", "aerosol=Total aerosol:aerosol_size <2.5e-06"), "label": "PM2.5 (1-h avg)", "conv": "x1e9", "vmin": 0.0, "vmax": 250.0, "units": "µg/m³", "lut": "smoke", "group": "Smoke", "nodata_below": 2.0, "file": "2dfld", "zero_at_f0": True}
+    out["pm10"] = {"idx": (":MASSDEN:8 m above ground:", "aerosol=Total aerosol:aerosol_size <1e-05"), "label": "PM10 (1-h avg)", "conv": "x1e9", "vmin": 0.0, "vmax": 425.0, "units": "µg/m³", "lut": "smoke", "group": "Smoke", "nodata_below": 2.0, "file": "2dfld", "zero_at_f0": True}
     return out
 
 RRFS_FIELDS: dict[str, dict] = _rrfs_fields()
@@ -149,9 +169,33 @@ GFS_FIELDS: dict[str, dict] = {k: dict(HRRR_FIELDS[k]) for k in _GFS_KEEP}
 
 # ── NAM-NEST registry (3 km CONUS nest; Lambert-Conformal) ──────────────────
 # The 3 km CONUS nest carries nearly the full HRRR field set in one file
-# (surface + pressure levels together, incl. updraft helicity) — only ASNOW is
-# absent. Single file → `key` ignores the token; generic KDTree regrid.
-NAM_FIELDS: dict[str, dict] = {k: dict(v) for k, v in HRRR_FIELDS.items() if k != "asnow"}
+# (surface + pressure levels together, incl. updraft helicity) — only ASNOW and
+# the smoke fields are absent. Single file → `key` ignores the token.
+NAM_FIELDS: dict[str, dict] = {
+    k: dict(v) for k, v in HRRR_FIELDS.items() if k not in ("asnow", "smoke_sfc", "smoke_col")
+}
+
+# ── RAP registry (13 km CONUS grid 130; RAP runs until RRFSv2, not RRFSv1) ──
+# awp130pgrb carries surface + pressure levels together (verified live idx), so
+# every field comes from that one ~18 MB file. u/v pairs are NAM-style combined
+# submessages (shared idx offset) — _get_uv handles that. Dropped fields:
+#   - the UH family + refc_uh (no MXUPHL at 13 km);
+#   - smoke_col — RAP's COLMD exists only in wrfprs/wrfnat, whose rotated
+#     Arakawa E-grid (gridType ncep_32769) eccodes can't geolocate (latitudes
+#     lookup fails). RAP keeps Near-Surface Smoke; column smoke = HRRR/RRFS.
+_RAP_DROP = ("uh25", "uh03", "uh25_3h", "uh25_run", "uh03_run", "refc_uh", "smoke_col")
+
+def _rap_fields() -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for k, v in HRRR_FIELDS.items():
+        if k in _RAP_DROP:
+            continue
+        s = dict(v)
+        s.pop("file", None)  # single-file model: awp130pgrb has the mb levels too
+        out[k] = s
+    return out
+
+RAP_FIELDS: dict[str, dict] = _rap_fields()
 
 # ── Model registry (HRRR + RRFS-A + GFS + NAM-NEST) ─────────────────────────
 MODELS: dict[str, dict] = {
@@ -182,6 +226,14 @@ MODELS: dict[str, dict] = {
         "max_fhour": (lambda hh: 60),  # 3 km CONUS nest, hourly to F60
         "default_file": "", "mslp": (":MSLET:mean sea level:", ""),  # single file → token unused
         "key": (lambda date, hh, f, tok: f"nam.{date}/nam.t{hh:02d}z.conusnest.hiresf{f:02d}.tm00.grib2"),
+    },
+    "rap": {
+        "label": "RAP", "bucket": "noaa-rap-pds", "fields": RAP_FIELDS,
+        "run_hours": tuple(range(24)), "fhour_offset": 0,
+        "max_fhour": (lambda hh: 51 if hh % 6 == 3 else 21),  # extended at 03/09/15/21Z
+        "default_file": "awp130pgrb", "mslp": (":MSLMA:mean sea level:", "awp130pgrb"),
+        # Token is the literal file stem: awp130pgrbf06 / wrfprsf06 (COLMD only).
+        "key": (lambda date, hh, f, tok: f"rap.{date}/rap.t{hh:02d}z.{tok}f{f:02d}.grib2"),
     },
 }
 
@@ -214,6 +266,8 @@ def _conv(name: Optional[str], v: np.ndarray) -> np.ndarray:
     if name == "m2in":  return v * 39.3701                       # meters → inches
     if name == "mm2in": return v * 0.0393701                     # kg/m² (mm) → inches
     if name == "x1e5":  return v * 1e5                           # s⁻¹ → ×10⁻⁵ s⁻¹
+    if name == "x1e9":  return v * 1e9                           # kg/m³ → µg/m³ (smoke)
+    if name == "x1e6":  return v * 1e6                           # kg/m² → mg/m² (column smoke)
     return v
 
 
@@ -565,16 +619,19 @@ class HRRRFieldService:
         return lines
 
     @staticmethod
-    def _idx_range(lines: list[str], idx_match: str) -> tuple[Optional[int], Optional[int]]:
-        """(start, end) byte range of the record matching idx_match. `end` is the
-        next record's offset, SKIPPING idx sub-entries that share this offset —
-        some models (NAM) pack u & v as `n.1`/`n.2` at one offset, so a naive
-        next-line `end` would be empty/backwards and S3 would serve the whole
-        file. None end → open-ended (last record)."""
+    def _idx_range(lines: list[str], idx_match) -> tuple[Optional[int], Optional[int]]:
+        """(start, end) byte range of the record matching idx_match — a substring,
+        or a tuple of substrings that must ALL be in the line (RRFS appends
+        aerosol qualifiers to distinguish smoke/dust/total at one var:level).
+        `end` is the next record's offset, SKIPPING idx sub-entries that share
+        this offset — some models (NAM) pack u & v as `n.1`/`n.2` at one offset,
+        so a naive next-line `end` would be empty/backwards and S3 would serve
+        the whole file. None end → open-ended (last record)."""
+        parts = idx_match if isinstance(idx_match, tuple) else (idx_match,)
         start = None
         idx = -1
         for i, line in enumerate(lines):
-            if idx_match in line:
+            if all(p in line for p in parts):
                 start = int(line.split(":")[1])
                 idx = i
                 break
@@ -588,8 +645,9 @@ class HRRRFieldService:
                 break
         return start, end
 
-    def _range_get(self, model: str, key: str, lines: list[str], idx_match: str) -> Optional[bytes]:
-        """Byte-range GET the single GRIB record whose .idx line contains idx_match."""
+    def _range_get(self, model: str, key: str, lines: list[str], idx_match) -> Optional[bytes]:
+        """Byte-range GET the single GRIB record whose .idx line matches idx_match
+        (str substring, or tuple of substrings that must all match)."""
         start, end = self._idx_range(lines, idx_match)
         if start is None:
             logger.warning("field %s not in idx for %s", idx_match, key)
