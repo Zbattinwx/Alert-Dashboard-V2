@@ -4039,6 +4039,64 @@ async def get_wpc_surface():
     return await asyncio.to_thread(svc.get)
 
 
+@app.get("/api/wpc/ero")
+async def get_wpc_ero(day: int = Query(1, ge=1, le=5, description="ERO forecast day (1–5)")):
+    """Proxy the WPC Excessive Rainfall Outlook GeoJSON (Day 1–5). WPC's origin
+    sends no CORS header, so the radar app fetches the risk polygons through here.
+    The upstream URL is fixed (only the clamped day varies) — no SSRF surface."""
+    url = f"https://www.wpc.ncep.noaa.gov/exper/eromap/geojson/Day{day}_Latest.geojson"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=20),
+                headers={"User-Agent": "TheBattinFront Radar (dashboard ERO proxy)"},
+            ) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
+                data = await resp.json(content_type=None)
+    except aiohttp.ClientError as e:
+        logger.error(f"WPC ERO proxy fetch failed for day {day}: {e}")
+        raise HTTPException(status_code=502, detail="Fetch failed")
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/nhc/adeck")
+async def get_nhc_adeck(storm: str = Query(..., description="ATCF storm id, e.g. al022026")):
+    """Proxy an NHC ATCF **a-deck** (model track guidance / 'spaghetti') for one
+    storm. The public a-deck is gzipped AND sends no CORS header, so the radar app
+    can't fetch it directly; we decompress and return plain ATCF text.
+    `storm` is strictly validated, so the upstream URL is fixed apart from the id."""
+    import gzip as _gzip
+    import re as _re
+    from fastapi.responses import Response
+
+    if not _re.fullmatch(r"[a-z]{2}\d{6}", storm or ""):
+        raise HTTPException(status_code=400, detail="Bad storm id")
+    url = f"https://ftp.nhc.noaa.gov/atcf/aid_public/a{storm}.dat.gz"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=25),
+                headers={"User-Agent": "TheBattinFront Radar (dashboard a-deck proxy)"},
+            ) as resp:
+                if resp.status == 404:
+                    return Response(content="", media_type="text/plain")  # storm has no a-deck yet
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
+                raw = await resp.read()
+    except aiohttp.ClientError as e:
+        logger.error(f"NHC a-deck proxy fetch failed for {storm}: {e}")
+        raise HTTPException(status_code=502, detail="Fetch failed")
+    try:
+        text = await asyncio.to_thread(lambda: _gzip.decompress(raw).decode("utf-8", "replace"))
+    except OSError:
+        text = raw.decode("utf-8", "replace")  # already plain if NHC stops gzipping
+    return Response(content=text, media_type="text/plain", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/glm/flashes")
 async def get_glm_flashes(minutes: int = 60):
     """Snapshot of recent GLM lightning flashes ([lat, lon, epoch_ms]) for the
