@@ -3924,8 +3924,13 @@ async def get_hrrr_runs(model: str = "hrrr"):
     if not svc.available:
         raise HTTPException(status_code=503, detail="HRRR fields unavailable (eccodes/scipy missing)")
     runs = await asyncio.to_thread(svc.list_runs, model, 10)
-    offset = MODELS.get(model, MODELS["hrrr"]).get("fhour_offset", 0)
-    return {"runs": runs, "fields": svc.fields(model), "fhour_offset": offset}
+    mcfg = MODELS.get(model, MODELS["hrrr"])
+    return {
+        "runs": runs,
+        "fields": svc.fields(model),
+        "fhour_offset": mcfg.get("fhour_offset", 0),
+        "fhour_step": mcfg.get("fhour_step", 1),
+    }
 
 
 @app.get("/api/hrrr/field")
@@ -4060,6 +4065,73 @@ async def get_wpc_ero(day: int = Query(1, ge=1, le=5, description="ERO forecast 
         raise HTTPException(status_code=502, detail="Fetch failed")
     from fastapi.responses import JSONResponse
     return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/aviation/{kind}")
+async def get_aviation(kind: str, age: float = 2.0, bbox: Optional[str] = None):
+    """Proxy aviationweather.gov data API (CORS-closed upstream) for the radar
+    app's aviation layers. kind: airsigmet | gairmet | pirep. PIREPs require a
+    bbox (minLat,minLon,maxLat,maxLon per the AWC API)."""
+    from fastapi.responses import Response
+    import re as _re
+
+    if kind not in ("airsigmet", "gairmet", "pirep"):
+        raise HTTPException(status_code=400, detail="kind must be airsigmet|gairmet|pirep")
+    url = f"https://aviationweather.gov/api/data/{kind}?format=json&age={max(0.5, min(float(age), 12.0))}"
+    if kind == "pirep":
+        if not bbox or not _re.fullmatch(r"-?\d+(\.\d+)?(,-?\d+(\.\d+)?){3}", bbox):
+            raise HTTPException(status_code=400, detail="pirep requires bbox=minLat,minLon,maxLat,maxLon")
+        url += f"&bbox={bbox}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=25),
+                                   headers={"User-Agent": "TheBattinFront Radar (aviation proxy)"}) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
+                body = await resp.read()
+    except aiohttp.ClientError as e:
+        logger.error(f"aviation proxy fetch failed for {kind}: {e}")
+        raise HTTPException(status_code=502, detail="Fetch failed")
+    return Response(content=body, media_type="application/json", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/marine/buoys")
+async def get_marine_buoys():
+    """NDBC latest observations (CORS-closed upstream), parsed from the
+    fixed-width latest_obs.txt into JSON rows for the radar app's buoy layer."""
+    url = "https://www.ndbc.noaa.gov/data/latest_obs/latest_obs.txt"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=25),
+                                   headers={"User-Agent": "TheBattinFront Radar (buoy proxy)"}) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
+                text = await resp.text()
+    except aiohttp.ClientError as e:
+        logger.error(f"buoy proxy fetch failed: {e}")
+        raise HTTPException(status_code=502, detail="Fetch failed")
+
+    def _f(tok: str):
+        return None if tok in ("MM", "") else float(tok)
+
+    rows = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        p = line.split()
+        if len(p) < 22:
+            continue
+        try:
+            rows.append({
+                "id": p[0], "lat": float(p[1]), "lon": float(p[2]),
+                "time": f"{p[3]}-{p[4]}-{p[5]}T{p[6]}:{p[7]}Z",
+                "wdir": _f(p[8]), "wspd": _f(p[9]), "gst": _f(p[10]),
+                "wvht": _f(p[11]), "dpd": _f(p[12]),
+                "pres": _f(p[15]), "atmp": _f(p[17]), "wtmp": _f(p[18]),
+            })
+        except ValueError:
+            continue
+    return {"buoys": rows}
 
 
 @app.get("/api/nhc/adeck")

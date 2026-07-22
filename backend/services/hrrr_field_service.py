@@ -197,7 +197,39 @@ def _rap_fields() -> dict[str, dict]:
 
 RAP_FIELDS: dict[str, dict] = _rap_fields()
 
-# ── Model registry (HRRR + RRFS-A + GFS + NAM-NEST) ─────────────────────────
+# ── NBM registry (National Blend of Models, 2.5 km CONUS "core" file) ───────
+# Consensus/calibrated guidance — the "most likely" forecast, great on-air for
+# temps/gusts/thunder chances. Hourly runs; core is hourly through F36 (3-/6-
+# hourly beyond — not exposed since the app steps hour-by-hour). No MSLP in the
+# core file → no isobar overlay (get_isobars guards on it).
+NBM_FIELDS: dict[str, dict] = {
+    "t2m":   {"idx": ":TMP:2 m above ground:",   "label": "2 m Temperature",  "conv": "k2f",   "vmin": -30.0, "vmax": 120.0, "units": "°F", "lut": "hrrr_temp",     "group": "Surface"},
+    "td2m":  {"idx": ":DPT:2 m above ground:",   "label": "2 m Dew Point",    "conv": "k2f",   "vmin": -30.0, "vmax": 90.0,  "units": "°F", "lut": "hrrr_dewpoint", "group": "Surface"},
+    "appt":  {"idx": ":APTMP:2 m above ground:", "label": "Apparent Temp",    "conv": "k2f",   "vmin": -40.0, "vmax": 120.0, "units": "°F", "lut": "hrrr_temp",     "group": "Surface"},
+    "rh2m":  {"idx": ":RH:2 m above ground:",    "label": "2 m Humidity",     "conv": None,    "vmin": 0.0,   "vmax": 100.0, "units": "%",  "lut": "rh",            "group": "Surface"},
+    "gust":  {"idx": ":GUST:10 m above ground:", "label": "Wind Gust",        "conv": "ms2kt", "vmin": 0.0,   "vmax": 80.0,  "units": "kt", "lut": "wind_upper",    "group": "Surface"},
+    "sky":   {"idx": ":TCDC:surface:",           "label": "Sky Cover",        "conv": None,    "vmin": 0.0,   "vmax": 100.0, "units": "%",  "lut": "rh",            "group": "Surface"},
+    "tstm":  {"idx": ":TSTM:surface:",           "label": "Thunder Chance",   "conv": None,    "vmin": 0.0,   "vmax": 100.0, "units": "%",  "lut": "composite",     "group": "Convective", "nodata_below": 10.0},
+    "maxref":{"idx": ":MAXREF:1000 m above ground:", "label": "Simulated Reflectivity", "conv": None, "vmin": -20.0, "vmax": 80.0, "units": "dBZ", "lut": "reflectivity", "group": "Convective", "nodata_below": 5.0, "zero_at_f0": True},
+    "cape":  {"idx": ":CAPE:surface:",           "label": "Surface CAPE",     "conv": None,    "vmin": 0.0,   "vmax": 8000.0, "units": "J/kg", "lut": "cape",        "group": "Severe", "nodata_below": 100.0},
+    "pwat":  {"idx": ":PWAT:entire atmosphere",  "label": "Precipitable Water","conv": "mm2in","vmin": 0.0,   "vmax": 2.5,   "units": "in", "lut": "pwat",          "group": "Severe"},
+}
+
+# ── GEFS registry (ensemble MEAN, 0.5° pgrb2a; 3-hourly files → fhour_step 3) ─
+GEFS_FIELDS: dict[str, dict] = {
+    "prmsl":   {"idx": ":PRMSL:mean sea level:", "label": "MSLP (ens mean)",  "conv": "pa2mb", "vmin": 960.0, "vmax": 1050.0, "units": "hPa", "lut": "height",     "group": "Surface"},
+    "t2m":     {"idx": ":TMP:2 m above ground:", "label": "2 m Temp (mean)",  "conv": "k2f",   "vmin": -30.0, "vmax": 120.0,  "units": "°F", "lut": "hrrr_temp",   "group": "Surface"},
+    "cape":    {"idx": ":CAPE:180-0 mb above ground:", "label": "MU CAPE (mean)", "conv": None, "vmin": 0.0, "vmax": 6000.0, "units": "J/kg", "lut": "cape",      "group": "Severe", "nodata_below": 100.0},
+    "pwat":    {"idx": ":PWAT:entire atmosphere","label": "Precipitable Water","conv": "mm2in","vmin": 0.0,   "vmax": 2.5,    "units": "in", "lut": "pwat",        "group": "Severe"},
+    "z500":    {"idx": ":HGT:500 mb:",           "label": "500 mb Height",    "conv": None,    "vmin": 5160.0,"vmax": 6000.0, "units": "m",  "lut": "height",      "group": "Upper Air"},
+    "t850":    {"idx": ":TMP:850 mb:",           "label": "850 mb Temp",      "conv": "k2c",   "vmin": -30.0, "vmax": 30.0,   "units": "°C", "lut": "temp_upper",  "group": "Upper Air"},
+    "rh700":   {"idx": ":RH:700 mb:",            "label": "700 mb RH",        "conv": None,    "vmin": 0.0,   "vmax": 100.0,  "units": "%",  "lut": "rh",          "group": "Upper Air"},
+    "wspd850": {"derive": ("mag", ":UGRD:850 mb:", ":VGRD:850 mb:"), "label": "850 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 80.0,  "units": "kt", "lut": "wind_upper", "group": "Upper Air"},
+    "wspd500": {"derive": ("mag", ":UGRD:500 mb:", ":VGRD:500 mb:"), "label": "500 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 120.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air"},
+    "wspd250": {"derive": ("mag", ":UGRD:250 mb:", ":VGRD:250 mb:"), "label": "250 mb Wind", "conv": "ms2kt", "vmin": 0.0, "vmax": 160.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air"},
+}
+
+# ── Model registry (HRRR + RRFS-A + GFS + NAM-NEST + RAP + NBM + GEFS) ───────
 MODELS: dict[str, dict] = {
     "hrrr": {
         "label": "HRRR", "bucket": "noaa-hrrr-bdp-pds", "fields": HRRR_FIELDS,
@@ -226,6 +258,20 @@ MODELS: dict[str, dict] = {
         "max_fhour": (lambda hh: 60),  # 3 km CONUS nest, hourly to F60
         "default_file": "", "mslp": (":MSLET:mean sea level:", ""),  # single file → token unused
         "key": (lambda date, hh, f, tok: f"nam.{date}/nam.t{hh:02d}z.conusnest.hiresf{f:02d}.tm00.grib2"),
+    },
+    "nbm": {
+        "label": "NBM", "bucket": "noaa-nbm-grib2-pds", "fields": NBM_FIELDS,
+        "run_hours": tuple(range(24)), "fhour_offset": 1,  # no f000 published — slots start at f001
+        "max_fhour": (lambda hh: 35),  # app index 0..35 → files f001..f036 (3-/6-hourly beyond, not exposed)
+        "default_file": "core", "mslp": None,  # no PRMSL in the core file
+        "key": (lambda date, hh, f, tok: f"blend.{date}/{hh:02d}/core/blend.t{hh:02d}z.core.f{f:03d}.co.grib2"),
+    },
+    "gefs": {
+        "label": "GEFS Mean", "bucket": "noaa-gefs-pds", "fields": GEFS_FIELDS,
+        "run_hours": (0, 6, 12, 18), "fhour_offset": 0, "fhour_step": 3,
+        "max_fhour": (lambda hh: 240),  # 0.5° mean, 3-hourly to F240
+        "default_file": "", "mslp": (":PRMSL:mean sea level:", ""),
+        "key": (lambda date, hh, f, tok: f"gefs.{date}/{hh:02d}/atmos/pgrb2ap5/geavg.t{hh:02d}z.pgrb2a.0p50.f{f:03d}"),
     },
     "rap": {
         "label": "RAP", "bucket": "noaa-rap-pds", "fields": RAP_FIELDS,
@@ -268,6 +314,7 @@ def _conv(name: Optional[str], v: np.ndarray) -> np.ndarray:
     if name == "x1e5":  return v * 1e5                           # s⁻¹ → ×10⁻⁵ s⁻¹
     if name == "x1e9":  return v * 1e9                           # kg/m³ → µg/m³ (smoke)
     if name == "x1e6":  return v * 1e6                           # kg/m² → mg/m² (column smoke)
+    if name == "pa2mb": return v / 100.0                     # Pa -> hPa (MSLP)
     return v
 
 
@@ -535,6 +582,8 @@ class HRRRFieldService:
     def get_isobars(self, model: str, run: str, fhour: int, interval: int = 4) -> Optional[dict]:
         """MSLP isobars as GeoJSON LineStrings (hPa in `p`, every-20 hPa flagged
         `bold`). Smoothed + downsampled before contouring to keep lines clean."""
+        if not MODELS[model].get("mslp"):
+            return None  # e.g. NBM core carries no MSLP
         mslp_idx, mslp_tok = MODELS[model]["mslp"]
         date, hh = run[:8], int(run[8:10])
         key = self._key(model, date, hh, fhour, mslp_tok)
