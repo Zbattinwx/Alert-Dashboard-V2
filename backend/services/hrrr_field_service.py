@@ -728,6 +728,25 @@ class HRRRFieldService:
         v, _, _, _, _ = self._decode(gv)
         return u, v, lats, lons
 
+    @staticmethod
+    def _fix_alt_scan(gid, values: np.ndarray, ni: int, nj: int) -> np.ndarray:
+        # NBM core files use scanning mode 80 (alternativeRowScanning: odd rows
+        # written right-to-left). eccodes' lat/lon geoiterator ignores the flag
+        # for Lambert grids, so the values must be un-boustrophedoned to match
+        # the uniform left-to-right lat/lon arrays — without this the regrid
+        # mirror-smears every other row (symmetric "butterfly" CONUS).
+        import eccodes
+        try:
+            if int(eccodes.codes_get(gid, "alternativeRowScanning")) != 1:
+                return values
+        except Exception:
+            return values
+        if values.size != ni * nj:
+            return values
+        v = values.reshape(nj, ni).copy()
+        v[1::2, :] = v[1::2, ::-1]
+        return v.ravel()
+
     def _decode(self, grib: bytes):
         # Decode straight from the in-memory message (no temp file → avoids
         # Windows file locking and is faster). Serialized: eccodes isn't
@@ -741,6 +760,7 @@ class HRRRFieldService:
                 ni = int(eccodes.codes_get(gid, "Ni"))
                 nj = int(eccodes.codes_get(gid, "Nj"))
                 values = np.asarray(eccodes.codes_get_values(gid), dtype=np.float64)
+                values = self._fix_alt_scan(gid, values, ni, nj)
                 lats = np.asarray(eccodes.codes_get_array(gid, "latitudes"), dtype=np.float64)
                 lons = np.asarray(eccodes.codes_get_array(gid, "longitudes"), dtype=np.float64)
                 try:
@@ -777,6 +797,7 @@ class HRRRFieldService:
                             lons = np.asarray(eccodes.codes_get_array(gid, "longitudes"), dtype=np.float64)
                             ni = int(eccodes.codes_get(gid, "Ni"))
                             nj = int(eccodes.codes_get(gid, "Nj"))
+                            values = self._fix_alt_scan(gid, values, ni, nj)
                             try:
                                 mv = eccodes.codes_get(gid, "missingValue")
                                 values = np.where(values == mv, np.nan, values)
