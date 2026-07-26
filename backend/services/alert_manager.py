@@ -327,15 +327,32 @@ class AlertManager:
                 new_threat.max_wind_gust_mph or
                 new_threat.max_hail_size_inches or
                 new_threat.snow_amount_max_inches or
-                new_threat.flash_flood_detection):
+                new_threat.flash_flood_detection or
+                new_threat.tornado_emergency or
+                new_threat.thunderstorm_damage_threat or
+                new_threat.wind_damage_threat or
+                new_threat.hail_damage_threat):
                 # Merge threat data instead of replacing
                 if new_threat.tornado_detection:
                     existing.threat.tornado_detection = new_threat.tornado_detection
                 if new_threat.tornado_damage_threat:
                     existing.threat.tornado_damage_threat = new_threat.tornado_damage_threat
+                # Impact-based damage tags can be ADDED/upgraded by a follow-up SVS
+                # (e.g. a Severe T-storm Warning re-issued DESTRUCTIVE with 80 mph
+                # gusts). These were previously not merged, so the destructive tag
+                # never reached the dashboard or the radar app. Carry them forward.
+                if new_threat.tornado_emergency:
+                    existing.threat.tornado_emergency = True
+                if new_threat.thunderstorm_damage_threat:
+                    existing.threat.thunderstorm_damage_threat = new_threat.thunderstorm_damage_threat
+                if new_threat.wind_damage_threat:
+                    existing.threat.wind_damage_threat = new_threat.wind_damage_threat
+                if new_threat.hail_damage_threat:
+                    existing.threat.hail_damage_threat = new_threat.hail_damage_threat
                 if new_threat.max_wind_gust_mph and (not existing.threat.max_wind_gust_mph or
                     new_threat.max_wind_gust_mph > existing.threat.max_wind_gust_mph):
                     existing.threat.max_wind_gust_mph = new_threat.max_wind_gust_mph
+                    existing.threat.max_wind_gust_kts = new_threat.max_wind_gust_kts
                 if new_threat.max_hail_size_inches and (not existing.threat.max_hail_size_inches or
                     new_threat.max_hail_size_inches > existing.threat.max_hail_size_inches):
                     existing.threat.max_hail_size_inches = new_threat.max_hail_size_inches
