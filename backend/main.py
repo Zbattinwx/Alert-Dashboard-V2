@@ -4004,6 +4004,58 @@ async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = 
     return data
 
 
+# ── RAP mesoanalysis ────────────────────────────────────────────────────────
+# Objective severe threat assessment over the hourly RAP analysis. Replaces the
+# Raspberry Pi RTMA service that fed thebattinfront.com/rtma.html; the parameter
+# grids come from the same RAP f00 file the model layers already read, so this
+# adds no new download path. Everything is cached per RAP cycle — the first call
+# after a new cycle builds it (~10 s), the rest are instant.
+
+def _meso_service():
+    try:
+        from .services.mesoanalysis_service import get_mesoanalysis_service
+    except ImportError:
+        from backend.services.mesoanalysis_service import get_mesoanalysis_service
+    try:
+        from .services.hrrr_field_service import get_hrrr_field_service
+    except ImportError:
+        from backend.services.hrrr_field_service import get_hrrr_field_service
+    if not get_hrrr_field_service().available:
+        raise HTTPException(status_code=503, detail="Mesoanalysis unavailable (eccodes/scipy missing)")
+    return get_mesoanalysis_service()
+
+
+@app.get("/api/meso/analysis")
+async def get_meso_analysis(run: str | None = None):
+    """Threat assessment + cycle-over-cycle trends for a RAP analysis cycle.
+    Defaults to the newest cycle that has data."""
+    svc = _meso_service()
+    data = await asyncio.to_thread(svc.analysis, run)
+    if data is None:
+        raise HTTPException(status_code=503, detail="No RAP analysis available yet")
+    return JSONResponse(content=data, headers={"Cache-Control": "public, max-age=120"})
+
+
+@app.get("/api/meso/zones")
+async def get_meso_zones(run: str | None = None):
+    """Threat + watch areas as GeoJSON polygons (properties: kind, threat, level)."""
+    svc = _meso_service()
+    data = await asyncio.to_thread(svc.zones, run)
+    if data is None:
+        raise HTTPException(status_code=503, detail="No RAP analysis available yet")
+    return JSONResponse(content=data, headers={"Cache-Control": "public, max-age=120"})
+
+
+@app.get("/api/meso/point")
+async def get_meso_point(lat: float, lon: float, run: str | None = None):
+    """Every mesoanalysis parameter at a point, plus the threats covering it."""
+    svc = _meso_service()
+    data = await asyncio.to_thread(svc.point, lat, lon, run)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Point outside the analysis domain")
+    return JSONResponse(content=data, headers={"Cache-Control": "public, max-age=120"})
+
+
 @app.get("/api/obs/surface")
 async def get_surface_obs(lat: float | None = None, lon: float | None = None, radius_km: float = 400.0):
     """Surface station obs (METAR) for the radar app's Observations layer. With

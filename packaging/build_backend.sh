@@ -55,6 +55,10 @@ ROOT_WIN="$(pwd -W 2>/dev/null || pwd)"
   --collect-submodules backend \
   --add-data "$ROOT_WIN/backend/data;backend/data" \
   --add-data "$ROOT_WIN/frontend/dist;frontend/dist" \
+  `# US state outlines — the mesoanalysis land mask rasterizes these. Shipped` \
+  `# from frontend/src because backend/data is gitignored, so a fresh clone` \
+  `# has only this (tracked) copy and the freeze would otherwise get nothing.` \
+  --add-data "$ROOT_WIN/frontend/src/data;frontend/src/data" \
   --add-data "$ROOT_WIN/widgets;widgets" \
   --add-data "$ROOT_WIN/config/brands;config/brands" \
   packaging/run_backend.py

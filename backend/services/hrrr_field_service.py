@@ -72,8 +72,13 @@ HRRR_FIELDS: dict[str, dict] = {
     # ── Composite parameters (derived from CAPE / SRH / shear / LCL) ──
     "ehi01": {"derive": ("calc", "ehi", [(":CAPE:90-0 mb above ground:", None), (":HLCY:1000-0 m above ground:", None)]), "label": "Energy Helicity Index 0–1 km", "conv": None, "vmin": 0.0, "vmax": 8.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
     "ehi03": {"derive": ("calc", "ehi", [(":CAPE:90-0 mb above ground:", None), (":HLCY:3000-0 m above ground:", None)]), "label": "Energy Helicity Index 0–3 km", "conv": None, "vmin": 0.0, "vmax": 8.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
-    "scp":   {"derive": ("calc", "scp", [(":CAPE:255-0 mb above ground:", None), (":HLCY:3000-0 m above ground:", None), (":VUCSH:0-6000 m above ground:", None), (":VVCSH:0-6000 m above ground:", None)]), "label": "Supercell Composite", "conv": None, "vmin": 0.0, "vmax": 50.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
-    "stp":   {"derive": ("calc", "stp", [(":CAPE:surface:", None), (":CIN:surface:", None), (":TMP:2 m above ground:", None), (":DPT:2 m above ground:", None), (":HLCY:1000-0 m above ground:", None), (":VUCSH:0-6000 m above ground:", None), (":VVCSH:0-6000 m above ground:", None)]), "label": "Sig Tornado (STP)", "conv": None, "vmin": 0.0, "vmax": 10.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.25},
+    # The 0–6 km shear input is a [u, v] PAIR (list form) → resolved to its vector
+    # magnitude via _get_uv. It must not be two separate scalar inputs: RAP and the
+    # NAM nest pack u & v as submessages sharing ONE .idx offset, so a plain
+    # per-matcher range GET returns the u record twice and the composite would be
+    # built from √(u²+u²) — silently ~40% high wherever the wind is not zonal.
+    "scp":   {"derive": ("calc", "scp", [(":CAPE:255-0 mb above ground:", None), (":HLCY:3000-0 m above ground:", None), ([":VUCSH:0-6000 m above ground:", ":VVCSH:0-6000 m above ground:"], None)]), "label": "Supercell Composite", "conv": None, "vmin": 0.0, "vmax": 50.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.5},
+    "stp":   {"derive": ("calc", "stp", [(":CAPE:surface:", None), (":CIN:surface:", None), (":TMP:2 m above ground:", None), (":DPT:2 m above ground:", None), (":HLCY:1000-0 m above ground:", None), ([":VUCSH:0-6000 m above ground:", ":VVCSH:0-6000 m above ground:"], None)]), "label": "Sig Tornado (STP)", "conv": None, "vmin": 0.0, "vmax": 10.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.25},
 
     # ── Explicit convective (updraft helicity; max-in-window → no F00) ──
     "uh25":     {"idx": ":MXUPHL:5000-2000 m above ground:", "label": "2–5 km UH (1 h max)", "conv": None, "vmin": 0.0, "vmax": 400.0, "units": "m²/s²", "lut": "uphl", "group": "Convective", "nodata_below": 25.0, "zero_at_f0": True},
@@ -193,6 +198,30 @@ def _rap_fields() -> dict[str, dict]:
         s = dict(v)
         s.pop("file", None)  # single-file model: awp130pgrb has the mb levels too
         out[k] = s
+
+    # ── Mesoanalysis extras (RAP f00 = the hourly objective analysis) ─────────
+    # Every record below was verified present in a live rap.tHHz.awp130pgrbf00
+    # .idx. These are RAP-only on purpose: the composites mix surface and
+    # pressure-level records, and RAP is the one model whose surface AND mb
+    # levels live in a SINGLE file — on HRRR they straddle wrfsfc/wrfprs and a
+    # field can only range-GET from one key.
+    out["mlcin"]   = {"idx": ":CIN:90-0 mb above ground:",   "label": "ML CIN",            "conv": None, "vmin": -400.0, "vmax": 0.0,   "units": "J/kg",  "lut": "cin",    "group": "Severe"}
+    out["cape03"]  = {"idx": ":CAPE:0-3000 m above ground:", "label": "0–3 km CAPE",       "conv": None, "vmin": 0.0,    "vmax": 300.0, "units": "J/kg",  "lut": "cape_low", "group": "Severe", "nodata_below": 10.0}
+    out["efhl"]    = {"idx": ":EFHL:surface:",               "label": "Effective SRH",     "conv": None, "vmin": 0.0,    "vmax": 800.0, "units": "m²/s²", "lut": "srh",    "group": "Severe", "nodata_below": 50.0}
+    out["thetae"]  = {"idx": ":EPOT:surface:",               "label": "Surface θe",        "conv": None, "vmin": 280.0,  "vmax": 360.0, "units": "K",     "lut": "thetae", "group": "Surface"}
+    out["mslp"]    = {"idx": ":MSLMA:mean sea level:",       "label": "Mean Sea Level Pressure", "conv": "pa2mb", "vmin": 960.0, "vmax": 1050.0, "units": "hPa", "lut": "height", "group": "Surface"}
+    # Derived. LCL/lapse rate feed the tornado + hail ingredient checks, so they
+    # are first-class fields rather than numbers buried in a composite.
+    out["mllcl"]   = {"derive": ("calc", "lcl", [(":TMP:2 m above ground:", None), (":DPT:2 m above ground:", None)]),
+                      "label": "LCL Height", "conv": None, "vmin": 0.0, "vmax": 3000.0, "units": "m AGL", "lut": "lcl", "group": "Severe"}
+    out["lapse75"] = {"derive": ("calc", "lapse", [(":TMP:700 mb:", None), (":TMP:500 mb:", None), (":HGT:700 mb:", None), (":HGT:500 mb:", None)]),
+                      "label": "700–500 mb Lapse Rate", "conv": None, "vmin": 4.0, "vmax": 9.5, "units": "°C/km", "lut": "lapse", "group": "Severe"}
+    out["ship"]    = {"derive": ("calc", "ship", [
+                          (":CAPE:255-0 mb above ground:", None), (":TMP:500 mb:", None), (":TMP:700 mb:", None),
+                          (":HGT:500 mb:", None), (":HGT:700 mb:", None), (":DPT:2 m above ground:", None),
+                          (":PRES:surface:", None), (":HGT:0C isotherm:", None), (":HGT:surface:", None),
+                          ([":VUCSH:0-6000 m above ground:", ":VVCSH:0-6000 m above ground:"], None)]),
+                      "label": "Sig Hail (SHIP)", "conv": None, "vmin": 0.0, "vmax": 5.0, "units": "", "lut": "composite", "group": "Composite", "nodata_below": 0.25}
     return out
 
 RAP_FIELDS: dict[str, dict] = _rap_fields()
@@ -331,18 +360,54 @@ def _calc_scp(a):  # [MUCAPE, SRH 0-3km, u-shear 0-6km, v-shear 0-6km] → SCP (
     shr = np.where(bwd < 10.0, 0.0, shr)              # SPC: <10 m/s → 0
     return (mucape / 1000.0) * (srh3 / 50.0) * shr
 
-def _calc_stp(a):  # [SBCAPE, SBCIN, T2m(K), Td2m(K), SRH 0-1km, u-shear, v-shear] → STP (fixed-layer)
+def _calc_stp(a):  # [SBCAPE, SBCIN, T2m(K), Td2m(K), SRH 0-1km, u-shear, v-shear] → STP
     sbcape, sbcin, tK, tdK, srh1, u, v = a
+    bwd = np.sqrt(u * u + v * v)
     lcl = 125.0 * ((tK - 273.15) - (tdK - 273.15))   # ≈ LCL height (m AGL)
     lcl_term = np.clip((2000.0 - lcl) / 1000.0, 0.0, 1.0)  # 1 if <1000 m, 0 if >2000 m
-    bwd = np.sqrt(u * u + v * v)
     shr = np.clip(bwd / 20.0, 0.0, 1.5)
     shr = np.where(bwd < 12.5, 0.0, shr)
     shr = np.where(bwd > 30.0, 1.5, shr)
     cin_term = np.clip((200.0 + sbcin) / 150.0, 0.0, 1.0)  # sbcin ≤ 0; 1 if >-50, 0 if <-200
     return (sbcape / 1500.0) * lcl_term * (srh1 / 150.0) * shr * cin_term
 
-_CALCS = {"ehi": _calc_ehi, "scp": _calc_scp, "stp": _calc_stp}
+def _calc_lcl(a):  # [T2m(K), Td2m(K)] → LCL height (m AGL), Espy/Lawrence approximation
+    return np.clip(125.0 * ((a[0] - 273.15) - (a[1] - 273.15)), 0.0, None)
+
+def _calc_lapse(a):  # [T_lo(K), T_hi(K), Z_lo(m), Z_hi(m)] → lapse rate (°C/km)
+    # Layer depth comes from the geopotential heights, not a fixed constant —
+    # the 700–500 mb layer runs ~2.2–2.6 km depending on the airmass, so a
+    # hardcoded 2.5 km biases the rate by several tenths.
+    t_lo, t_hi, z_lo, z_hi = a
+    dz = (z_hi - z_lo) / 1000.0
+    return np.where(dz > 0.1, (t_lo - t_hi) / np.where(dz > 0.1, dz, 1.0), np.nan)
+
+def _calc_ship(a):
+    """SPC Significant Hail Parameter (the real formulation, not a CAPE×shear proxy).
+    [MUCAPE, T500(K), T700(K), Z500(m), Z700(m), Td2m(K), Psfc(Pa), Zfrz(m), Zsfc(m),
+     u-shear 0-6km, v-shear 0-6km]. The MU-parcel mixing ratio is approximated from
+    the 2 m dew point + surface pressure (RAP publishes no MU-parcel mixing ratio);
+    the SPC caps clamp it to 11–13.6 g/kg anyway, so the approximation rarely bites."""
+    mucape, t500, t700, z500, z700, td2, psfc, zfrz, zsfc, u, v = a
+    bwd = np.sqrt(u * u + v * v)
+    lr75 = (t700 - t500) / np.maximum((z500 - z700) / 1000.0, 0.1)
+    td_c = td2 - 273.15
+    e = 6.112 * np.exp(17.67 * td_c / (td_c + 243.5))          # vapor pressure, hPa
+    mixr = 621.97 * e / np.maximum(psfc / 100.0 - e, 1.0)      # g/kg
+    frz_agl = np.clip(zfrz - zsfc, 0.0, None)                  # freezing level, m AGL
+    # SPC caps
+    shr = np.clip(bwd, 7.0, 27.0)
+    mixr = np.clip(mixr, 11.0, 13.6)
+    t5 = np.minimum(t500 - 273.15, -5.5)
+    ship = (mucape * mixr * lr75 * (-t5) * shr) / 42_000_000.0
+    # SPC corrections: weak instability, poor mid-level lapse rates, high freezing level
+    ship = np.where(mucape < 1300.0, ship * (mucape / 1300.0), ship)
+    ship = np.where(lr75 < 5.8, ship * (lr75 / 5.8), ship)
+    ship = np.where(frz_agl < 2400.0, ship * (frz_agl / 2400.0), ship)
+    return np.clip(np.nan_to_num(ship, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
+
+_CALCS = {"ehi": _calc_ehi, "scp": _calc_scp, "stp": _calc_stp,
+          "lcl": _calc_lcl, "lapse": _calc_lapse, "ship": _calc_ship}
 
 
 class HRRRFieldService:
@@ -503,6 +568,22 @@ class HRRRFieldService:
                 name, inputs = derive[1], derive[2]
                 arrs, lats, lons = [], None, None
                 for idx_match, cv in inputs:
+                    # A LIST matcher is a [u_idx, v_idx] pair — it contributes TWO
+                    # arrays (u then v) so the calc keeps the components and can do
+                    # a proper VECTOR difference. Routed through _get_uv because
+                    # models that pack u & v as submessages at one .idx offset (RAP,
+                    # NAM) can't be split by a per-matcher range GET: both matchers
+                    # resolve to the same bytes and _decode returns u for each, so
+                    # the composite would be built from √(u²+u²) — measured ~32%
+                    # off on live RAP, enough to cross STP's 12.5 m/s shear cutoff.
+                    if isinstance(idx_match, list):
+                        uv = self._get_uv(model, key, lines, idx_match[0], idx_match[1])
+                        if uv is None:
+                            return self._zero_or_none(spec, fhour)
+                        u, v, lats, lons = uv
+                        arrs.append(_conv(cv, u))
+                        arrs.append(_conv(cv, v))
+                        continue
                     g = self._range_get(model, key, lines, idx_match)
                     if g is None:
                         return self._zero_or_none(spec, fhour)
