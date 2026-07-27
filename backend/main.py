@@ -263,6 +263,9 @@ async def startup_services():
         logger.info("Social media service started (no platforms configured)")
 
     # 15. Start NEXRAD Radar Service (optional)
+    # None unless storm tracking comes up; GLM (started after this block,
+    # independently) wires into it only when it exists.
+    _storm_svc_for_glm = None
     if settings.nexrad_enabled:
         nexrad_started = await start_nexrad_service()
         if nexrad_started:
@@ -374,29 +377,9 @@ async def startup_services():
 
                 logger.info("Storm tracking service started and wired to radar")
 
-                # Start GLM lightning service and wire to broker + storm tracker
-                try:
-                    logger.info("Starting GLM lightning service...")
-                    glm_started = await start_glm_service()
-                    if glm_started:
-                        glm_svc = get_glm_service()
-
-                        async def on_new_flashes(flashes):
-                            broker = get_message_broker()
-                            payload = [
-                                {"lat": f.lat, "lon": f.lon,
-                                 "energy": f.energy, "timestamp": f.timestamp}
-                                for f in flashes
-                            ]
-                            await broker.broadcast_lightning_strikes(payload)
-
-                        glm_svc.on_new_flashes = on_new_flashes
-                        storm_svc.set_glm_service(glm_svc)
-                        logger.info("GLM lightning service started and wired")
-                    else:
-                        logger.info("GLM lightning service not available (boto3/netCDF4 not installed)")
-                except Exception as e:
-                    logger.error(f"GLM lightning service failed to start: {e}", exc_info=True)
+                # Expose the storm tracker so the GLM service (started below,
+                # independently of radar) can still be wired into it.
+                _storm_svc_for_glm = storm_svc
 
                 # Optional near-real-time chunks-bucket ingestion path.
                 # Runs alongside the archive-bucket pipeline; gated behind
@@ -421,6 +404,42 @@ async def startup_services():
             logger.warning("NEXRAD radar service failed to start (missing dependencies?)")
     else:
         logger.info("NEXRAD radar disabled (set NEXRAD_ENABLED=true to enable)")
+
+    # Start GLM lightning — INDEPENDENT of NEXRAD (like MRMS below).
+    #
+    # This used to live three levels inside `if settings.nexrad_enabled:` →
+    # `if nexrad_started:` → `if storm_started:`, so lightning silently required
+    # dashboard-side Level 2 radar to be enabled. `nexrad_enabled` DEFAULTS TO
+    # FALSE and only the repo's .env turns it on, so every frozen/bundled build
+    # — which ships no .env — started with no lightning at all, reporting
+    # "service not started" rather than any dependency error. GLM reads its own
+    # public S3 bucket and has nothing to do with radar; the only radar tie is
+    # the optional storm-tracker wiring below, which is now conditional.
+    try:
+        logger.info("Starting GLM lightning service...")
+        glm_started = await start_glm_service()
+        if glm_started:
+            glm_svc = get_glm_service()
+
+            async def on_new_flashes(flashes):
+                broker = get_message_broker()
+                payload = [
+                    {"lat": f.lat, "lon": f.lon,
+                     "energy": f.energy, "timestamp": f.timestamp}
+                    for f in flashes
+                ]
+                await broker.broadcast_lightning_strikes(payload)
+
+            glm_svc.on_new_flashes = on_new_flashes
+            if _storm_svc_for_glm is not None:
+                _storm_svc_for_glm.set_glm_service(glm_svc)
+                logger.info("GLM lightning service started and wired to storm tracking")
+            else:
+                logger.info("GLM lightning service started (no storm tracker to wire)")
+        else:
+            logger.info("GLM lightning service not available (boto3/netCDF4 not installed)")
+    except Exception as e:
+        logger.error(f"GLM lightning service failed to start: {e}", exc_info=True)
 
     # Start MRMS composite reflectivity (independent of NEXRAD; requires pygrib)
     try:
