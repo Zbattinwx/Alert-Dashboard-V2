@@ -604,7 +604,11 @@ def _render_left_panel(alert, radar_frame, brand_name: str,
     # ── Watch probability section (TOA / SVA watches only) ────────────────
     if significance in ("A", "Y"):
         import re as _re2
-        raw = description_text  # already built above
+        # Read the product text here rather than relying on a local from an
+        # earlier branch: the only other reads live inside `if wind:` / `if hail:`,
+        # which a WATCH never enters — so this line raised NameError on every
+        # watch, which is the one case the block exists for.
+        raw = getattr(alert, "description", "") or ""
 
         # NWS SPC format: "PROBABILITY OF TORNADOES...30 PERCENT"
         # Level qualifier (HIGH/MODERATE/LOW) is optional — derive from percentage.
