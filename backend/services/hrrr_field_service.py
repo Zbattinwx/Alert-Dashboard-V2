@@ -49,7 +49,7 @@ IDX_CACHE_TTL_S = 300   # the newest hour's .idx can grow while NOMADS uploads �
 #   ("mag",  u_idx, v_idx)                  → vector magnitude √(u²+v²)
 #   ("ptype", rain, snow, icep, frzr)       → categorical precip type 1/2/3/4
 # file: "sfc" (wrfsfc, default) | "prs" (wrfprs, pressure levels).
-# conv: None | k2f | k2c | ms2kt | m2in | mm2in | x1e5  (see _conv).
+# conv: None | k2f | k2c | ms2kt | ms2mph | m2mi | x3600 | m2in | mm2in | x1e5  (see _conv).
 # nodata_below: pack 0 (transparent) for values under this threshold.
 # group: sidebar grouping + ordering.
 HRRR_FIELDS: dict[str, dict] = {
@@ -57,6 +57,21 @@ HRRR_FIELDS: dict[str, dict] = {
     "t2m":  {"idx": ":TMP:2 m above ground:", "label": "2 m Temperature",        "conv": "k2f", "vmin": -30.0, "vmax": 120.0, "units": "°F",  "lut": "hrrr_temp",     "group": "Surface"},
     "td2m": {"idx": ":DPT:2 m above ground:", "label": "2 m Dew Point",          "conv": "k2f", "vmin": -30.0, "vmax": 90.0,  "units": "°F",  "lut": "hrrr_dewpoint", "group": "Surface"},
     "refc": {"idx": ":REFC:entire atmosphere", "label": "Composite Reflectivity","conv": None, "vmin": -20.0, "vmax": 80.0,  "units": "dBZ", "lut": "reflectivity",  "group": "Surface", "nodata_below": 5.0},
+
+    # ── Surface wind / sky / air (added for the radar app's Sunset Quality +
+    #    Wind Concern studio graphics — Zach's no-Open-Meteo directive: the app
+    #    samples these real HRRR grids instead. All verified in the wrfsfc .idx.
+    #    WIND:10 m = the HOURLY MAX of 10 m wind speed (no value at f000). ──
+    "gust":     {"idx": ":GUST:surface:",             "label": "Wind Gust",            "conv": "ms2mph", "vmin": 0.0, "vmax": 110.0, "units": "mph", "lut": "wind_upper", "group": "Surface"},
+    "gust_6h":  {"timeagg": ("max", 6), "base": "gust", "label": "Wind Gust (6 h max)", "vmin": 0.0, "vmax": 110.0, "units": "mph", "lut": "wind_upper", "group": "Surface"},
+    "wind10max":    {"idx": ":WIND:10 m above ground:", "label": "10 m Wind (1 h max)", "conv": "ms2mph", "vmin": 0.0, "vmax": 90.0, "units": "mph", "lut": "wind_upper", "group": "Surface", "zero_at_f0": True},
+    "wind10max_6h": {"timeagg": ("max", 6), "base": "wind10max", "label": "10 m Wind (6 h max)", "vmin": 0.0, "vmax": 90.0, "units": "mph", "lut": "wind_upper", "group": "Surface", "zero_at_f0": True},
+    "rh2m":     {"idx": ":RH:2 m above ground:",      "label": "2 m Humidity",         "conv": None,     "vmin": 0.0, "vmax": 100.0, "units": "%",   "lut": "rh",         "group": "Surface"},
+    "vis":      {"idx": ":VIS:surface:",              "label": "Visibility",           "conv": "m2mi",   "vmin": 0.0, "vmax": 10.0,  "units": "mi",  "lut": "rh",         "group": "Surface"},
+    "prate":    {"idx": ":PRATE:surface:",            "label": "Precip Rate",          "conv": "x3600",  "vmin": 0.0, "vmax": 60.0,  "units": "mm/h","lut": "pwat",       "group": "Surface", "nodata_below": 0.05},
+    "cld_low":  {"idx": ":LCDC:low cloud layer:",     "label": "Low Clouds",           "conv": None,     "vmin": 0.0, "vmax": 100.0, "units": "%",   "lut": "rh",         "group": "Surface"},
+    "cld_mid":  {"idx": ":MCDC:middle cloud layer:",  "label": "Mid Clouds",           "conv": None,     "vmin": 0.0, "vmax": 100.0, "units": "%",   "lut": "rh",         "group": "Surface"},
+    "cld_high": {"idx": ":HCDC:high cloud layer:",    "label": "High Clouds",          "conv": None,     "vmin": 0.0, "vmax": 100.0, "units": "%",   "lut": "rh",         "group": "Surface"},
 
     # ── Severe ──
     "sbcape":  {"idx": ":CAPE:surface:",                 "label": "Surface CAPE",   "conv": None, "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape",  "group": "Severe", "nodata_below": 100.0},
@@ -338,6 +353,9 @@ def _conv(name: Optional[str], v: np.ndarray) -> np.ndarray:
     if name == "k2f":   return (v - 273.15) * 9.0 / 5.0 + 32.0   # Kelvin → °F
     if name == "k2c":   return v - 273.15                        # Kelvin → °C
     if name == "ms2kt": return v * 1.94384                       # m/s → knots
+    if name == "ms2mph": return v * 2.23694                      # m/s → mph (surface wind)
+    if name == "m2mi":  return v * 0.000621371                   # meters → miles (visibility)
+    if name == "x3600": return v * 3600.0                        # kg/m²/s → mm/h (precip rate)
     if name == "m2in":  return v * 39.3701                       # meters → inches
     if name == "mm2in": return v * 0.0393701                     # kg/m² (mm) → inches
     if name == "x1e5":  return v * 1e5                           # s⁻¹ → ×10⁻⁵ s⁻¹
@@ -406,6 +424,29 @@ def _calc_ship(a):
     ship = np.where(frz_agl < 2400.0, ship * (frz_agl / 2400.0), ship)
     return np.clip(np.nan_to_num(ship, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
 
+def _parse_anchor(s: Optional[str]) -> Optional[datetime]:
+    """Parse a run anchor for `list_runs(before=...)`.
+
+    Accepts the run form the rest of the API speaks (YYYYMMDDHH) and a plain ISO
+    instant, so a caller that already has an event's valid time can pass it
+    straight through without reformatting. Returns None for anything else, which
+    makes an unparseable value fall back to "now" rather than 500.
+    """
+    if not s:
+        return None
+    t = s.strip()
+    if len(t) == 10 and t.isdigit():
+        try:
+            return datetime.strptime(t, "%Y%m%d%H").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    try:
+        d = datetime.fromisoformat(t.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
 _CALCS = {"ehi": _calc_ehi, "scp": _calc_scp, "stp": _calc_stp,
           "lcl": _calc_lcl, "lapse": _calc_lapse, "ship": _calc_ship}
 
@@ -451,18 +492,29 @@ class HRRRFieldService:
         except Exception:
             return False
 
-    def list_runs(self, model: str = "hrrr", limit: int = 10) -> list[dict]:
-        """The most recent `limit` runs for the model (newest first). Walks back
-        from now to the latest available run hour, then enumerates prior runs.
-        Cached briefly — each call probes S3 with a burst of HEADs."""
+    def list_runs(self, model: str = "hrrr", limit: int = 10,
+                  before: Optional[str] = None) -> list[dict]:
+        """The `limit` runs at or before an anchor time (newest first).
+
+        `before` (YYYYMMDDHH, or an ISO instant) anchors the walk-back somewhere
+        other than now, which is what makes historical fields reachable: the S3
+        archives hold years of runs, and `get_field` already accepts any run
+        string, but a client had no way to DISCOVER the runs around a past event —
+        so an event review could only ever be illustrated with today's forecast.
+
+        Cached briefly — each call probes S3 with a burst of HEADs. The cache key
+        includes the anchor so a recap lookup can't poison the live manifest.
+        """
         if model not in MODELS:
             return []
+        cache_key = f"{model}|{before or 'now'}"
         with self._lock:
-            cached = self._runs_cache.get(model)
+            cached = self._runs_cache.get(cache_key)
             if cached and time.time() - cached[0] < RUNS_CACHE_TTL_S:
                 return cached[1]
         m = MODELS[model]
-        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        now = _parse_anchor(before) or datetime.now(timezone.utc)
+        now = now.replace(minute=0, second=0, microsecond=0)
         latest: Optional[datetime] = None
         for back in range(0, 24):  # 6-hourly models may be several h old
             t = now - timedelta(hours=back)
@@ -480,7 +532,7 @@ class HRRRFieldService:
                              "max_fhour": m["max_fhour"](t.hour)})
             t -= timedelta(hours=1)
         with self._lock:
-            self._runs_cache[model] = (time.time(), runs)
+            self._runs_cache[cache_key] = (time.time(), runs)
         return runs
 
     def fields(self, model: str = "hrrr") -> list[dict]:

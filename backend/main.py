@@ -3931,10 +3931,14 @@ async def get_hrrr_sounding(lat: float, lon: float, fhour: int = 0, run: Optiona
 
 
 @app.get("/api/hrrr/runs")
-async def get_hrrr_runs(model: str = "hrrr"):
+async def get_hrrr_runs(model: str = "hrrr", before: str | None = None):
     """Manifest for a model's field overlays (model=hrrr|rrfs): the last ~10 runs
     (with each run's max forecast hour), the available fields, and the model's
-    forecast-hour offset. Lazy/cached — see hrrr_field_service."""
+    forecast-hour offset. Lazy/cached — see hrrr_field_service.
+
+    `before` (YYYYMMDDHH or an ISO instant) anchors the run list at a past time so
+    an event review can find the runs that were current during the event instead
+    of today's."""
     try:
         from .services.hrrr_field_service import get_hrrr_field_service, MODELS
     except ImportError:
@@ -3942,7 +3946,7 @@ async def get_hrrr_runs(model: str = "hrrr"):
     svc = get_hrrr_field_service()
     if not svc.available:
         raise HTTPException(status_code=503, detail="HRRR fields unavailable (eccodes/scipy missing)")
-    runs = await asyncio.to_thread(svc.list_runs, model, 10)
+    runs = await asyncio.to_thread(svc.list_runs, model, 10, before)
     mcfg = MODELS.get(model, MODELS["hrrr"])
     return {
         "runs": runs,
