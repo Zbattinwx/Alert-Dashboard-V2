@@ -81,6 +81,17 @@ class Settings(BaseSettings):
         default=30, description="How often to re-check the update manifest (minutes)"
     )
 
+    # --- Remote Hub login gate (services/hub_auth.py) ----------------------
+    # Unset = gate disabled, which is what the desktop app's bundled backend
+    # wants (loopback only, a login prompt there is pure friction). The remote
+    # deployment sets these in its own .env.
+    hub_auth_password: Optional[str] = Field(
+        default=None, description="Password for the remote Hub login gate; unset disables it"
+    )
+    hub_auth_secret: Optional[str] = Field(
+        default=None, description="Session signing key; auto-generated + persisted if unset"
+    )
+
     # NWWS-OI (Weather Wire) credentials
     nwws_username: Optional[str] = Field(default=None, description="NWWS-OI username")
     nwws_password: Optional[str] = Field(default=None, description="NWWS-OI password")

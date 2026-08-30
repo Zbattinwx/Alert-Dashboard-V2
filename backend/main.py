@@ -1048,6 +1048,20 @@ app.add_middleware(
 )
 
 # =============================================================================
+# Remote Hub login gate
+# =============================================================================
+# Only issues/checks sessions; Caddy's forward_auth is the actual gate. Disabled
+# unless hub_auth_password is set, so the desktop-bundled backend is unaffected.
+try:
+    from .services.hub_auth import router as hub_auth_router, auth_enabled as _hub_auth_enabled
+except ImportError:
+    from services.hub_auth import router as hub_auth_router, auth_enabled as _hub_auth_enabled  # type: ignore
+
+app.include_router(hub_auth_router)
+logger.info(f"Hub login gate: {'ENABLED' if _hub_auth_enabled() else 'disabled (no hub_auth_password)'}")
+
+
+# =============================================================================
 # Static Files (Frontend)
 # =============================================================================
 

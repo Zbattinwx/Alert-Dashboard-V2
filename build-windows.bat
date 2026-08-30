@@ -27,10 +27,14 @@ if not exist ".venv-build\Scripts\pyinstaller.exe" (
 )
 
 echo.
-echo [1/4] Building frontend with base path /v2/ ...
+REM Base path defaults to /v2/ (the ONW deployment). Pre-set VITE_BASE_PATH to
+REM build a bundle for a different mount point -- TheBattinFront's Hub serves its
+REM own dashboard at /dash/ on its own hostname, and the frozen frontend has to
+REM agree or every asset 404s.
+if not defined VITE_BASE_PATH set VITE_BASE_PATH=/v2/
+echo [1/4] Building frontend with base path %VITE_BASE_PATH% ...
 REM cmd.exe 'set' does NOT path-convert the leading slash (git-bash does).
 pushd frontend
-set VITE_BASE_PATH=/v2/
 call npm run build
 popd
 if not exist "frontend\dist\index.html" (
