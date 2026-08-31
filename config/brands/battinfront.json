@@ -4,6 +4,7 @@
   "tagline": "Weather Coverage You Can Trust",
   "logo": "tbf_logo.png",
   "logo_dark": null,
+  "logo_is_wordmark": true,
   "favicon": "tbf_favicon.ico",
   "og_image": "tbf_og.png",
   "colors": {
