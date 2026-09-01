@@ -11,8 +11,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$ROOT/.venv-build"
-PYI="$VENV/Scripts/pyinstaller.exe"
-[ -x "$PYI" ] || PYI="$VENV/bin/pyinstaller"
+# Invoke through the interpreter, not the console-script exe. Those .exe shims bake an
+# ABSOLUTE python path at install time, so moving the venv leaves them pointing at a path
+# that no longer exists - and they then fail with exit 1 and NO output, which under
+# `set -e` kills this script silently. (Bit us on 2026-09-01 after the F:\Apps move.)
+VENVPY="$VENV/Scripts/python.exe"
+[ -x "$VENVPY" ] || VENVPY="$VENV/bin/python"
+PYI="$VENVPY -m PyInstaller"
 
 cd "$ROOT"
 
@@ -25,7 +30,7 @@ echo "Building dashboard frontend (frontend/dist)..."
 # PyInstaller is Windows Python — it needs a native path for --add-data, not the
 # MSYS /c/... form git-bash's pwd returns (that mangles to C:\c\...).
 ROOT_WIN="$(pwd -W 2>/dev/null || pwd)"
-"$PYI" --noconfirm --clean --onedir --name dashboard-backend \
+$PYI --noconfirm --clean --onedir --name dashboard-backend \
   --distpath packaging/dist \
   --workpath packaging/build \
   --specpath packaging \
