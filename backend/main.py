@@ -4161,6 +4161,38 @@ async def get_wpc_ero(day: int = Query(1, ge=1, le=5, description="ERO forecast 
     return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/spc/geojson")
+async def get_spc_geojson(url: str = Query(..., description="An spc.noaa.gov outlook GeoJSON URL")):
+    """Proxy an SPC outlook GeoJSON for the radar app. The browser is CORS-blocked on
+    spc.noaa.gov for these files from the app's origin (the hub's SPC layer rendered
+    blank and the recipe engine captured bare maps labelled as 'the outlook'), so the
+    app falls back to fetching them through here, exactly as it already does for
+    WPC's ERO. Strictly allow-listed: only SPC's outlook trees, only .geojson."""
+    from urllib.parse import urlsplit
+    u = urlsplit(url)
+    ok_host = u.scheme == "https" and u.netloc == "www.spc.noaa.gov"
+    ok_path = u.path.startswith(("/products/outlook/", "/products/exper/day4-8/",
+                                 "/products/fire_wx/")) and u.path.endswith(".geojson")
+    if not (ok_host and ok_path) or ".." in u.path:
+        raise HTTPException(status_code=400, detail="Not an SPC outlook GeoJSON URL")
+    clean = f"https://www.spc.noaa.gov{u.path}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                clean,
+                timeout=aiohttp.ClientTimeout(total=20),
+                headers={"User-Agent": "TheBattinFront Radar (dashboard SPC proxy)"},
+            ) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
+                data = await resp.json(content_type=None)
+    except aiohttp.ClientError as e:
+        logger.error(f"SPC GeoJSON proxy fetch failed for {clean}: {e}")
+        raise HTTPException(status_code=502, detail="Fetch failed")
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/aviation/{kind}")
 async def get_aviation(kind: str, age: float = 2.0, bbox: Optional[str] = None):
     """Proxy aviationweather.gov data API (CORS-closed upstream) for the radar
