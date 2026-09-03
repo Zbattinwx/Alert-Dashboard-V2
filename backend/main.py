@@ -1055,7 +1055,12 @@ app.add_middleware(
 try:
     from .services.hub_auth import router as hub_auth_router, auth_enabled as _hub_auth_enabled
 except ImportError:
-    from services.hub_auth import router as hub_auth_router, auth_enabled as _hub_auth_enabled  # type: ignore
+    # Direct execution: the block at the top of this file already put the REPO ROOT on
+    # sys.path, so the fallback must import through `backend.` like every other one
+    # here. Without the prefix `services` binds as a TOP-LEVEL package and the
+    # `from ..config import get_settings` inside services/alert_manager.py then fails
+    # with "relative import beyond top-level package".
+    from backend.services.hub_auth import router as hub_auth_router, auth_enabled as _hub_auth_enabled  # type: ignore
 
 app.include_router(hub_auth_router)
 logger.info(f"Hub login gate: {'ENABLED' if _hub_auth_enabled() else 'disabled (no hub_auth_password)'}")
