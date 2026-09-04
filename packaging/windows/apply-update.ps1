@@ -105,6 +105,22 @@ try {
   $newCaddy = Join-Path $srcRoot "caddy.exe"
   if (Test-Path -LiteralPath $newCaddy) { Copy-Item -LiteralPath $newCaddy -Destination (Join-Path $DeployRoot "caddy.exe") -Force }
 
+  # 6b. The Hub's browser frontend, when this bundle carries one AND this
+  #     deployment actually serves it. The updater only ever swapped
+  #     dashboard-backend, so on a Hub server (C:\TBF\server + C:\TBF\app) the
+  #     radar app itself never updated -- the whole point of most releases.
+  #     Guarded on the target already existing so a plain dashboard server (no
+  #     app\ folder) is untouched.
+  $srcWeb = Join-Path (Split-Path -Parent $srcRoot) "app"
+  $dstWeb = Join-Path (Split-Path -Parent $DeployRoot) "app"
+  if ((Test-Path -LiteralPath (Join-Path $srcWeb "index.html")) -and
+      (Test-Path -LiteralPath (Join-Path $dstWeb "index.html"))) {
+    Log "updating Hub frontend at $dstWeb"
+    cmd /c "robocopy `"$srcWeb`" `"$dstWeb`" /MIR /NJH /NJS /NDL /NC /NS >nul"
+    if ($LASTEXITCODE -ge 8) { throw "frontend robocopy failed (code $LASTEXITCODE)" }
+    Log "Hub frontend updated"
+  }
+
   # 7. Done — clear the flag and relaunch
   Remove-Item -LiteralPath $flag -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

@@ -9,6 +9,21 @@ if exist "apply-update.ps1.new" ( move /y "apply-update.ps1.new" "apply-update.p
 if exist "update.bat.new" ( move /y "update.bat.new" "update.bat" >nul )
 if exist ".updating" ( del /q ".updating" >nul 2>&1 )
 
+REM Promote a Hub frontend shipped inside the backend folder. The updater that
+REM is ALREADY DEPLOYED only mirrors dashboard-backend\, so a release whose real
+REM change is the radar app itself could never reach a Hub server without
+REM someone copying files by hand. Carrying the frontend inside that folder lets
+REM the running (old) updater deliver it, and this promotes it on relaunch.
+REM Only when this deployment actually serves a frontend; a plain dashboard
+REM server has no ..\app and just discards the payload.
+if exist "dashboard-backend\_hub-app-payload\index.html" (
+    if exist "..\app\index.html" (
+        echo [INFO] Updating Hub frontend from the new build...
+        robocopy "dashboard-backend\_hub-app-payload" "..\app" /MIR /njh /njs /ndl /nc /ns >nul
+    )
+    rmdir /s /q "dashboard-backend\_hub-app-payload" >nul 2>&1
+)
+
 echo ============================================
 echo    Alert Dashboard V2 - Server
 echo ============================================
