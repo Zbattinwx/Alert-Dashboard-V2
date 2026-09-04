@@ -1,10 +1,10 @@
 <#
-  apply-update.ps1 — in-place self-updater for the standalone AlertDashboardV2
+  apply-update.ps1 -- in-place self-updater for the standalone AlertDashboardV2
   Windows server. Spawned DETACHED by the backend (POST /api/update/apply) so it
   survives the backend being killed during the swap.
 
   It downloads the new bundle from GitHub Releases, verifies its SHA-256, then
-  stops → backs up → swaps → restarts the server. Your Caddyfile, .env, and data\
+  stops -> backs up -> swaps -> restarts the server. Your Caddyfile, .env, and data\
   are never touched. The previous app is kept in _backup\ for rollback.
 
   Params come from the backend's update manifest:
@@ -58,7 +58,7 @@ try {
   $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower()
   if ($got -ne $Sha256.ToLower()) {
     Log "ABORT checksum mismatch got=$got want=$($Sha256.ToLower())"
-    throw "SHA-256 mismatch — refusing to install"
+    throw "SHA-256 mismatch -- refusing to install"
   }
   Log "sha256 verified"
 
@@ -96,7 +96,7 @@ try {
     $s = Join-Path $srcRoot $f
     if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $DeployRoot $f) -Force }
   }
-  # A newer apply-update.ps1 / update.bat can't replace itself while running —
+  # A newer apply-update.ps1 / update.bat can't replace itself while running --
   # stage it as .new so start-server.bat can promote it on next launch.
   foreach ($f in @("apply-update.ps1", "update.bat")) {
     $s = Join-Path $srcRoot $f
@@ -121,7 +121,7 @@ try {
     Log "Hub frontend updated"
   }
 
-  # 7. Done — clear the flag and relaunch
+  # 7. Done -- clear the flag and relaunch
   Remove-Item -LiteralPath $flag -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
   Start-Server
