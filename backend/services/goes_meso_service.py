@@ -96,14 +96,28 @@ class GoesMesoService:
         return self._s3
 
     # ---- S3 listing -------------------------------------------------------
-    def _recent_keys(self, sat: str, sector: str, band: str, n: int):
-        """Last `n` (key, time) for a combo, newest last; [] if none."""
+    def _recent_keys(self, sat: str, sector: str, band: str, n: int, span_min: int = 0):
+        """`n` (key, time) for a combo, newest last; [] if none.
+
+        span_min == 0 keeps the original behaviour: the newest `n` frames, which
+        for this 1-minute product is the newest `n` MINUTES. That is why a 3-hour
+        meso loop only ever covered the last ~20 minutes -- the window asked for
+        24 frames and got 24 consecutive minutes of them.
+
+        span_min > 0 instead spreads `n` frames ACROSS that many minutes, striding
+        the key list so the loop spans the requested window at the frame budget the
+        caller can actually render. Only the selected keys get reprojected, so a
+        3-hour loop costs exactly what a 20-minute one did.
+        """
         s3 = self._client()
         bucket = _BUCKETS[sat]
         bn = _BANDS[band]
         now = datetime.datetime.now(datetime.timezone.utc)
         keys: list = []
-        for back in range(0, 4):  # walk back hours until we have enough
+        # Enough hourly prefixes to cover the span (+1 for the partial hour at each
+        # end), capped so a bad span can't turn into an unbounded S3 walk.
+        hours_back = 4 if span_min <= 0 else max(2, min(8, span_min // 60 + 2))
+        for back in range(0, hours_back):  # walk back hours until we have enough
             t = now - datetime.timedelta(hours=back)
             prefix = f"ABI-L2-CMIPM/{t.year}/{t.timetuple().tm_yday:03d}/{t.hour:02d}/"
             token = None
@@ -118,9 +132,23 @@ class GoesMesoService:
                 if not r.get("IsTruncated"):
                     break
                 token = r.get("NextContinuationToken")
-            if len(keys) >= n:
+            # With a span we need the whole window, not just enough to fill n.
+            if span_min <= 0 and len(keys) >= n:
                 break
-        keys = sorted(set(keys))[-n:]
+        keys = sorted(set(keys))
+        if span_min > 0 and keys:
+            cutoff = now - datetime.timedelta(minutes=span_min)
+            inwin = [k for k in keys if (_parse_time(k) or "") >= cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")]
+            keys = inwin or keys[-n:]
+            if len(keys) > n:
+                # Stride from the NEWEST backwards so the live frame is always the
+                # last one -- an evenly-spaced set that omits "now" reads as a stale
+                # loop on air.
+                step = (len(keys) - 1) / (n - 1) if n > 1 else 1
+                idx = sorted({len(keys) - 1 - round(i * step) for i in range(n)})
+                keys = [keys[i] for i in idx if 0 <= i < len(keys)]
+        else:
+            keys = keys[-n:]
         return bucket, [(k, _parse_time(k)) for k in keys]
 
     # ---- reproject one file ----------------------------------------------
@@ -207,14 +235,22 @@ class GoesMesoService:
             logger.warning("GOES meso get failed %s: %s", (sat, sector, band), e)
             return None
 
-    async def get_frames(self, sat: str, sector: str, band: str, n: int) -> list:
-        """Last `n` frames' meta [{time, bbox}], oldest→newest (reprojected in parallel)."""
+    async def get_frames(self, sat: str, sector: str, band: str, n: int, span_min: int = 0) -> list:
+        """`n` frames' meta [{time, bbox}], oldest→newest (reprojected in parallel).
+
+        `span_min` spreads those n frames over that many minutes instead of taking
+        the newest n consecutive ones -- see _recent_keys. The 24-frame ceiling is
+        a RENDER budget (each frame is its own map image source), not a history
+        limit, so it stays put while the span grows.
+        """
         if sat not in _BUCKETS or sector not in ("1", "2") or band not in _BANDS:
             return []
         n = max(1, min(int(n), 24))
+        span_min = max(0, min(int(span_min), 6 * 60))
         loop = asyncio.get_event_loop()
         try:
-            bucket, kt = await loop.run_in_executor(_POOL, self._recent_keys, sat, sector, band, n)
+            bucket, kt = await loop.run_in_executor(
+                _POOL, self._recent_keys, sat, sector, band, n, span_min)
         except Exception as e:  # noqa: BLE001
             logger.warning("GOES meso list failed: %s", e)
             return []

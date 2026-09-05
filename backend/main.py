@@ -3872,11 +3872,17 @@ async def goes_meso(sat: str = "east", sector: str = "1", band: str = "ir"):
 
 
 @app.get("/api/goes/meso/frames")
-async def goes_meso_frames(sat: str = "east", sector: str = "1", band: str = "ir", n: int = 8):
-    """The last `n` GOES mesoscale frames [{time, bbox}], oldest→newest — for looping.
-    The sector floats, so each frame carries its own bbox."""
+async def goes_meso_frames(sat: str = "east", sector: str = "1", band: str = "ir",
+                           n: int = 8, span: int = 0):
+    """`n` GOES mesoscale frames [{time, bbox}], oldest→newest — for looping.
+    The sector floats, so each frame carries its own bbox.
+
+    `span` (minutes) spreads those n frames across that window instead of
+    returning the newest n consecutive ones. The meso sector is a 1-minute
+    product, so without it a 3-hour loop request came back as the newest ~24
+    MINUTES. Omitted/0 keeps the original behaviour."""
     from .services.goes_meso_service import get_goes_meso_service
-    frames = await get_goes_meso_service().get_frames(sat, sector, band, n)
+    frames = await get_goes_meso_service().get_frames(sat, sector, band, n, span)
     if not frames:
         raise HTTPException(status_code=503, detail="GOES meso not available")
     return {"frames": frames}
