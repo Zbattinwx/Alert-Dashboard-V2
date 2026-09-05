@@ -31,7 +31,41 @@ function Log($m) {
   try { Add-Content -LiteralPath $log -Value $line -Encoding utf8 } catch {}
 }
 
+# install-services.ps1 registers these with -RestartCount 999 -RestartInterval
+# 1min, so Windows resurrects the backend WHILE we are swapping files and the
+# robocopy /MIR then fails on a locked dashboard-backend.exe. taskkill alone
+# cannot win that race -- the tasks have to be disabled for the duration. The
+# .updating flag only ever spoke to start-server.bat's own restart loop.
+$script:TaskNames  = @('TBF Dashboard Backend', 'TBF Caddy')
+$script:HeldTasks  = @()
+
+function Stop-ServiceTasks {
+  foreach ($t in $script:TaskNames) {
+    if (-not (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue)) { continue }
+    try {
+      Disable-ScheduledTask -TaskName $t -ErrorAction Stop | Out-Null
+      Stop-ScheduledTask    -TaskName $t -ErrorAction SilentlyContinue
+      $script:HeldTasks += $t
+      Log "disabled scheduled task '$t' for the swap"
+    } catch { Log "WARN could not disable task '$t': $($_.Exception.Message)" }
+  }
+}
+
+function Restore-ServiceTasks {
+  foreach ($t in $script:HeldTasks) {
+    try {
+      Enable-ScheduledTask -TaskName $t -ErrorAction Stop | Out-Null
+      Start-ScheduledTask  -TaskName $t -ErrorAction SilentlyContinue
+      Log "re-enabled and started scheduled task '$t'"
+    } catch { Log "WARN could not restore task '$t': $($_.Exception.Message)" }
+  }
+  return $script:HeldTasks.Count -gt 0
+}
+
 function Start-Server {
+  # When this deployment runs under the scheduled tasks, THEY are the server --
+  # relaunching start-server.bat as well would put a second backend on port 3074.
+  if (Restore-ServiceTasks) { return }
   $ss = Join-Path $DeployRoot "start-server.bat"
   if (Test-Path -LiteralPath $ss) {
     Start-Process -FilePath $ss -WorkingDirectory $DeployRoot
@@ -73,6 +107,7 @@ try {
   # 4. Signal the restart loop to stand down, then stop the server
   New-Item -ItemType File -Path $flag -Force | Out-Null
   Log "stopping server"
+  Stop-ServiceTasks
   cmd /c "taskkill /f /im dashboard-backend.exe >nul 2>&1"
   cmd /c "taskkill /f /im caddy.exe >nul 2>&1"
   Start-Sleep -Seconds 3
@@ -92,7 +127,7 @@ try {
 
   # 6. Refresh SAFE support files only. Never overwrite Caddyfile / .env / data\,
   #    and never overwrite this running script (apply-update.ps1) or update.bat.
-  foreach ($f in @("start-server.bat", "version.json")) {
+  foreach ($f in @("start-server.bat", "run-backend.cmd", "version.json")) {
     $s = Join-Path $srcRoot $f
     if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $DeployRoot $f) -Force }
   }
