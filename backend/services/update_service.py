@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 # outlives the backend that update.bat/apply-update.ps1 will kill.
 _DETACHED_PROCESS = 0x00000008
 _CREATE_NO_WINDOW = 0x08000000
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 # An update that has not restarted this server within this long has failed; the
 # in-memory "applying" flag is cleared so a retry is possible without a manual
@@ -234,7 +235,16 @@ class UpdateService:
                     "-DeployRoot", str(root), "-Build", remote or "",
                 ],
                 cwd=str(root),
-                creationflags=_DETACHED_PROCESS | _CREATE_NO_WINDOW,
+                # NOT DETACHED_PROCESS. A detached powershell.exe has no console
+                # for its host to attach to, and it exits 0 at startup having run
+                # NOTHING -- Popen succeeds, `applying` flips true, and the update
+                # silently never happens. That was the "Update now does nothing"
+                # from day one, underneath the other updater bugs. CREATE_NO_WINDOW
+                # gives it a hidden console of its own; a new process group keeps
+                # our Ctrl+C / console events from reaching it; DEVNULL stdio so it
+                # holds none of our handles when we are killed out from under it.
+                creationflags=_CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 close_fds=True,
             )
         except Exception as e:
