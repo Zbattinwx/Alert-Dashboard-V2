@@ -282,12 +282,26 @@ MODELS: dict[str, dict] = {
         "default_file": "sfc", "mslp": (":MSLMA:mean sea level:", "sfc"),
         "key": (lambda date, hh, f, tok: f"hrrr.{date}/conus/hrrr.t{hh:02d}z.wrf{tok}f{f:02d}.grib2"),
     },
+    # RRFS moved buckets. The rrfs_a/ prototype feed under noaa-rrfs-pds stopped
+    # updating 2026-08-11 (that bucket now holds only retro output), and the
+    # pre-implementation parallel feed publishes to noaa-rrfs-ops-pds with the
+    # rrfs_a/ level dropped: rrfs.YYYYMMDD/HH/ at the root. The FILENAME is
+    # unchanged, which is why this is a bucket+prefix fix and not a new adapter.
+    #
+    # It is also NOT hourly. Only every third hour publishes the hourly 2dfld/
+    # prslev files we read; 13Z/17Z/20Z carry sub-hourly (subh) output only, so
+    # advertising all 24 sent run selection at hours with nothing to fetch.
+    # Verified live 2026-09-04: 00/06/12/18Z -> f000..f084, 03/09/15/21Z ->
+    # f000..f018, and REFC/MASSDEN/COLMD/HGT all still present in the new files.
+    #
+    # RRFS v1 goes fully operational 2026-10-06; this parallel feed can still
+    # change under us before then.
     "rrfs": {
-        "label": "RRFS-A", "bucket": "noaa-rrfs-pds", "fields": RRFS_FIELDS,
-        "run_hours": tuple(range(24)), "fhour_offset": 0,  # deterministic has f000
+        "label": "RRFS", "bucket": "noaa-rrfs-ops-pds", "fields": RRFS_FIELDS,
+        "run_hours": (0, 3, 6, 9, 12, 15, 18, 21), "fhour_offset": 0,  # deterministic has f000
         "max_fhour": (lambda hh: 84 if hh % 6 == 0 else 18),  # synoptic runs to F84
         "default_file": "2dfld", "mslp": (":MSLET:mean sea level:", "2dfld"),
-        "key": (lambda date, hh, f, tok: f"rrfs_a/rrfs.{date}/{hh:02d}/rrfs.t{hh:02d}z.{tok}.3km.f{f:03d}.conus.grib2"),
+        "key": (lambda date, hh, f, tok: f"rrfs.{date}/{hh:02d}/rrfs.t{hh:02d}z.{tok}.3km.f{f:03d}.conus.grib2"),
     },
     "gfs": {
         "label": "GFS", "bucket": "noaa-gfs-bdp-pds", "fields": GFS_FIELDS,
