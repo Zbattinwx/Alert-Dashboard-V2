@@ -41,6 +41,24 @@ if not exist "dashboard-backend\dashboard-backend.exe" (
     exit /b 1
 )
 
+REM --- TLS trust ---------------------------------------------------------------
+REM Must match run-backend.cmd. Some Windows certificate stores cannot complete
+REM the chain for public hosts we depend on ("unable to get local issuer
+REM certificate"), which breaks BOTH the ODOT camera feed and the NWWS-OI
+REM connection ("CERT: Invalid certificate trust chain"). run-backend.cmd (the
+REM scheduled-task launcher) has set this for a while; this file did not -- and
+REM apply-update.ps1 relaunches THIS one, so every auto-update silently dropped
+REM the server back onto the broken trust store. Point OpenSSL at the CA bundle
+REM PyInstaller already ships inside the app; set_default_verify_paths() honours
+REM SSL_CERT_FILE, so it reaches aiohttp and slixmpp alike.
+set "CACERT=%CD%\dashboard-backend\_internal\certifi\cacert.pem"
+if exist "%CACERT%" (
+    set "SSL_CERT_FILE=%CACERT%"
+    set "REQUESTS_CA_BUNDLE=%CACERT%"
+) else (
+    echo [WARN] certifi bundle not found at %CACERT% - TLS may fail for some hosts
+)
+
 if not exist ".env" (
     echo [WARN] No .env found next to this script.
     echo        Copy your .env here, or rename .env.example, before going live;

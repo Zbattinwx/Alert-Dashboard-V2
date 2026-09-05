@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 _DETACHED_PROCESS = 0x00000008
 _CREATE_NO_WINDOW = 0x08000000
 
+# An update that has not restarted this server within this long has failed; the
+# in-memory "applying" flag is cleared so a retry is possible without a manual
+# restart. Generous because the bundle is ~200 MB over a home uplink.
+_APPLY_TIMEOUT_S = 30 * 60
+
 
 class UpdateService:
     """Checks for and applies standalone-dashboard updates."""
@@ -54,6 +59,9 @@ class UpdateService:
         self._manifest: Optional[dict] = None
         self._manifest_at: float = 0.0
         self._applying: bool = False
+        self._apply_proc = None       # Popen handle for the detached updater
+        self._apply_at: float = 0.0   # when we spawned it
+        self._apply_error: Optional[str] = None
 
     # ------------------------------------------------------------------ paths
     @staticmethod
@@ -141,6 +149,7 @@ class UpdateService:
             and self.is_frozen()
             and self._is_newer(remote, local)
         )
+        self._refresh_applying()
         return {
             "enabled": bool(settings.dashboard_update_enabled),
             "frozen": self.is_frozen(),
@@ -151,7 +160,43 @@ class UpdateService:
             "notes": (manifest or {}).get("notes"),
             "pub_date": (manifest or {}).get("pub_date"),
             "applying": self._applying,
+            "apply_error": self._apply_error,
         }
+
+    def _refresh_applying(self) -> None:
+        """Clear a stale "applying" flag.
+
+        A SUCCESSFUL update kills this process -- apply-update.ps1 stops the
+        server before swapping files. So if we are still running and the updater
+        has exited, the update FAILED, and the flag must not keep claiming an
+        update is in progress: it is in-memory with no reset path, so one failed
+        attempt used to lock out every retry until the server was restarted by
+        hand. That is exactly what a broken updater script produced -- a
+        permanent "an update is already in progress" with nothing running.
+
+        poll() is None while the updater is alive (a 200 MB download takes a
+        while), so a slow update still reads as in progress. The timeout is a
+        backstop for the case where the handle is lost.
+        """
+        if not self._applying:
+            return
+        proc = self._apply_proc
+        if proc is not None:
+            code = proc.poll()
+            if code is not None:
+                self._applying = False
+                self._apply_proc = None
+                self._apply_error = (
+                    f"The updater exited with code {code} without restarting the server. "
+                    f"See update.log next to the app."
+                )
+                logger.warning("update: updater exited %s without restarting; clearing applying flag", code)
+                return
+        if self._apply_at and (time.time() - self._apply_at) > _APPLY_TIMEOUT_S:
+            self._applying = False
+            self._apply_proc = None
+            self._apply_error = "The updater did not finish in time. See update.log next to the app."
+            logger.warning("update: applying flag timed out after %ss; clearing", _APPLY_TIMEOUT_S)
 
     async def apply(self) -> dict:
         """Spawn the detached updater if (and only if) a newer build exists."""
@@ -160,6 +205,7 @@ class UpdateService:
             return {"started": False, "message": "Updates are disabled on this server."}
         if not self.is_frozen():
             return {"started": False, "message": "Updates only apply to the packaged Windows build."}
+        self._refresh_applying()
         if self._applying:
             return {"started": True, "message": "An update is already in progress."}
 
@@ -180,7 +226,7 @@ class UpdateService:
             return {"started": False, "message": "Updater script (apply-update.ps1) not found next to the app."}
 
         try:
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 [
                     "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                     "-File", str(script),
@@ -196,6 +242,9 @@ class UpdateService:
             return {"started": False, "message": f"Could not start the updater: {e}"}
 
         self._applying = True
+        self._apply_proc = proc
+        self._apply_at = time.time()
+        self._apply_error = None
         logger.info(f"update: spawned updater for build {remote}")
         return {
             "started": True,
