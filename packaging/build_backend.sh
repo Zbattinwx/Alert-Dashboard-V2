@@ -24,7 +24,21 @@ cd "$ROOT"
 # Rebuild the dashboard frontend so the bundled dist always matches source.
 # PyInstaller below only copies frontend/dist (--add-data) — it never builds it,
 # so without this the bundled dashboard quietly drifts behind the frontend code.
-echo "Building dashboard frontend (frontend/dist)..."
+#
+# VITE_BASE_PATH MATTERS AND IS NOT OPTIONAL FOR A HUB SERVER BUNDLE.
+# The dashboard's index.html hard-codes its asset URLs at build time. Caddy
+# serves it behind `handle_path /dash/*`, which STRIPS the prefix, so a bundle
+# built at the default base "/" asks the browser for /assets/... -- that lands
+# on the Hub's radar app at the site root, gets index.html back from its SPA
+# fallback, and the dashboard is a white screen with a MIME-type error.
+#
+# The DESKTOP app is the opposite case: it serves this same dashboard from
+# localhost:3074 at the ROOT and wants the default. One frozen backend cannot
+# satisfy both, so pick the base for the artefact you are building:
+#
+#   VITE_BASE_PATH=/dash/ bash packaging/build_backend.sh   # Hub server bundle
+#   bash packaging/build_backend.sh                         # desktop app
+echo "Building dashboard frontend (frontend/dist, base=${VITE_BASE_PATH:-/})..."
 ( cd "$ROOT/frontend" && { [ -d node_modules ] || npm ci; } && npm run build )
 
 # PyInstaller is Windows Python — it needs a native path for --add-data, not the
