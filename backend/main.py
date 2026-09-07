@@ -3815,9 +3815,13 @@ async def list_mrms_frames(product: str | None = None):
     svc = get_mrms_service()
     if not svc or not svc.available:
         raise HTTPException(status_code=503, detail="MRMS service not available")
-    if _mrms_is_reflectivity(product):
-        return svc.get_frame_list()
-    return await asyncio.to_thread(svc.get_product_frames, product, 30)
+    # Reflectivity used to answer from the in-memory poll ring, which only holds
+    # what this process has observed since launch — so the list was bounded by
+    # backend uptime, not by what the bucket actually has, and a 1-hour and a
+    # 3-hour loop returned the same handful of frames. Every product now lists
+    # from S3 the same way.
+    pid = "reflectivity" if _mrms_is_reflectivity(product) else product
+    return await asyncio.to_thread(svc.get_product_frames, pid)
 
 
 @app.get("/api/mrms/frame/{ts}")
@@ -3827,8 +3831,11 @@ async def get_mrms_frame_by_ts(ts: str, product: str | None = None):
     svc = get_mrms_service()
     if not svc or not svc.available:
         raise HTTPException(status_code=503, detail="MRMS service not available")
+    # to_thread on BOTH paths now: get_frame_binary falls back to an S3 fetch +
+    # GRIB decode when the timestamp predates this process, which would block
+    # the event loop if called inline.
     if _mrms_is_reflectivity(product):
-        binary = svc.get_frame_binary(ts)
+        binary = await asyncio.to_thread(svc.get_frame_binary, ts)
     else:
         binary = await asyncio.to_thread(svc.get_product_frame, product, ts)
     if not binary:

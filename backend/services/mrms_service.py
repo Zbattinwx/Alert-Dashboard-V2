@@ -169,11 +169,23 @@ class MRMSService:
         return [{"ts": ts, "iso": iso} for ts, iso, _ in self._history]
 
     def get_frame_binary(self, ts: str) -> Optional[bytes]:
-        """Return packed binary for a specific frame timestamp."""
+        """Packed binary for one composite-reflectivity frame.
+
+        The live poll ring is checked first because it is free, but it only
+        holds what THIS process has polled since it started (30 frames, one per
+        120 s). The frame list now spans hours of bucket history, so most
+        requests are for timestamps this process never saw — those fall through
+        to the same on-demand S3 fetch every other product uses. Without the
+        fallback the client asks for a frame the list told it about and gets a
+        404, which is how a loop ends up shorter than the window asked for.
+
+        Does network I/O and a GRIB decode on the miss path — callers in async
+        context must run it in a thread.
+        """
         for frame_ts, _, binary in self._history:
             if frame_ts == ts:
                 return binary
-        return None
+        return self.get_product_frame("reflectivity", ts)
 
     @property
     def latest_png(self) -> Optional[bytes]:
@@ -516,22 +528,40 @@ class MRMSService:
             return ts
 
     def _list_keys(self, s3_prefix: str, lookback_min: int = 180, max_keys: int = 300) -> list[str]:
-        """Recent .grib2.gz keys for a product (today, falling back to yesterday)."""
+        """Recent .grib2.gz keys for a product, oldest→newest.
+
+        The bucket is partitioned by UTC DAY, so a lookback reaching back past
+        00Z spans two prefixes. The previous version listed today and returned
+        the moment it found anything, falling back to yesterday only when today
+        was completely empty — so for the first hours of each UTC day the
+        lookback silently truncated to "however far into the day we are". At
+        01:37Z a 4-hour lookback returned 97 minutes, which is what capped a
+        3-hour MRMS loop overnight.
+
+        Every day the window touches is listed, and StartAfter is applied only on
+        the day the cutoff falls in (later days start at 00Z anyway).
+        """
         s3 = self._get_s3()
         short = s3_prefix.split("/")[-1]
         now = datetime.now(timezone.utc)
-        for day_back in (0, 1):
-            d = now - timedelta(days=day_back)
-            prefix = f"{s3_prefix}/{d.strftime('%Y%m%d')}/"
+        start = now - timedelta(minutes=max(1, lookback_min))
+        out: list[str] = []
+        day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        while day <= now:
+            prefix = f"{s3_prefix}/{day.strftime('%Y%m%d')}/"
             kwargs = {"Bucket": MRMS_BUCKET, "Prefix": prefix, "MaxKeys": max_keys}
-            if day_back == 0:
-                cutoff = (now - timedelta(minutes=lookback_min)).strftime("%Y%m%d-%H%M%S")
-                kwargs["StartAfter"] = f"{prefix}MRMS_{short}_{cutoff}"
-            resp = s3.list_objects_v2(**kwargs)
-            keys = sorted(o["Key"] for o in resp.get("Contents", []) if o["Key"].endswith(".grib2.gz"))
-            if keys:
-                return keys
-        return []
+            if day.date() == start.date():
+                kwargs["StartAfter"] = f"{prefix}MRMS_{short}_{start.strftime('%Y%m%d-%H%M%S')}"
+            try:
+                resp = s3.list_objects_v2(**kwargs)
+                out.extend(o["Key"] for o in resp.get("Contents", []) if o["Key"].endswith(".grib2.gz"))
+            except Exception as e:
+                # One unreadable day shouldn't sink the whole window — a partial
+                # loop is far more useful than an empty one.
+                logger.warning("MRMS list %s failed: %s", prefix, e)
+            day += timedelta(days=1)
+        out.sort()
+        return out[-max_keys:]  # newest, if the window is wider than the cap
 
     def _fetch_pack(self, spec: dict, key: str) -> Optional[bytes]:
         raw = gzip.decompress(self._get_s3().get_object(Bucket=MRMS_BUCKET, Key=key)["Body"].read())
@@ -604,13 +634,21 @@ class MRMSService:
             logger.warning("MRMS %s latest failed: %s", pid, e)
             return cached_binary
 
-    def get_product_frames(self, pid: str, n: int = 30) -> list[dict]:
-        """Recent frame timestamps for a product (for looping), oldest→newest."""
+    def get_product_frames(self, pid: str, lookback_min: int = 240) -> list[dict]:
+        """Frame timestamps available for a product, oldest→newest.
+
+        Returns EVERYTHING inside the lookback rather than a fixed count. The
+        client strides this list down to its own frame budget (thinByTime), so
+        pre-truncating to the newest N here silently capped every loop at
+        N x cadence — a 3-hour MRMS loop could only ever show the most recent
+        hour, whatever the operator picked. Offer what exists; let the caller
+        choose the spacing.
+        """
         spec = MRMS_PRODUCTS.get(pid)
         if not spec:
             return []
         try:
-            keys = self._list_keys(spec["s3"], lookback_min=240, max_keys=300)[-max(1, n):]
+            keys = self._list_keys(spec["s3"], lookback_min=lookback_min, max_keys=400)
             return [{"ts": self._ts_of(k), "iso": self._iso_of(self._ts_of(k))} for k in keys]
         except Exception as e:
             logger.warning("MRMS %s frames failed: %s", pid, e)
