@@ -261,6 +261,10 @@ class SponsoredAlertTicker {
             };
 
             this.ws.onmessage = (event) => {
+                // Skip binary payloads (the dashboard pushes radar frames over
+                // this same socket). JSON.parse on one throws
+                // `Unexpected token 'o', "[object Blob]"` on every frame.
+                if (typeof event.data !== 'string') return;
                 this.handleMessage(event.data);
             };
 

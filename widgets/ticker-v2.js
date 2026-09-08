@@ -223,7 +223,15 @@ class TickerV2 {
         try {
             this.ws = new WebSocket(wsUrl);
             this.ws.onopen = () => console.log('Ticker V2 WebSocket connected');
-            this.ws.onmessage = (event) => this.handleMessage(event.data);
+            this.ws.onmessage = (event) => {
+                // The dashboard also pushes binary payloads over this socket
+                // (radar frames). They are not ticker data, and feeding one to
+                // JSON.parse throws `Unexpected token 'o', "[object Blob]"` on
+                // every frame. Skip anything that isn't text, the same way the
+                // stream app's own WebSocket handler does.
+                if (typeof event.data !== 'string') return;
+                this.handleMessage(event.data);
+            };
             this.ws.onclose = () => {
                 console.log('Ticker V2 WebSocket disconnected');
                 this.scheduleReconnect();
