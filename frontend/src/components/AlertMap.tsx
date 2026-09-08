@@ -241,6 +241,7 @@ export const AlertMap: React.FC<AlertMapProps> = ({
   stormCells = [],
 }) => {
   const mapRef = useRef<MapRef>(null);
+  const [radarUnavailable, setRadarUnavailable] = useState<string | null>(null);
   const radarLayerRef = useRef<RadarGLLayer | null>(null);
 
   const [mapLoaded, setMapLoaded] = useState(false);
@@ -278,7 +279,22 @@ export const AlertMap: React.FC<AlertMapProps> = ({
     (async () => {
       try {
         const metaRes = await fetch(apiUrl(`/api/radar/frame/${radarProduct}`));
-        if (!metaRes.ok) return;
+        if (!metaRes.ok) {
+          // 409 is the server saying radar DISPLAY frames are switched off
+          // (nexrad_serve_frames), which is a deliberate config on a headless
+          // server -- not an outage. Without this the toggle looks like it
+          // works and simply never draws, which is indistinguishable from
+          // "no radar right now".
+          if (!cancelled) {
+            setRadarUnavailable(
+              metaRes.status === 409
+                ? 'Radar display frames are turned off on this server'
+                : null,
+            );
+          }
+          return;
+        }
+        if (!cancelled) setRadarUnavailable(null);
         const metaList = await metaRes.json();
         const meta = Array.isArray(metaList) ? metaList[0] : metaList;
         if (!meta?.frame_id || !meta?.site) return;
@@ -755,6 +771,11 @@ export const AlertMap: React.FC<AlertMapProps> = ({
                 {RADAR_PRODUCT_SHORT[p]}
               </button>
             ))}
+          </div>
+        )}
+        {radarEnabled && radarUnavailable && (
+          <div className="radar-unavailable" role="status">
+            <i className="fa fa-info-circle" /> {radarUnavailable}
           </div>
         )}
       </div>

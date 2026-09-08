@@ -11,7 +11,6 @@ interface NavItem {
 const navItems: NavItem[] = [
   { id: 'alerts', label: 'Active Alerts', icon: 'fa-exclamation-triangle' },
   { id: 'map', label: 'Alert Map', icon: 'fa-map-marked-alt' },
-  { id: 'radar', label: 'NEXRAD Radar', icon: 'fa-satellite-dish' },
   { id: 'lsr', label: 'Storm Reports', icon: 'fa-bullhorn' },
   { id: 'odot', label: 'ODOT Cameras', icon: 'fa-road' },
   { id: 'spc', label: 'SPC Outlooks', icon: 'fa-cloud-sun-rain' },

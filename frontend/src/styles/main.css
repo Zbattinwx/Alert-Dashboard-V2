@@ -5135,3 +5135,16 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .health-light .hl-dot { box-shadow: none; }
 }
+
+/* Radar display frames switched off server-side (nexrad_serve_frames). Shown
+   beside the Alert Map's radar toggle so the control does not simply appear to
+   do nothing — the same ambiguity that let a model which failed to load look
+   like a model that was never trained. */
+.radar-unavailable {
+  margin-top: 6px; padding: 6px 9px; border-radius: 7px;
+  background: rgba(245,158,11,.12);
+  border: 1px solid rgba(245,158,11,.30);
+  color: var(--accent-yellow);
+  font-size: .72rem; line-height: 1.4; max-width: 230px;
+}
+.radar-unavailable i { margin-right: 5px; }

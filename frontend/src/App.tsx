@@ -19,7 +19,6 @@ import { NWWSProductsSection } from './components/NWWSProductsSection';
 import { SocialMediaSection } from './components/SocialMediaSection';
 import { ComposeModal } from './components/social/ComposeModal';
 import { AFDSection } from './components/AFDSection';
-import RadarSection from './components/RadarSection';
 import { OBSOverlay } from './components/OBSOverlay';
 import { ChaseMode } from './components/ChaseMode';
 import { AlertMapGraphic } from './components/AlertMapGraphic';
@@ -30,7 +29,7 @@ import { useAlertChimes } from './hooks/useAlertChimes';
 import type { Alert, AgentNotification } from './types/alert';
 import type { MesoscaleDiscussion } from './types/spc';
 import type { ChaserPosition } from './types/chaser';
-import type { RadarFrame, RadarBinaryFrame, RadarStatus, StormCell, LightningFlash, MCSSystem } from './types/radar';
+import type { RadarFrame, RadarBinaryFrame, StormCell } from './types/radar';
 import { apiUrl, wsUrl } from './utils/api';
 import { UpdateBanner } from './components/UpdateBanner';
 import './styles/main.css';
@@ -61,13 +60,8 @@ const Dashboard: React.FC = () => {
   const [chasers, setChasers] = useState<ChaserPosition[]>([]);
   const [shareAlert, setShareAlert] = useState<Alert | null>(null);
   const [radarFrame, setRadarFrame] = useState<RadarBinaryFrame | null>(null);
-  const [radarFrames, setRadarFrames] = useState<Record<string, RadarBinaryFrame>>({});
-  const [radarStatus, setRadarStatus] = useState<RadarStatus | null>(null);
   const [stormCells, setStormCells] = useState<StormCell[]>([]);
-  const [mcsSystems, setMcsSystems] = useState<MCSSystem[]>([]);
-  const [lightningFlashes, setLightningFlashes] = useState<LightningFlash[]>([]);
   const [agentNotifications, setAgentNotifications] = useState<AgentNotification[]>([]);
-  const [focusedCellId, setFocusedCellId] = useState<string | null>(null);
 
   // Graphics generation queue: { alert, radarFrame snapshot }
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -80,7 +74,6 @@ const Dashboard: React.FC = () => {
   // Binary radar frame handler (main live path — replaces old image_url based handler)
   const handleRadarBinaryFrame = React.useCallback((frame: RadarBinaryFrame) => {
     setRadarFrame(frame);
-    setRadarFrames(prev => ({ ...prev, [frame.site]: frame }));
     if (frame.product === 'reflectivity') {
       reflectivityFrameRef.current = frame;
     }
@@ -142,15 +135,8 @@ const Dashboard: React.FC = () => {
     onChaserDisconnect: handleChaserDisconnect,
     onRadarBinaryFrame: handleRadarBinaryFrame,
     onRadarFrame: handleRadarFrame,
-    onRadarStatus: setRadarStatus,
     onStormCells: setStormCells,
-    onMcsSystems: setMcsSystems,
     onAgentNotification: handleAgentNotification,
-    onLightningStrikes: (flashes) => setLightningFlashes(prev => {
-      // Keep rolling 15-minute window on the frontend too
-      const cutoff = Date.now() - 15 * 60 * 1000;
-      return [...prev.filter(f => new Date(f.timestamp).getTime() >= cutoff), ...flashes];
-    }),
   });
 
   // Fetch brand config and apply CSS overrides on mount
@@ -208,16 +194,25 @@ const Dashboard: React.FC = () => {
     return (
       <div style={{ width: '100vw', height: '100vh', background: '#000', overflow: 'hidden' }}>
         {kiosk === 'radar' && (
-          <RadarSection
-            radarFrame={radarFrame}
-            radarFrames={radarFrames}
-            radarStatus={radarStatus}
-            stormCells={stormCells}
-            mcsSystems={mcsSystems}
-            alerts={alerts}
-            lightningFlashes={lightningFlashes}
-            focusedCellId={focusedCellId}
-          />
+          // The dashboard's radar view moved to the radar app. Left as a
+          // visible notice rather than removed outright: this is the only
+          // kiosk mode that ever existed, so an OBS browser source may still
+          // point here, and a scene that renders black mid-event is a worse
+          // failure than one that says where the radar went.
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: '100%', height: '100%', color: '#8a94a6',
+            font: '500 15px/1.6 system-ui, sans-serif', textAlign: 'center',
+            padding: 24,
+          }}>
+            <div>
+              <div style={{ color: '#e2e8f0', fontSize: 18, marginBottom: 8 }}>
+                Radar moved to the radar app
+              </div>
+              This kiosk view was retired. Point this browser source at
+              TheBattinFront Radar instead.
+            </div>
+          </div>
         )}
       </div>
     );
@@ -275,19 +270,6 @@ const Dashboard: React.FC = () => {
                 />
               </div>
             )}
-
-          {activeSection === 'radar' && (
-            <RadarSection
-              radarFrame={radarFrame}
-              radarFrames={radarFrames}
-              radarStatus={radarStatus}
-              stormCells={stormCells}
-              mcsSystems={mcsSystems}
-              alerts={alerts}
-              lightningFlashes={lightningFlashes}
-              focusedCellId={focusedCellId}
-            />
-          )}
 
           {activeSection === 'model' && (
             <ModelSection />
@@ -367,9 +349,11 @@ const Dashboard: React.FC = () => {
         isOpen={assistantOpen}
         onToggle={() => setAssistantOpen(!assistantOpen)}
         agentNotifications={agentNotifications}
-        onNavigateToCell={(cellId) => {
-          setFocusedCellId(cellId);
-          setActiveSection('radar');
+        onNavigateToCell={() => {
+          // Was activeSection 'radar', which no longer exists. The Alert Map
+          // draws the same storm cells; it has no focus mechanism, so the cell
+          // is shown but not auto-selected.
+          setActiveSection('map');
           setAssistantOpen(false);
         }}
       />
