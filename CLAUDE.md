@@ -304,24 +304,141 @@ physics detectors. The complete data pipeline:
 
 ### Data flow
 
+The whole cycle now runs unattended — see **Automated retraining** below. The
+manual path still works and is what the service calls into.
+
 1. **Collect** — `live_qa_service.py` (in-process when
-   `LIVE_QA_LOG_TRAINING_DATA=true`) or `live_qa.py --log` (standalone CLI)
-   appends one row per cell per scan to `data/training_data.jsonl`. Each row
-   has 25 features + `label: null` and the per-flag context (rotation
-   detected, TDS, BWER, MESH band, etc.).
-2. **Label** — `scripts/label_from_warnings.py` pulls NWS warning polygons
-   from the IEM SBW archive and assigns labels via point-in-polygon plus a
-   time window match. Use `--strict-tornado` to count only TO.W as positive
-   (SVR-only matches stay unlabeled / ambiguous). The inner loop is
-   vectorized with numpy — 50k rows × 26k warnings runs in seconds.
-3. **Train** — `scripts/train_rotation_model.py` builds a class-balanced
-   GradientBoosting classifier, then wraps it in
-   `CalibratedClassifierCV(method='isotonic')` against a held-out 20% set.
-   Saves to `data/rotation_model.joblib`.
-4. **Deploy** — backend restart auto-loads the model
-   (`storm_tracking_service.load_rotation_model`). Per-cell predictions
-   populate the `p_rotation_model` field; a conservative ±2 score nudge
-   fires only at `p ≥ 0.80` (boost) or `p < 0.10` (demote).
+   `LIVE_QA_LOG_TRAINING_DATA=true`) appends one row per cell per scan to
+   `data/training_data.jsonl`: 27 features + `label: null` + per-flag context.
+   **`should_log_cell` gates what is written** (`live_qa_log_min_dbz`, default
+   40): anything the physics flagged, anything scoring ≥ `LOG_MIN_SCORE`, else
+   convective reflectivity. Before that gate existed, `live_qa_min_score` only
+   filtered the console and the log took EVERY cell — September 2026 collected
+   301,715 rows in 7 days against 12,422 for all of August, and the new rows
+   were drizzle whose rotation features are never even computed
+   (`llsd_max_shear` non-zero in 5% vs 69%). A useful negative here is a real
+   storm that is not rotating, not light rain.
+2. **Label** — `scripts/label_from_warnings.py`, IEM SBW archive. Four bugs
+   here made 95% of the archive's labels wrong; all are now covered by
+   `tests/scripts/test_label_from_warnings.py` and must not regress:
+   - The match window had **no lower bound** (`(scan - expires) <= 10min` is
+     true months early), so 15,100 of 16,449 positives were labelled by a
+     warning issued AFTER the scan — worst case 69 days later.
+   - **IEM ignores `phenomena` and `significance` on `/geojson/sbw.py`.** A
+     request for TO.W returns every product active in the window (measured:
+     25 of 643 were actually TO.W); the rest were flood/marine/dust-storm,
+     stamped `TO.W` at strength 1.0, some with 21-day validity. **Filter
+     client-side on what the feature says it is.**
+   - One request per phenomenon against that unfiltered endpoint **duplicated
+     every warning** with contradictory strengths.
+   - `point_in_polygon` unpacked `(lat, lon)` rings as `(x, y)`, comparing
+     longitudes against a latitude — it returned False for every CONUS polygon,
+     so every positive came from the 5 km centroid fallback.
+
+   `--all` covers the archive's whole span; `--days N` a trailing window.
+   Records outside the fetched warning window are left UNTOUCHED (labelling
+   them negative is how `--days 7` used to relabel months of history as quiet).
+3. **Train** — `scripts/train_rotation_model.py`. Isotonically-calibrated
+   `HistGradientBoostingClassifier` (histogram boosting because correct
+   labelling grew the set to ~400k rows; also the published choice, arXiv
+   2603.20250). **Every split is grouped by convective day** (12Z–12Z) — a
+   tracked storm emits a row per volume scan, so the old random split put scan
+   N in train and scan N+1 in validation and reported memorisation as skill.
+   A rolling `HOLDOUT_DAYS` (21) temporal holdout is never fitted on.
+   `--out` writes a candidate without touching production.
+   **Read average precision, not ROC-AUC** — at the real base rate AUC stays
+   flattering while the precision that matters moves a lot. Judge AP against
+   the *base rate*, not against 1.0: 0.197 on a 0.028 base rate is 7x lift.
+
+   **Never judge a model at a FIXED probability threshold.** `DECISION_THRESHOLD`
+   (0.45) was chosen when the archive was 60% positive from mislabelled data. At
+   a realistic base rate an isotonically-calibrated model's scores barely reach
+   it, so the first genuinely skilful candidate (held-out AUC 0.797, AP 7x base)
+   reported `tp=0, precision=0.000` and the promotion gate would have rejected
+   it. `evaluate()` therefore derives an operating point from the held-out data
+   (max F1) and reports `op_*` alongside the fixed-threshold numbers; the gate's
+   "catches nothing" check reads `op_tp`. At its own operating point that model
+   was precision 0.479 / recall 0.240.
+4. **Deploy** — the retraining service hot-reloads the tracker on promotion;
+   a backend restart also auto-loads (`load_rotation_model`). Predictions
+   populate `p_rotation_model`; a ±2 score nudge fires at `p ≥ 0.80` (boost)
+   or `p < 0.10` (demote).
+
+### Automated retraining (`backend/services/model_training_service.py`)
+
+`auto_retrain_enabled` (default **off**) runs label → train candidate →
+compare → promote/reject on `auto_retrain_interval_hours`. API:
+`GET /api/model/rotation/status`, `POST .../retrain`, `POST .../rollback`.
+
+**The promotion gate is the whole point** — retraining on a schedule and
+overwriting the live model is worse than not retraining, because a bad
+labelling run degrades on-air calls silently. A candidate must first clear an
+absolute skill floor (`MIN_USEFUL_AUC` 0.60, AP ≥ 2× base rate, tp > 0) and
+only then is compared to the incumbent on the same held-out days. That floor
+exists because a real candidate with **AUC 0.457 and zero true positives was
+voted through on Brier score** — at a 0.02% base rate a model that answers "no
+rotation" to everything scores a near-perfect Brier. **Calibration may only
+break ties between models that already discriminate.** Guards: a stale-safe
+lock file, a minimum-new-labels floor, a severe-weather stand-down (training
+pins cores the tracker needs during an event), a rollback copy, and subprocess
+isolation for the fit.
+
+### Historical backfill (`scripts/backfill_training_data.py`)
+
+Replays archived severe days so a season of ground truth can be built without
+waiting for the next one (`unidata-nexrad-level2` goes back to 1991, IEM
+warnings to 2005). `--list-days` finds days with TOR warnings near a site;
+the replay then walks that day's volumes in time order with a **fresh tracker
+per (site, day)** and writes rows via the same `build_training_record`.
+
+**It must not reimplement any feature computation.** The grid comes from
+`NexradService._create_grid`, dealiasing from `dealias_radar_in_place`, and
+tracking from `StormTrackingService._process_sync` — borrowed, not copied, or
+the model trains on one distribution and infers on another with nothing
+raising. `tests/scripts/test_backfill_parity.py` holds that line.
+Defaults to the warned window ±2h/+1h rather than the whole UTC day (a full
+day is ~250–350 volumes, mostly 3am clear air), and loops BOTH UTC dates
+because a convective day runs past midnight. Checkpointed — `--resume` picks
+up after an interruption. **Known gap:** MRMS features come out 0.0 (the live
+cache holds nothing historical); fill them with
+`scripts/backfill_mrms_features.py` afterwards.
+
+**Windows are clustered around TORNADO warnings, not first-to-last.** A
+(site, day)'s TOR warnings are merged into clusters when within `CLUSTER_GAP_H`
+(2 h) of each other, and each cluster gets its own padded window. The old
+first..last span was the biggest waste in a season replay: 2024-08-05 KIWX had
+two warnings ~20 h apart and got a 23.7 h window (356 volumes, 0.6 TOR per
+100). Measured on 2024 x 5 sites at min_tor=1: **12,662 → 7,126 volumes (−44%)
+with 100% of the 649 tornado warnings kept.** SVR-only hours never widen a
+window — negatives are the one thing the archive is not short of.
+
+**`--min-tor` applies per (site, day), including in `--days` mode.** It used to
+be forced to 0 there "for negatives", which spent 22% of the 2024 run on 43
+site-days with zero tornado warnings — all negatives, of which there were
+already 450k. Default 1. The dashboard passes the same `min_tor` it searched
+with.
+
+**Workers run at below-normal priority** (`_lower_priority`, parent + each
+worker): a season replay is a day of work and exists to run WHILE the box is
+in use. At normal priority six workers made the desktop unusable enough to
+abandon the run; below normal the foreground wins every contested core and
+throughput on an idle box is unchanged. **ctypes trap, hit here:** declare
+`restype`/`argtypes` on every kernel32 call that touches a HANDLE. Undeclared,
+`GetCurrentProcess()`'s pseudo-handle comes back as a 32-bit `-1`, which is
+invalid on 64-bit; `SetPriorityClass` returned 0 and the first 6-worker run
+stayed at Normal with no error. Real handles fit in 32 bits, so the same
+omission in `_pid_alive` only worked by luck — both are declared now, and
+`test_backfill_parity.py::TestBelowNormalPriority` reads the class back from a
+fresh subprocess.
+
+**Scale, measured.** ~13–20 s/volume (S3 download prefetched off the critical
+path; Barnes2 gridding is the irreducible cost and must not be changed or the
+features drift). Apr–Aug 2026 across KILN/KCLE/KIWX/KDTX/KGRR is 41 convective
+days / 105 (site, day) pairs / ~15k volumes ≈ **80+ hours single-threaded**, so
+use `--workers`: pairs are independent, each worker writes its own shard which
+the parent folds in only on clean completion, and ~1.5 GB RAM per worker means
+4–6 is sensible on a 12-core / 32 GB box. Temp volumes are deleted per scan, so
+the ~260 GB of downloads is transient, not resident.
 
 ### Required CLI environment on Windows
 
@@ -348,16 +465,22 @@ on a held-out set, not just CV-AUC.
 
 ### Backup / rollback
 
-The trainer overwrites `data/rotation_model.joblib` unconditionally. Before
-each retrain, snapshot the existing model:
+Promotion keeps `data/rotation_model.previous.joblib` automatically;
+`POST /api/model/rotation/rollback` restores it and hot-reloads the tracker.
+A metrics sidecar (`rotation_model.metrics.json`) records what the live model
+scored and which days it was held out on.
+
+Training by hand still writes production unless `--out` is given, so snapshot
+first when running it manually:
 
 ```bash
 cp data/rotation_model.joblib data/rotation_model.previous.joblib
 cp data/training_data.jsonl    data/training_data.jsonl.bak
 ```
 
-If a new model regresses in the field, restore the snapshot and restart the
-backend.
+`label_from_warnings.py` streams through a temp file and swaps atomically, and
+carries over rows the live collector appended mid-run, so it will not truncate
+the archive if interrupted.
 
 ### Future improvement roadmap
 
@@ -365,11 +488,19 @@ Ordered by effort-to-payoff ratio. Researched against current operational
 practice + recent literature (see references below).
 
 **Tier 1 — quick wins (hours)**
-- **Temporal train/test split** instead of random 5-fold. The current
-  `StratifiedKFold` leaks because the same cell often appears in both
-  splits. A chronological split gives an honest generalization estimate.
+- ~~**Temporal train/test split** instead of random 5-fold.~~ **Done
+  2026-09-07** — all splits are grouped by convective day with a rolling
+  21-day temporal holdout. The honest numbers this exposed: the model then in
+  production scored held-out AUC 0.529 with 14 true positives against 49,726
+  false positives, i.e. it was noise.
 - **Cell-level deduplication.** One supercell scanned for 90 min contributes
-  ~25 highly-correlated rows. Subsample to one row per cell per VCP.
+  ~25 highly-correlated rows. Grouping fixed the *leak*, but the training pool
+  is still weighted toward long-lived storms. Subsample to one row per cell
+  per VCP.
+- **Rebuild the archive.** The collected data predates both the dual-pol fix
+  and the log gate, so `mean_cc`/`min_cc`/`mean_zdr` are 0.0 in 100% of the
+  existing rows and ~70% of them are drizzle. Backfill severe days rather than
+  training on it.
 - **`p_rotation_model` time smoothing** (exponential moving average over
   recent scans) to reduce scan-to-scan flicker on the dashboard.
 
