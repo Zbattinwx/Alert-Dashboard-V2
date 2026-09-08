@@ -1061,6 +1061,24 @@ app = FastAPI(
 # allow_credentials=False is required when using a wildcard/regex origin
 # (the CORS spec forbids credentials=True with non-specific origins).
 # Route groups extracted from this file. See backend/routers/.
+from .routers.brand import router as _brand_router
+app.include_router(_brand_router)
+from .routers.obs import router as _obs_router
+app.include_router(_obs_router)
+from .routers.lsr import router as _lsr_router
+app.include_router(_lsr_router)
+from .routers.alert_graphics import router as _alert_graphics_router
+app.include_router(_alert_graphics_router)
+from .routers.stream import router as _stream_router
+app.include_router(_stream_router)
+from .routers.placefile import router as _placefile_router
+app.include_router(_placefile_router)
+from .routers.alerts import router as _alerts_router
+app.include_router(_alerts_router)
+from .routers.radar import router as _radar_router
+app.include_router(_radar_router)
+from .routers.spc import router as _spc_router
+app.include_router(_spc_router)
 from .routers.hrrr import router as _hrrr_router
 app.include_router(_hrrr_router)
 from .routers.meso import router as _meso_router
@@ -1120,15 +1138,16 @@ logger.info(f"Hub login gate: {'ENABLED' if _hub_auth_enabled() else 'disabled (
 # Static Files (Frontend)
 # =============================================================================
 
-# Path to the frontend build directory
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
+# Shared filesystem locations. These were defined here, which made them the last
+# thing blocking seven route groups from moving out -- a router cannot import
+# from main.py, because main.py imports the router.
+from .paths import FRONTEND_DIR, SOUNDS_DIR, GRAPHICS_DIR as _GRAPHICS_DIR, ensure_runtime_dirs
 
 # Path to the widgets directory
 WIDGETS_DIR = Path(__file__).parent.parent / "widgets"
 
 # Path to custom alert sounds
-SOUNDS_DIR = Path("data/sounds")
-SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
+ensure_runtime_dirs()
 
 # Mount static files if the build directory exists
 if FRONTEND_DIR.exists():
@@ -1217,74 +1236,10 @@ async def health_check():
     }
 
 
-@app.get("/api/alerts")
-async def get_alerts(
-    state: Optional[str] = Query(None, description="Filter by state code (e.g., OH)"),
-    phenomenon: Optional[str] = Query(None, description="Filter by phenomenon code (e.g., TO)"),
-    priority: bool = Query(True, description="Sort by priority"),
-):
-    """
-    Get all active alerts.
-
-    Returns list of active weather alerts, optionally filtered.
-    """
-    alert_manager = get_alert_manager()
-
-    if state:
-        alerts = alert_manager.get_alerts_by_state(state)
-    elif phenomenon:
-        alerts = alert_manager.get_alerts_by_phenomenon(phenomenon)
-    else:
-        alerts = alert_manager.get_alerts_sorted(by_priority=priority)
-
-    return {
-        "count": len(alerts),
-        "alerts": [alert.to_dict() for alert in alerts],
-    }
 
 
-@app.get("/api/alerts/{product_id}")
-async def get_alert(product_id: str):
-    """Get a specific alert by product ID."""
-    alert_manager = get_alert_manager()
-    alert = alert_manager.get_alert(product_id)
-
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
-    return alert.to_dict()
 
 
-@app.post("/api/alerts/{product_id}/impact-scan")
-async def scan_alert_impact(product_id: str, push: bool = True, force: bool = False):
-    """Scan a warning polygon for at-risk places via OpenStreetMap/Overpass.
-
-    Returns the categorized impacted places (towns, mobile home parks, schools,
-    hospitals/care). When ``push`` is true and the scan found anything, the
-    result is also broadcast to the on-stream impact widget.
-    """
-    alert_manager = get_alert_manager()
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    if not alert.polygon or len(alert.polygon) < 3:
-        raise HTTPException(status_code=422, detail="Alert has no polygon to scan")
-
-    try:
-        from .services.osm_impact_service import get_osm_impact_service
-    except ImportError:
-        from backend.services.osm_impact_service import get_osm_impact_service
-
-    service = get_osm_impact_service()
-    result = await service.scan(
-        product_id, alert.polygon, event_name=alert.event_name, force=force
-    )
-
-    if push and result.get("total", 0) > 0:
-        broker = get_message_broker()
-        await broker.broadcast_impact_places(result)
-
-    return result
 
 
 @app.post("/api/impact/clear")
@@ -1295,31 +1250,8 @@ async def clear_impact_overlay():
     return {"success": True}
 
 
-@app.post("/api/alerts/{product_id}/focus")
-async def focus_alert_on_map(product_id: str):
-    """Tell map clients (the radar app) to zoom to and flash this alert.
-
-    Broadcasts the full alert dict so clients have the polygon, centroid, and
-    detail fields without another lookup.
-    """
-    alert_manager = get_alert_manager()
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    broker = get_message_broker()
-    await broker.broadcast_focus_alert(alert.to_dict())
-    return {"success": True}
 
 
-@app.delete("/api/alerts/{product_id}")
-async def clear_alert_manual(product_id: str):
-    """Manually clear an alert by product ID."""
-    alert_manager = get_alert_manager()
-
-    if alert_manager.remove_alert(product_id, reason="MANUAL"):
-        return {"success": True, "message": f"Alert {product_id} cleared manually"}
-    
-    raise HTTPException(status_code=404, detail="Alert not found or already removed")
 
 
 @app.get("/api/stats")
@@ -1577,24 +1509,10 @@ async def get_map_zones():
 # Current on-air radar product, shown by the stream's upper-third overlay.
 # Driven by the AutoHotkey passthrough hotkeys (same keys that switch the radar
 # app), so the label always matches what's on screen.
-_current_radar_product = "reflectivity"
+# Moved to backend/runtime_state.py: two route groups read it, and a module
+# variable cannot be shared across routers with `global`.
 
 
-@app.get("/api/stream/radar-product")
-async def stream_radar_product(value: Optional[str] = Query(None, alias="set")):
-    """
-    Get or set the on-air radar product label for the stream overlay.
-
-    - `GET /api/stream/radar-product`            → current product
-    - `GET /api/stream/radar-product?set=velocity` → set it + broadcast to overlays
-
-    GET-to-set keeps it trivial to call from AutoHotkey / curl on localhost.
-    """
-    global _current_radar_product
-    if value is not None:
-        _current_radar_product = value.strip().lower()
-        await get_message_broker().broadcast_radar_product(_current_radar_product)
-    return {"product": _current_radar_product}
 
 
 @app.get("/api/recent")
@@ -1651,104 +1569,20 @@ async def get_system_status():
 
 
 
-def _resolve_brand_id(brand: Optional[str]) -> str:
-    """Resolve a requested white-label brand id, falling back to the active one
-    if none/invalid. Lets a stream overlay switch branding via ?brand=<id>."""
-    settings = get_settings()
-    if brand:
-        cand = brand.strip().lower()
-        if (brands_dir() / f"{cand}.json").exists():
-            return cand
-    return settings.brand
 
 
-@app.get("/api/brand")
-async def get_brand(brand: Optional[str] = Query(None, description="White-label brand override; defaults to the active brand")):
-    """Get brand configuration for the frontend + radar app (white-label).
-
-    Optional ?brand=<id> serves a specific brand (when a config exists) so a
-    stream overlay can switch branding by URL; otherwise the active brand.
-    """
-    brand_id = _resolve_brand_id(brand)
-    bcfg = get_brand_config(brand_id)
-    return {
-        "brand_id": brand_id,
-        "name": bcfg.name,
-        "short_name": bcfg.short_name,
-        "tagline": bcfg.tagline,
-        "logo": bcfg.logo,
-        "logo_url": f"/api/brand/logo?brand={brand_id}",  # matches the returned brand
-        "logo_is_wordmark": bcfg.logo_is_wordmark,
-        "colors": bcfg.colors.model_dump(),  # semantic palette; clients map to their own CSS vars
-        "website_url": bcfg.website_url,
-        "social_twitter": bcfg.social_twitter,
-        "css_overrides": bcfg.css_overrides,
-    }
 
 
-@app.get("/api/brand/logo")
-async def get_brand_logo(brand: Optional[str] = Query(None, description="White-label brand override; defaults to the active brand")):
-    """Serve a brand's logo (white-label), with default/TBF fallback."""
-    bcfg = get_brand_config(_resolve_brand_id(brand))
-    path = bcfg.get_asset_path(bcfg.logo, brands_dir())
-    if path.exists():
-        return FileResponse(path)
-    fallback = FRONTEND_DIR / "tbf_logo.png"
-    if fallback.exists():
-        return FileResponse(fallback, media_type="image/png")
-    raise HTTPException(status_code=404, detail="Brand logo not found")
 
 
 # =============================================================================
 # LSR (Local Storm Reports) Endpoints
 # =============================================================================
 
-@app.get("/api/lsr")
-async def get_storm_reports(
-    hours: int = Query(24, ge=1, le=168, description="Lookback period in hours"),
-    report_type: Optional[str] = Query(None, description="Filter by report type"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get Local Storm Reports from Iowa State Mesonet.
-
-    Returns tornado, hail, wind, flood, and other severe weather reports.
-    """
-    lsr_service = get_lsr_service()
-    settings = get_settings()
-
-    # Fetch reports
-    reports = await lsr_service.fetch_reports(
-        states=settings.filter_states,
-        hours=hours,
-        force_refresh=refresh,
-    )
-
-    # Filter by type if specified
-    if report_type:
-        reports = [r for r in reports if r.report_type.upper() == report_type.upper()]
-
-    return {
-        "count": len(reports),
-        "reports": [r.to_dict() for r in reports],
-        "type_colors": LSR_TYPE_COLORS,
-    }
 
 
-@app.get("/api/lsr/stats")
-async def get_lsr_stats():
-    """Get LSR statistics."""
-    lsr_service = get_lsr_service()
-    return lsr_service.get_statistics()
 
 
-@app.get("/api/lsr/types")
-async def get_lsr_types():
-    """Get available LSR types and their colors."""
-    return {
-        "types": list(LSR_TYPE_COLORS.keys()),
-        "colors": LSR_TYPE_COLORS,
-    }
 
 
 @app.get("/api/proxy/spc-image")
@@ -1825,159 +1659,18 @@ async def proxy_mesoanalysis(
         raise HTTPException(status_code=502, detail=f"Failed to fetch from SPC: {e}")
 
 
-_PLACEFILE_MAX_BYTES = 5 * 1024 * 1024  # placefiles + icon sheets are small
 
 
-def _placefile_url_ok(url: str) -> bool:
-    """SSRF guard for the placefile proxy: http/https only, and the host must
-    not resolve to loopback/private/link-local/reserved space (the dashboard is
-    reachable over DDNS, so this endpoint is not local-only in practice)."""
-    import ipaddress
-    import socket
-    from urllib.parse import urlparse
-
-    p = urlparse(url)
-    if p.scheme not in ("http", "https") or not p.hostname:
-        return False
-    try:
-        infos = socket.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80))
-    except OSError:
-        return False
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        if (
-            ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
-        ):
-            return False
-    return True
 
 
-@app.get("/api/placefile")
-async def proxy_placefile(url: str = Query(..., description="GR placefile (or icon image) URL")):
-    """Proxy a GR placefile or its icon image so the browser can load it despite
-    CORS. Presents a GR-compatible User-Agent (placefile hosts gate on it).
-    SSRF-guarded: public http/https hosts only, redirects re-validated per hop,
-    response size capped."""
-    from fastapi.responses import Response
-
-    if not await asyncio.to_thread(_placefile_url_ok, url):  # DNS lookup — off the loop
-        raise HTTPException(status_code=400, detail="URL not allowed")
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Follow up to 3 redirects manually so every hop is re-validated —
-            # an allowed public host could otherwise redirect us to the LAN.
-            target = url
-            for _ in range(4):
-                async with session.get(
-                    target,
-                    timeout=aiohttp.ClientTimeout(total=20),
-                    headers={"User-Agent": "GRLevel3 2.0 (TheBattinFront Radar placefile client)"},
-                    allow_redirects=False,
-                ) as resp:
-                    if resp.status in (301, 302, 303, 307, 308):
-                        loc = resp.headers.get("Location")
-                        if not loc:
-                            raise HTTPException(status_code=502, detail="Bad redirect from upstream")
-                        from urllib.parse import urljoin
-                        target = urljoin(target, loc)
-                        if not await asyncio.to_thread(_placefile_url_ok, target):
-                            raise HTTPException(status_code=400, detail="URL not allowed")
-                        continue
-                    if resp.status != 200:
-                        raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
-                    if int(resp.headers.get("Content-Length") or 0) > _PLACEFILE_MAX_BYTES:
-                        raise HTTPException(status_code=502, detail="Upstream response too large")
-                    data = bytearray()
-                    async for chunk in resp.content.iter_chunked(64 * 1024):
-                        data.extend(chunk)
-                        if len(data) > _PLACEFILE_MAX_BYTES:
-                            raise HTTPException(status_code=502, detail="Upstream response too large")
-                    ctype = resp.headers.get("Content-Type", "text/plain; charset=utf-8")
-                    return Response(content=bytes(data), media_type=ctype, headers={"Cache-Control": "no-store"})
-            raise HTTPException(status_code=502, detail="Too many redirects")
-    except aiohttp.ClientError as e:
-        logger.error(f"Placefile proxy fetch failed for {url}: {e}")
-        raise HTTPException(status_code=502, detail="Fetch failed")
 
 
-@app.get("/api/lsr/summary-graphic")
-async def get_lsr_summary_graphic(
-    hours: int = Query(24, ge=1, le=168, description="Lookback hours"),
-    title: Optional[str] = Query(None, description="Graphic title override"),
-    save: bool = Query(False, description="Also save to alert graphics gallery"),
-):
-    """
-    Generate a server-side rendered LSR damage survey summary graphic (PNG).
-
-    Returns a PNG image showing storm report markers on a coordinate map
-    with a stats panel. Suitable for recap posts and on-stream display.
-    """
-    from fastapi.responses import StreamingResponse
-    import io
-
-    try:
-        from .services.lsr_graphic_service import generate_lsr_summary_graphic
-    except ImportError:
-        from backend.services.lsr_graphic_service import generate_lsr_summary_graphic
-
-    lsr_service = get_lsr_service()
-    settings = get_settings()
-    brand = get_brand_config(settings.brand)
-
-    reports = await lsr_service.fetch_reports(states=settings.filter_states, hours=hours)
-
-    if title is None:
-        title = f"Storm Report Summary — {', '.join(settings.filter_states) if settings.filter_states else 'All States'}"
-
-    try:
-        png_bytes = generate_lsr_summary_graphic(
-            reports=reports,
-            title=title,
-            hours=hours,
-            brand_name=brand.name,
-            states=settings.filter_states or None,
-        )
-    except Exception as e:
-        logger.exception(f"LSR summary graphic generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Graphic generation failed: {e}")
-
-    if save:
-        import re as _re
-        import json as _json
-        from datetime import datetime, timezone
-        _GRAPHICS_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        safe_id = f"lsr_summary_{ts}"
-        img_path = _GRAPHICS_DIR / f"{safe_id}.png"
-        img_path.write_bytes(png_bytes)
-        meta_path = _GRAPHICS_DIR / f"{safe_id}.json"
-        meta_path.write_text(_json.dumps({"product_id": safe_id, "event_name": title}))
-        logger.info(f"Saved LSR summary graphic: {safe_id}.png")
-
-    return StreamingResponse(
-        io.BytesIO(png_bytes),
-        media_type="image/png",
-        headers={"Content-Disposition": f'inline; filename="lsr_summary.png"'},
-    )
 
 
 # =============================================================================
 # Viewer Report Models
 # =============================================================================
 
-class ViewerReportSubmission(BaseModel):
-    """Model for viewer report submission from dashboard."""
-    report_type: str = Field(..., description="Report type (TORNADO, HAIL, etc.)")
-    lat: float = Field(..., description="Latitude")
-    lon: float = Field(..., description="Longitude")
-    magnitude: Optional[str] = Field(None, description="Magnitude (e.g., '1.00 INCH', '65 MPH')")
-    remarks: Optional[str] = Field(None, description="Additional remarks")
-    location: Optional[str] = Field(None, description="Human-readable location")
-    submitter: Optional[str] = Field("Anonymous", description="Submitter name")
 
 
 class WebsiteReportSubmission(BaseModel):
@@ -1997,135 +1690,14 @@ class WebsiteReportSubmission(BaseModel):
 # Viewer Report Endpoints
 # =============================================================================
 
-@app.get("/api/lsr/all")
-async def get_all_storm_reports(
-    hours: int = Query(24, ge=1, le=168, description="Lookback period in hours"),
-    report_type: Optional[str] = Query(None, description="Filter by report type"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get all storm reports (official + viewer).
-
-    Official reports are filtered by state settings, viewer reports are always included.
-    """
-    lsr_service = get_lsr_service()
-    settings = get_settings()
-
-    # Fetch official reports (filtered by state)
-    await lsr_service.fetch_reports(
-        states=settings.filter_states,
-        hours=hours,
-        force_refresh=refresh,
-    )
-
-    # Get all reports (official filtered by state + all viewer reports)
-    reports = lsr_service.get_all_reports(states=settings.filter_states)
-
-    # Filter by type if specified
-    if report_type:
-        reports = [r for r in reports if r.report_type.upper() == report_type.upper()]
-
-    return {
-        "count": len(reports),
-        "reports": [r.to_dict() for r in reports],
-        "viewer_count": sum(1 for r in reports if r.is_viewer),
-        "type_colors": LSR_TYPE_COLORS,
-    }
 
 
-@app.get("/api/lsr/viewer")
-async def get_viewer_reports():
-    """Get all viewer-submitted reports."""
-    lsr_service = get_lsr_service()
-    reports = lsr_service.get_manual_reports()
-
-    return {
-        "count": len(reports),
-        "reports": [r.to_dict() for r in reports],
-    }
 
 
-@app.post("/api/lsr/viewer")
-async def submit_viewer_report(report: ViewerReportSubmission):
-    """
-    Submit a storm report from the dashboard.
-
-    Used for manual report entry by dashboard users.
-    """
-    lsr_service = get_lsr_service()
-
-    # Normalize report type
-    report_type = report.report_type.upper()
-
-    # Create StormReport
-    storm_report = StormReport(
-        id=f"viewer_{uuid.uuid4().hex[:12]}",
-        report_type=report_type,
-        magnitude=report.magnitude,
-        lat=report.lat,
-        lon=report.lon,
-        valid_time=datetime.now(timezone.utc).isoformat(),
-        remark=report.remarks or "",
-        location_text=report.location or "",
-        submitter=report.submitter or "Anonymous",
-        is_viewer=True,
-        source="VIEWER",
-    )
-
-    lsr_service.add_manual_report(storm_report)
-
-    # Broadcast to WebSocket clients
-    broker = get_message_broker()
-    await broker.broadcast(
-        MessageType.SYSTEM_STATUS,
-        {
-            "event": "viewer_report_added",
-            "report": storm_report.to_dict(),
-        }
-    )
-
-    return {
-        "success": True,
-        "report": storm_report.to_dict(),
-    }
 
 
-@app.delete("/api/lsr/viewer/{report_id}")
-async def remove_viewer_report(report_id: str):
-    """Remove a viewer-submitted report by ID."""
-    lsr_service = get_lsr_service()
-
-    if lsr_service.remove_manual_report(report_id):
-        # Broadcast removal to WebSocket clients
-        broker = get_message_broker()
-        await broker.broadcast(
-            MessageType.SYSTEM_STATUS,
-            {
-                "event": "viewer_report_removed",
-                "report_id": report_id,
-            }
-        )
-        return {"success": True, "message": f"Report {report_id} removed"}
-
-    raise HTTPException(status_code=404, detail="Viewer report not found")
 
 
-@app.delete("/api/lsr/viewer")
-async def clear_viewer_reports():
-    """Clear all viewer-submitted reports."""
-    lsr_service = get_lsr_service()
-    lsr_service.clear_manual_reports()
-
-    # Broadcast to WebSocket clients
-    broker = get_message_broker()
-    await broker.broadcast(
-        MessageType.SYSTEM_STATUS,
-        {
-            "event": "viewer_reports_cleared",
-        }
-    )
-
-    return {"success": True, "message": "All viewer reports cleared"}
 
 
 @app.post("/api/submit_storm_report")
@@ -2267,211 +1839,20 @@ async def get_all_cameras(
 # ODOT (Ohio DOT) Endpoints
 # =============================================================================
 
-@app.get("/api/spc/outlooks")
-async def get_spc_outlooks(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get all SPC convective outlooks (Day 1-3).
-
-    Returns categorical outlooks with risk level polygons.
-    """
-    spc_service = get_spc_service()
-
-    if refresh:
-        await spc_service.fetch_all_outlooks(force_refresh=True)
-    else:
-        # Fetch day1 categorical if not cached
-        await spc_service.fetch_outlook("day1_categorical")
-
-    outlooks = {}
-    for key in ["day1_categorical", "day2_categorical", "day3_categorical"]:
-        outlook = spc_service._outlooks.get(key)
-        if outlook:
-            outlooks[key] = outlook.to_dict()
-
-    return {
-        "outlooks": outlooks,
-        "risk_colors": RISK_COLORS,
-        "risk_names": RISK_NAMES,
-    }
 
 
-@app.get("/api/spc/outlook/{outlook_key}")
-async def get_spc_outlook(
-    outlook_key: str,
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get a specific SPC outlook.
-
-    Valid outlook_key values:
-    - day1_categorical, day2_categorical, day3_categorical
-    - day1_tornado, day1_wind, day1_hail
-    """
-    spc_service = get_spc_service()
-    outlook = await spc_service.fetch_outlook(outlook_key, force_refresh=refresh)
-
-    if not outlook:
-        raise HTTPException(status_code=404, detail=f"Outlook '{outlook_key}' not found or unavailable")
-
-    return {
-        "outlook": outlook.to_dict(),
-        "risk_colors": RISK_COLORS,
-        "risk_names": RISK_NAMES,
-    }
 
 
-@app.get("/api/spc/day1")
-async def get_spc_day1(
-    include_probabilities: bool = Query(False, description="Include probabilistic outlooks"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get Day 1 SPC outlooks.
-
-    Returns categorical outlook and optionally tornado/wind/hail probabilities.
-    """
-    spc_service = get_spc_service()
-
-    # Always fetch categorical
-    categorical = await spc_service.fetch_outlook("day1_categorical", force_refresh=refresh)
-
-    result = {
-        "categorical": categorical.to_dict() if categorical else None,
-        "risk_colors": RISK_COLORS,
-        "risk_names": RISK_NAMES,
-    }
-
-    if include_probabilities:
-        tornado = await spc_service.fetch_outlook("day1_tornado", force_refresh=refresh)
-        wind = await spc_service.fetch_outlook("day1_wind", force_refresh=refresh)
-        hail = await spc_service.fetch_outlook("day1_hail", force_refresh=refresh)
-        # CIG (Conditional Intensity Group) overlays
-        cig_torn = await spc_service.fetch_outlook("day1_cigtorn", force_refresh=refresh)
-        cig_wind = await spc_service.fetch_outlook("day1_cigwind", force_refresh=refresh)
-        cig_hail = await spc_service.fetch_outlook("day1_cighail", force_refresh=refresh)
-
-        result["tornado"] = tornado.to_dict() if tornado else None
-        result["wind"] = wind.to_dict() if wind else None
-        result["hail"] = hail.to_dict() if hail else None
-        result["cig_tornado"] = cig_torn.to_dict() if cig_torn and cig_torn.polygons else None
-        result["cig_wind"] = cig_wind.to_dict() if cig_wind and cig_wind.polygons else None
-        result["cig_hail"] = cig_hail.to_dict() if cig_hail and cig_hail.polygons else None
-
-    return result
 
 
-@app.get("/api/spc/mesoscale-discussions")
-async def get_mesoscale_discussions(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get current SPC Mesoscale Discussions.
-
-    Mesoscale discussions are filtered to states matching filter_states setting.
-    """
-    settings = get_settings()
-    spc_service = get_spc_service()
-
-    mds = await spc_service.fetch_mesoscale_discussions(force_refresh=refresh)
-
-    # Filter by configured states
-    filtered_mds = spc_service.filter_mds_by_states(mds, settings.filter_states)
-
-    return {
-        "count": len(filtered_mds),
-        "total_count": len(mds),
-        "filter_states": settings.filter_states,
-        "discussions": [md.to_dict() for md in filtered_mds],
-    }
 
 
-@app.get("/api/spc/state-images")
-async def get_spc_state_images(
-    day: int = Query(1, ge=1, le=3, description="Outlook day (1-3)"),
-):
-    """
-    Get state-specific SPC outlook image URLs.
-
-    Returns image URLs for each state in filter_states setting.
-    """
-    settings = get_settings()
-    spc_service = get_spc_service()
-
-    state_images = spc_service.get_state_outlook_urls(settings.filter_states, day=day)
-
-    return {
-        "day": day,
-        "states": settings.filter_states,
-        "images": state_images,
-    }
 
 
-@app.get("/api/spc/risk-at-point")
-async def get_risk_at_point(
-    lat: float = Query(..., description="Latitude"),
-    lon: float = Query(..., description="Longitude"),
-    outlook_key: str = Query("day1_categorical", description="Which outlook to check"),
-):
-    """
-    Get the highest risk level at a specific point.
-
-    Useful for checking what risk level affects a specific location.
-    """
-    spc_service = get_spc_service()
-
-    # Ensure we have the outlook data
-    await spc_service.fetch_outlook(outlook_key)
-
-    risk = spc_service.get_highest_risk_for_point(lat, lon, outlook_key)
-
-    if not risk:
-        return {
-            "lat": lat,
-            "lon": lon,
-            "outlook_key": outlook_key,
-            "risk": None,
-            "message": "No risk at this location",
-        }
-
-    return {
-        "lat": lat,
-        "lon": lon,
-        "outlook_key": outlook_key,
-        "risk": risk.to_dict(),
-    }
 
 
-@app.get("/api/spc/discussion")
-async def get_spc_discussion(
-    day: int = Query(1, ge=1, le=3, description="Outlook day (1-3)"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get SPC outlook discussion text.
-
-    Returns the official SPC discussion text for the specified day.
-    """
-    spc_service = get_spc_service()
-    text = await spc_service.fetch_discussion(day=day, force_refresh=refresh)
-
-    if not text:
-        raise HTTPException(status_code=404, detail=f"Day {day} discussion not available")
-
-    return {
-        "day": day,
-        "text": text,
-        "url": f"https://www.spc.noaa.gov/products/outlook/day{day}otlk.html",
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-    }
 
 
-@app.get("/api/spc/stats")
-async def get_spc_stats():
-    """Get SPC service statistics."""
-    spc_service = get_spc_service()
-    return spc_service.get_statistics()
 
 
 # =============================================================================
@@ -2580,340 +1961,37 @@ async def get_asos_observations(
 # ==================== NEXRAD Radar Endpoints ====================
 
 
-class RadarSiteRequest(BaseModel):
-    """Request body for setting active radar site."""
-    site_id: str
 
 
-@app.get("/api/radar/status")
-async def get_radar_status():
-    """Get current NEXRAD radar service status."""
-    settings = get_settings()
-    if not settings.nexrad_enabled:
-        return {"enabled": False, "active_site": None, "active_sites": [], "last_update": None, "processing": False}
-    svc = get_nexrad_service()
-    if not svc:
-        return {"enabled": False, "active_site": None, "active_sites": [], "last_update": None, "processing": False}
-    return svc.status.to_dict()
 
 
-@app.get("/api/radar/chunks/diagnostic")
-async def get_radar_chunks_diagnostic():
-    """Per-site chunks-bucket pipeline diagnostics.
-
-    Empty diagnostics block if the chunks path is disabled — no error.
-    """
-    settings = get_settings()
-    if not settings.nexrad_chunks_enabled:
-        return {
-            "enabled": False,
-            "reason": "nexrad_chunks_enabled = false",
-            "diagnostics": {},
-        }
-    try:
-        from .services.nexrad_chunks_service import get_nexrad_chunks_service
-        svc = get_nexrad_chunks_service()
-    except Exception as e:
-        return {"enabled": False, "reason": f"load error: {e}", "diagnostics": {}}
-    if svc is None:
-        return {"enabled": False, "reason": "service not started", "diagnostics": {}}
-    return {
-        "enabled":        True,
-        "poll_interval_s": svc._poll_interval,
-        "min_partial":    svc._min_partial,
-        "render_on_complete": svc._render_on_complete,
-        "now_utc":        datetime.now(timezone.utc).isoformat(),
-        "diagnostics":    svc.diagnostics,
-    }
 
 
-@app.get("/api/radar/diagnostic")
-async def get_radar_diagnostic():
-    """Per-site pipeline diagnostics for latency debugging.
-
-    Returns, per active site, the latest scan we're showing, the latest scan
-    available on S3, and a breakdown of stage timings (list/download/parse/
-    dealias/render/grid).  When complaints come in like "the scan is 12 min
-    old" this endpoint tells you whether the upstream is slow, the network
-    is slow, or our pipeline is slow.
-    """
-    settings = get_settings()
-    if not settings.nexrad_enabled:
-        return {"enabled": False, "active_sites": [], "diagnostics": {}}
-    svc = get_nexrad_service()
-    if not svc:
-        return {"enabled": False, "active_sites": [], "diagnostics": {}}
-
-    from datetime import datetime as _dt, timezone as _tz
-    now = _dt.now(_tz.utc)
-
-    # VCP-duration estimates from NEXRAD VCP catalog.  Used to compute the
-    # archive-bucket "irreducible floor": you cannot show a scan before the
-    # last tilt has been collected.  Tilt count is a coarse proxy because
-    # SAILS/MRLE inject extra low-level passes, but it's good enough to tell
-    # the user whether their lag is pipeline-induced or VCP-induced.
-    def _vcp_duration_seconds(tilt_count):
-        if not tilt_count or tilt_count <= 0:
-            return None
-        if tilt_count <= 5:   return 600   # VCP 31/32 clear-air (10 min)
-        if tilt_count <= 7:   return 420   # VCP 35 clear-air (7 min)
-        if tilt_count <= 9:   return 360   # VCP 21/121 (6 min)
-        if tilt_count <= 14:  return 270   # VCP 12/211/212 base (4.5 min)
-        if tilt_count <= 15:  return 360   # VCP 215 (6 min)
-        if tilt_count <= 17:  return 300   # 212/215 + SAILSx3 (~5 min)
-        return 360                          # severe + SAILS + MRLE, ~6 min
-
-    diag_out = {}
-    for site, d in svc.diagnostics.items():
-        entry = dict(d)
-        # Recompute "live" ages so they reflect now, not when diag was written
-        showing = entry.get("showing_scan_ts")
-        if showing:
-            try:
-                entry["showing_age_s_live"] = round(
-                    (now - _dt.fromisoformat(showing)).total_seconds(), 1
-                )
-            except (ValueError, TypeError):
-                pass
-        s3_ts = entry.get("latest_available_ts")
-        if s3_ts:
-            try:
-                entry["latest_available_age_s_live"] = round(
-                    (now - _dt.fromisoformat(s3_ts)).total_seconds(), 1
-                )
-            except (ValueError, TypeError):
-                pass
-
-        # Latency budget breakdown — surfaces whether the user's pipeline
-        # overhead is meaningful relative to the unavoidable VCP duration.
-        tilts = entry.get("last_tilt_count")
-        vcp_s = _vcp_duration_seconds(tilts)
-        if vcp_s is not None:
-            entry["vcp_estimated_duration_s"] = vcp_s
-            # Archive floor ≈ VCP duration + S3 propagation (30s) + poll discovery
-            poll_int = getattr(svc, "_poll_interval", 10) or 10
-            entry["archive_bucket_floor_s"] = vcp_s + 30 + poll_int
-            # How much we add on top of the floor
-            stage_sum = sum(
-                float(entry.get(k, 0) or 0)
-                for k in (
-                    "last_list_duration_s",
-                    "last_download_duration_s",
-                    "last_parse_duration_s",
-                    "last_dealias_duration_s",
-                    "last_render_duration_s",
-                )
-            )
-            entry["pipeline_overhead_s"] = round(stage_sum, 2)
-            # Headline number: if showing_age_s_live ≈ archive_bucket_floor_s,
-            # the lag is the radar, not us.  If it's much higher, we've got
-            # work to do.
-            if "showing_age_s_live" in entry:
-                entry["excess_over_archive_floor_s"] = round(
-                    entry["showing_age_s_live"] - entry["archive_bucket_floor_s"], 1
-                )
-
-        diag_out[site] = entry
-    return {
-        "enabled":        True,
-        "active_sites":   svc.active_sites,
-        "poll_interval_s": getattr(svc, "_poll_interval", None),
-        "now_utc":        now.isoformat(),
-        "diagnostics":    diag_out,
-    }
 
 
-@app.get("/api/radar/sites")
-async def get_radar_sites(lat: Optional[float] = None, lon: Optional[float] = None):
-    """Get list of NEXRAD radar sites, optionally sorted by distance from a point."""
-    if lat is not None and lon is not None:
-        return get_nearest_sites(lat, lon, count=20)
-    # Return all sites
-    sites = []
-    for site_id, info in NEXRAD_SITES.items():
-        sites.append({
-            "id": site_id,
-            "name": info["name"],
-            "lat": info["lat"],
-            "lon": info["lon"],
-            "state": info["state"],
-        })
-    sites.sort(key=lambda s: (s["state"], s["name"]))
-    return sites
 
 
-@app.get("/api/radar/frame/{product}")
-async def get_radar_frame(product: str):
-    """Get the latest radar frame(s) for a product — one per active site."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    from .services.nexrad_service import RADAR_PRODUCTS as _RP
-    if product not in _RP:
-        raise HTTPException(status_code=400, detail=f"Unknown product: {product}")
-
-    if not settings.nexrad_serve_frames:
-        raise HTTPException(
-            status_code=409,
-            detail=("Radar display frames are disabled on this server "
-                    "(nexrad_serve_frames=false). Ingestion and storm-cell "
-                    "tracking are unaffected; the radar app decodes Level 2 "
-                    "client-side and does not use this endpoint."))
-
-    frames = svc.get_latest_frames_for_product(product)
-    return [f.to_dict() for f in frames]
 
 
-@app.get("/api/radar/frames/{product}")
-async def get_radar_frame_history(product: str, count: int = 10, site: str | None = None):
-    """Get frame history for animation. Optional ?site= for a specific active site."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    from .services.nexrad_service import RADAR_PRODUCTS as _RP
-    if product not in _RP:
-        raise HTTPException(status_code=400, detail=f"Unknown product: {product}")
-    if not settings.nexrad_serve_frames:
-        raise HTTPException(
-            status_code=409,
-            detail=("Radar display frames are disabled on this server "
-                    "(nexrad_serve_frames=false). Ingestion and storm-cell "
-                    "tracking are unaffected; the radar app decodes Level 2 "
-                    "client-side and does not use this endpoint."))
 
 
-    frames = svc.get_frame_history(product, count, site=site)
-    return [f.to_dict() for f in frames]
 
 
-@app.post("/api/radar/site")
-async def set_radar_site(request: RadarSiteRequest):
-    """Replace all active sites with one site (backward compat)."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    try:
-        await svc.set_active_site(request.site_id)
-        return {"status": "ok", "active_sites": svc.active_sites}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/radar/sites/add")
-async def add_radar_site(request: RadarSiteRequest):
-    """Add a site to the active radar set (max 3)."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    try:
-        await svc.add_site(request.site_id)
-        return {"status": "ok", "active_sites": svc.active_sites}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/radar/sites/remove")
-async def remove_radar_site(request: RadarSiteRequest):
-    """Remove a site from the active radar set."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    try:
-        await svc.remove_site(request.site_id)
-        return {"status": "ok", "active_sites": svc.active_sites}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/radar/systems")
-async def get_mcs_systems():
-    """Get all currently detected MCS/QLCS systems."""
-    svc = get_storm_tracking_service()
-    if not svc:
-        return []
-    return [s.to_dict() for s in svc.tracked_systems]
 
 
-@app.get("/api/radar/cells")
-async def get_storm_cells():
-    """Get all currently tracked storm cells."""
-    svc = get_storm_tracking_service()
-    if not svc:
-        return []
-    return [c.to_dict() for c in svc.tracked_cells]
-
-
-@app.get("/api/radar/cell/{cell_id}")
-async def get_storm_cell(cell_id: str):
-    """Get detailed info for a specific storm cell."""
-    svc = get_storm_tracking_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Storm tracking service not enabled")
-
-    cell = svc.get_cell(cell_id)
-    if not cell:
-        raise HTTPException(status_code=404, detail=f"Cell not found: {cell_id}")
-    return cell.to_dict()
 
 
 # Serve radar images as static files (legacy oneshot_frame / social graphics)
-@app.get("/api/radar/images/{site}/{filename}")
-async def serve_radar_image(site: str, filename: str):
-    """Serve rendered radar images (WebP or PNG) — used by social graphic pipeline."""
-    settings = get_settings()
-    image_path = Path(settings.data_dir) / "radar" / site / filename
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Image not found")
-    media_type = "image/webp" if filename.endswith(".webp") else "image/png"
-    return FileResponse(
-        str(image_path),
-        media_type=media_type,
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
 
 
-@app.get("/api/radar/cached/{site}")
-async def get_cached_radar_frame(site: str):
-    """Return the latest cached reflectivity binary for any NEXRAD site.
-
-    Returns 404 if the site has never been loaded this session.  The frontend
-    uses this to show a stale-but-instant frame when switching sites while
-    the fresh download runs in the background.
-    """
-    from fastapi.responses import Response as FastResponse
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not running")
-    binary = svc.get_cached_frame(site)
-    if not binary:
-        raise HTTPException(status_code=404, detail="No cached frame for this site")
-    return FastResponse(
-        content=binary,
-        media_type="application/octet-stream",
-        headers={"Cache-Control": "no-store"},
-    )
 
 
-@app.get("/api/radar/binary/{site}/{product}/{frame_id}")
-async def get_radar_binary_frame(site: str, product: str, frame_id: str):
-    """Return a cached binary radar frame by ID (RDRF wire format) for history scrubber."""
-    from fastapi.responses import Response as FastResponse
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not running")
-    frame = svc.get_frame_by_id(site, product, frame_id)
-    if not frame or not frame.binary_data:
-        raise HTTPException(status_code=404, detail="Frame not found")
-    return FastResponse(
-        content=frame.binary_data,
-        media_type="application/octet-stream",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
 
 
 @app.get("/api/mrms/status")
@@ -3041,44 +2119,10 @@ async def get_mrms_png():
 
 
 
-@app.get("/api/obs/surface")
-async def get_surface_obs(lat: float | None = None, lon: float | None = None, radius_km: float = 400.0):
-    """Surface station obs (METAR) for the radar app's Observations layer. With
-    lat/lon → a dense box around the active radar site (aviationweather.gov caps a
-    query at ~400 stations, so a site-centered box returns far more local stations
-    than the national snapshot); without → the national set. Each ob includes
-    decoded extras (visibility, clouds/ceiling, flight category, raw METAR)."""
-    try:
-        from .services.surface_obs_service import get_surface_obs_service
-    except ImportError:
-        from backend.services.surface_obs_service import get_surface_obs_service
-    svc = get_surface_obs_service()
-    obs = await asyncio.to_thread(svc.get_obs, lat, lon, radius_km)
-    return {"obs": obs}
 
 
-@app.get("/api/obs/analysis")
-async def get_surface_analysis():
-    """Objective surface analysis from the obs: High/Low pressure centers + fronts
-    (thermal-gradient zones classified warm/cold/stationary by advection)."""
-    try:
-        from .services.surface_obs_service import get_surface_obs_service
-    except ImportError:
-        from backend.services.surface_obs_service import get_surface_obs_service
-    svc = get_surface_obs_service()
-    return await asyncio.to_thread(svc.get_analysis)
 
 
-@app.get("/api/obs/wpc")
-async def get_wpc_surface():
-    """Official WPC surface analysis — hand-analyzed fronts + High/Low centers
-    (parsed from the Coded Surface Bulletin)."""
-    try:
-        from .services.wpc_fronts_service import get_wpc_fronts_service
-    except ImportError:
-        from backend.services.wpc_fronts_service import get_wpc_fronts_service
-    svc = get_wpc_fronts_service()
-    return await asyncio.to_thread(svc.get)
 
 
 @app.get("/api/wpc/ero")
@@ -3104,36 +2148,6 @@ async def get_wpc_ero(day: int = Query(1, ge=1, le=5, description="ERO forecast 
     return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
 
 
-@app.get("/api/spc/geojson")
-async def get_spc_geojson(url: str = Query(..., description="An spc.noaa.gov outlook GeoJSON URL")):
-    """Proxy an SPC outlook GeoJSON for the radar app. The browser is CORS-blocked on
-    spc.noaa.gov for these files from the app's origin (the hub's SPC layer rendered
-    blank and the recipe engine captured bare maps labelled as 'the outlook'), so the
-    app falls back to fetching them through here, exactly as it already does for
-    WPC's ERO. Strictly allow-listed: only SPC's outlook trees, only .geojson."""
-    from urllib.parse import urlsplit
-    u = urlsplit(url)
-    ok_host = u.scheme == "https" and u.netloc == "www.spc.noaa.gov"
-    ok_path = u.path.startswith(("/products/outlook/", "/products/exper/day4-8/",
-                                 "/products/fire_wx/")) and u.path.endswith(".geojson")
-    if not (ok_host and ok_path) or ".." in u.path:
-        raise HTTPException(status_code=400, detail="Not an SPC outlook GeoJSON URL")
-    clean = f"https://www.spc.noaa.gov{u.path}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                clean,
-                timeout=aiohttp.ClientTimeout(total=20),
-                headers={"User-Agent": "TheBattinFront Radar (dashboard SPC proxy)"},
-            ) as resp:
-                if resp.status != 200:
-                    raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
-                data = await resp.json(content_type=None)
-    except aiohttp.ClientError as e:
-        logger.error(f"SPC GeoJSON proxy fetch failed for {clean}: {e}")
-        raise HTTPException(status_code=502, detail="Fetch failed")
-    from fastapi.responses import JSONResponse
-    return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/aviation/{kind}")
@@ -3310,25 +2324,10 @@ async def get_glm_status():
     }
 
 
-@app.get("/api/radar/gate")
-async def get_radar_gate():
-    """Get current reflectivity gate threshold (dBZ)."""
-    service = get_nexrad_service()
-    # service can be None before NEXRAD finishes starting (or if disabled);
-    # fall back to the default threshold instead of raising a 500.
-    return {"gate_dbz": getattr(service, "_gate_dbz", 10.0)}
 
 
-class RadarGateRequest(BaseModel):
-    gate_dbz: float = Field(..., ge=-20, le=40, description="Reflectivity gate threshold in dBZ")
 
 
-@app.post("/api/radar/gate")
-async def set_radar_gate(request: RadarGateRequest):
-    """Set reflectivity gate threshold and re-render current scan."""
-    service = get_nexrad_service()
-    await service.set_gate_dbz(request.gate_dbz)
-    return {"gate_dbz": service._gate_dbz}
 
 
 # ==================== Social Media Endpoints ====================
@@ -4124,102 +3123,14 @@ async def get_chasers():
 # Alert Graphics
 # =============================================================================
 
-_GRAPHICS_DIR = Path(__file__).parent.parent / "data" / "alert_graphics"
 
 
-@app.post("/api/alert-graphics/save")
-async def save_alert_graphic(request: Request):
-    """Save a generated alert graphic PNG (base64) to disk."""
-    import base64 as _base64
-    data = await request.json()
-    product_id = data.get("product_id", "").strip()
-    event_name = data.get("event_name", "")
-    image_data: str = data.get("image_data", "")
-
-    if not product_id or not image_data:
-        raise HTTPException(status_code=400, detail="Missing product_id or image_data")
-
-    # Strip data URL prefix if present
-    if "," in image_data:
-        image_data = image_data.split(",", 1)[1]
-
-    try:
-        img_bytes = _base64.b64decode(image_data)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid base64 image data")
-
-    _GRAPHICS_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Safe filename: replace anything that isn't alphanumeric, dash, or dot
-    import re as _re
-    safe_id = _re.sub(r"[^\w\-.]", "_", product_id)
-    img_path = _GRAPHICS_DIR / f"{safe_id}.png"
-    img_path.write_bytes(img_bytes)
-
-    # Save metadata sidecar so we can show event_name in the gallery
-    meta_path = _GRAPHICS_DIR / f"{safe_id}.json"
-    import json as _json
-    meta_path.write_text(_json.dumps({"product_id": product_id, "event_name": event_name}))
-
-    return {"status": "saved", "product_id": product_id}
 
 
-@app.get("/api/alert-graphics")
-async def list_alert_graphics():
-    """List all saved alert graphics, newest first."""
-    import json as _json
-    if not _GRAPHICS_DIR.exists():
-        return {"graphics": []}
-
-    graphics = []
-    for img_path in sorted(
-        _GRAPHICS_DIR.glob("*.png"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    ):
-        product_id = img_path.stem
-        event_name = product_id
-        meta_path = img_path.with_suffix(".json")
-        if meta_path.exists():
-            try:
-                meta = _json.loads(meta_path.read_text())
-                product_id = meta.get("product_id", product_id)
-                event_name = meta.get("event_name", event_name)
-            except Exception:
-                pass
-        graphics.append({
-            "product_id": product_id,
-            "event_name": event_name,
-            "url": f"/api/alert-graphics/image/{img_path.name}",
-            "created_at": datetime.fromtimestamp(img_path.stat().st_mtime, timezone.utc).isoformat(),
-        })
-    return {"graphics": graphics}
 
 
-@app.get("/api/alert-graphics/image/{filename}")
-async def get_alert_graphic_image(filename: str):
-    """Serve a saved alert graphic PNG."""
-    import re as _re
-    if not _re.match(r"^[\w\-.]+\.png$", filename):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    img_path = _GRAPHICS_DIR / filename
-    if not img_path.exists():
-        raise HTTPException(status_code=404, detail="Graphic not found")
-    return FileResponse(str(img_path), media_type="image/png")
 
 
-@app.delete("/api/alert-graphics/{product_id}")
-async def delete_alert_graphic(product_id: str):
-    """Delete a saved alert graphic."""
-    import re as _re
-    safe_id = _re.sub(r"[^\w\-.]", "_", product_id)
-    img_path = _GRAPHICS_DIR / f"{safe_id}.png"
-    meta_path = _GRAPHICS_DIR / f"{safe_id}.json"
-    if img_path.exists():
-        img_path.unlink()
-    if meta_path.exists():
-        meta_path.unlink()
-    return {"status": "deleted"}
 
 
 # =============================================================================
@@ -4613,14 +3524,6 @@ async def save_alert_broadcast_graphic(product_id: str):
 # SPA Catch-All Route (must be after all API routes)
 # =============================================================================
 
-@app.get("/obs")
-@app.get("/obs/{path:path}")
-async def serve_obs_overlay(path: str = ""):
-    """Serve the frontend for OBS overlay route."""
-    index_file = FRONTEND_DIR / "index.html"
-    if index_file.exists():
-        return FileResponse(index_file)
-    raise HTTPException(status_code=404, detail="Frontend not built")
 
 
 @app.get("/chase")
