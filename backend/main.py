@@ -1061,6 +1061,12 @@ app = FastAPI(
 # allow_credentials=False is required when using a wildcard/regex origin
 # (the CORS spec forbids credentials=True with non-specific origins).
 # Route groups extracted from this file. See backend/routers/.
+from .routers.goes import router as _goes_router
+app.include_router(_goes_router)
+from .routers.odot import router as _odot_router
+app.include_router(_odot_router)
+from .routers.agent import router as _agent_router
+app.include_router(_agent_router)
 from .routers.model import router as _model_router
 app.include_router(_model_router)
 
@@ -2282,116 +2288,6 @@ async def get_all_cameras(
 # ODOT (Ohio DOT) Endpoints
 # =============================================================================
 
-@app.get("/api/odot/cameras")
-async def get_odot_cameras(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get all ODOT traffic cameras.
-
-    Returns camera locations with live image URLs.
-    """
-    odot_service = get_odot_service()
-    cameras = await odot_service.fetch_cameras(force_refresh=refresh)
-
-    return {
-        "count": len(cameras),
-        "cameras": [c.to_dict() for c in cameras],
-    }
-
-
-@app.get("/api/odot/sensors")
-async def get_odot_sensors(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get all ODOT road weather sensors.
-
-    Returns sensor data including pavement and air temperatures.
-    """
-    odot_service = get_odot_service()
-    sensors = await odot_service.fetch_sensors(force_refresh=refresh)
-
-    return {
-        "count": len(sensors),
-        "sensors": [s.to_dict() for s in sensors],
-    }
-
-
-@app.get("/api/odot/cold-sensors")
-async def get_cold_sensors(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get sensors with cold pavement (below threshold).
-
-    Returns sensors sorted by temperature (coldest first).
-    """
-    settings = get_settings()
-    odot_service = get_odot_service()
-
-    # Ensure we have fresh data
-    await odot_service.fetch_sensors(force_refresh=refresh)
-
-    cold_sensors = odot_service.get_cold_sensors()
-    freezing_sensors = odot_service.get_freezing_sensors()
-
-    # Sort by pavement temperature (coldest first)
-    cold_sensors.sort(key=lambda s: s.pavement_temp if s.pavement_temp is not None else 100)
-
-    return {
-        "count": len(cold_sensors),
-        "freezing_count": len(freezing_sensors),
-        "cold_threshold": settings.cold_pavement_threshold,
-        "freezing_threshold": settings.freezing_pavement_threshold,
-        "sensors": [s.to_dict() for s in cold_sensors],
-    }
-
-
-@app.get("/api/odot/cameras-in-alerts")
-async def get_cameras_in_alerts(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get cameras that are inside active weather alert polygons.
-
-    Only checks alerts matching the configured camera_alert_phenomena.
-    """
-    settings = get_settings()
-    odot_service = get_odot_service()
-    alert_manager = get_alert_manager()
-
-    # Ensure we have fresh camera data
-    await odot_service.fetch_cameras(force_refresh=refresh)
-
-    # Get all active alerts with polygons
-    alerts = alert_manager.get_alerts_sorted()
-    alert_dicts = [a.to_dict() for a in alerts]
-
-    # Find cameras in alerts
-    cameras_in_alerts = odot_service.find_cameras_in_alerts(
-        alert_dicts,
-        phenomena_filter=settings.camera_alert_phenomena
-    )
-
-    return {
-        "count": len(cameras_in_alerts),
-        "phenomena_filter": settings.camera_alert_phenomena,
-        "cameras": [c.to_dict() for c in cameras_in_alerts],
-    }
-
-
-@app.get("/api/odot/stats")
-async def get_odot_stats():
-    """Get ODOT service statistics."""
-    odot_service = get_odot_service()
-    return odot_service.get_statistics()
-
-
-# =============================================================================
-# SPC (Storm Prediction Center) Endpoints
-# =============================================================================
-
 @app.get("/api/spc/outlooks")
 async def get_spc_outlooks(
     refresh: bool = Query(False, description="Force refresh from API"),
@@ -3141,110 +3037,6 @@ async def get_quick_insight(
 # =============================================================================
 
 
-@app.get("/api/agent/status")
-async def agent_status():
-    """Get AI agent status and availability."""
-    settings = get_settings()
-
-    if not settings.agent_enabled:
-        return {
-            "enabled": False,
-            "available": False,
-            "model": settings.agent_model,
-        }
-
-    agent = get_agent_service()
-    is_available = await agent.check_health()
-
-    return {
-        "enabled": True,
-        "available": is_available,
-        **agent.get_status(),
-    }
-
-
-@app.post("/api/agent/chat")
-async def agent_chat(request: Request):
-    """
-    Send a message to the AI agent with tool-calling capabilities.
-
-    The agent can use weather tools to query real-time data before responding.
-    Returns the response along with a log of all tool calls made.
-    """
-    settings = get_settings()
-
-    if not settings.agent_enabled:
-        raise HTTPException(status_code=503, detail="AI agent is disabled")
-
-    agent = get_agent_service()
-    is_available = await agent.check_health()
-    if not is_available:
-        raise HTTPException(
-            status_code=503,
-            detail="AI agent not available. Make sure Ollama is running with the agent model."
-        )
-
-    body = await request.json()
-    message = body.get("message", "").strip()
-    include_history = body.get("include_history", True)
-
-    if not message:
-        raise HTTPException(status_code=400, detail="Message is required")
-
-    try:
-        response = await agent.run(message, include_history=include_history)
-        return {
-            "success": True,
-            "response": response.content,
-            "tool_calls": [
-                {
-                    "tool": tc.tool,
-                    "arguments": tc.arguments,
-                    "result": tc.result,
-                    "status": tc.status,
-                    "duration_ms": tc.duration_ms,
-                }
-                for tc in response.tool_calls
-            ],
-            "rounds": response.rounds,
-            "model": response.model,
-            "duration_ms": response.total_duration_ms,
-        }
-    except Exception as e:
-        logger.exception(f"Agent chat error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/agent/tools")
-async def list_agent_tools():
-    """List all tools available to the AI agent."""
-    agent = get_agent_service()
-    return {"tools": agent.tools.list_tools()}
-
-
-@app.get("/api/agent/history")
-async def get_agent_history():
-    """Get agent conversation history."""
-    agent = get_agent_service()
-    return {"history": agent.get_history()}
-
-
-@app.delete("/api/agent/history")
-async def clear_agent_history():
-    """Clear agent conversation history."""
-    agent = get_agent_service()
-    agent.clear_history()
-    return {"success": True, "message": "Agent history cleared"}
-
-
-# =============================================================================
-# Widget Configuration Endpoints
-# =============================================================================
-
-# =============================================================================
-# Debug Endpoints (Zone Geometry)
-# =============================================================================
-
 @app.get("/api/debug/alerts-summary")
 async def debug_alerts_summary():
     """
@@ -3907,53 +3699,6 @@ async def get_mrms_binary(product: str | None = None):
         content=binary,
         media_type="application/octet-stream",
         headers={"Cache-Control": "no-store"},
-    )
-
-
-@app.get("/api/goes/meso")
-async def goes_meso(sat: str = "east", sector: str = "1", band: str = "ir"):
-    """Meta for the latest GOES mesoscale sector frame: time + lat/lon bbox [w,s,e,n]."""
-    from .services.goes_meso_service import get_goes_meso_service
-    ent = await get_goes_meso_service().get(sat, sector, band)
-    if not ent:
-        raise HTTPException(status_code=503, detail="GOES meso not available")
-    return {"time": ent["time"], "bbox": ent["bbox"]}
-
-
-@app.get("/api/goes/meso/frames")
-async def goes_meso_frames(sat: str = "east", sector: str = "1", band: str = "ir",
-                           n: int = 8, span: int = 0):
-    """`n` GOES mesoscale frames [{time, bbox}], oldest→newest — for looping.
-    The sector floats, so each frame carries its own bbox.
-
-    `span` (minutes) spreads those n frames across that window instead of
-    returning the newest n consecutive ones. The meso sector is a 1-minute
-    product, so without it a 3-hour loop request came back as the newest ~24
-    MINUTES. Omitted/0 keeps the original behaviour."""
-    from .services.goes_meso_service import get_goes_meso_service
-    frames = await get_goes_meso_service().get_frames(sat, sector, band, n, span)
-    if not frames:
-        raise HTTPException(status_code=503, detail="GOES meso not available")
-    return {"frames": frames}
-
-
-@app.get("/api/goes/meso/image")
-async def goes_meso_image(sat: str = "east", sector: str = "1", band: str = "ir", t: str = ""):
-    """Reprojected GOES mesoscale PNG for a MapLibre image source. `t` selects the
-    frame time (from /frames); empty serves the latest."""
-    from fastapi.responses import Response as FastResponse
-    from .services.goes_meso_service import get_goes_meso_service
-    svc = get_goes_meso_service()
-    png = await svc.get_image(sat, sector, band, t) if t else None
-    if png is None:
-        ent = await svc.get(sat, sector, band)
-        png = ent["png"] if ent else None
-    if png is None:
-        raise HTTPException(status_code=503, detail="GOES meso not available")
-    return FastResponse(
-        content=png,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=120"},
     )
 
 
