@@ -1061,6 +1061,24 @@ app = FastAPI(
 # allow_credentials=False is required when using a wildcard/regex origin
 # (the CORS spec forbids credentials=True with non-specific origins).
 # Route groups extracted from this file. See backend/routers/.
+from .routers.hrrr import router as _hrrr_router
+app.include_router(_hrrr_router)
+from .routers.meso import router as _meso_router
+app.include_router(_meso_router)
+from .routers.nwws import router as _nwws_router
+app.include_router(_nwws_router)
+from .routers.debug import router as _debug_router
+app.include_router(_debug_router)
+from .routers.chase_logs import router as _chase_logs_router
+app.include_router(_chase_logs_router)
+from .routers.afd import router as _afd_router
+app.include_router(_afd_router)
+from .routers.wind_gusts import router as _wind_gusts_router
+app.include_router(_wind_gusts_router)
+from .routers.assistant import router as _assistant_router
+app.include_router(_assistant_router)
+from .routers.social import router as _social_router
+app.include_router(_social_router)
 from .routers.goes import router as _goes_router
 app.include_router(_goes_router)
 from .routers.odot import router as _odot_router
@@ -1627,49 +1645,10 @@ async def get_system_status():
 # never ship a .env). With credentials the dashboard gets instant alerts; without
 # them it falls back to NWS-API polling. Credentials persist per-user (app-data),
 # so the app only needs to ask once.
-class NWWSCredentialsUpdate(BaseModel):
-    username: str = Field(default="", description="NWWS-OI username (blank to clear)")
-    password: str = Field(default="", description="NWWS-OI password (blank to clear)")
 
 
-@app.get("/api/nwws/status")
-async def get_nwws_status():
-    """Whether NWWS is configured and connected (for the app's setup prompt)."""
-    settings = get_settings()
-    handler = get_nwws_handler()
-    return {
-        "configured": bool(settings.nwws_username and settings.nwws_password),
-        "connected": handler.is_connected if handler else False,
-        "username": settings.nwws_username or None,
-    }
 
 
-@app.post("/api/nwws/credentials")
-async def set_nwws_credentials(update: NWWSCredentialsUpdate):
-    """Save (or clear) the user's NWWS-OI credentials and reconnect.
-
-    Blank username/password clears the stored credentials → NWS-API fallback.
-    """
-    from .config.settings import save_nwws_credentials, reload_settings
-    from .services import restart_nwws_handler
-
-    username = (update.username or "").strip()
-    password = (update.password or "").strip()
-    save_nwws_credentials(username, password)
-    reload_settings()
-    try:
-        await restart_nwws_handler()
-    except Exception as e:
-        logger.error(f"Failed to (re)start NWWS after credential change: {e}")
-
-    settings = get_settings()
-    configured = bool(settings.nwws_username and settings.nwws_password)
-    logger.info(f"NWWS credentials {'set' if configured else 'cleared'} via API")
-    return {
-        "success": True,
-        "configured": configured,
-        "username": settings.nwws_username or None,
-    }
 
 
 def _resolve_brand_id(brand: Optional[str]) -> str:
@@ -2499,104 +2478,10 @@ async def get_spc_stats():
 # Wind Gusts Endpoints
 # =============================================================================
 
-@app.get("/api/wind-gusts")
-async def get_wind_gusts(
-    hours: int = Query(1, ge=1, le=24, description="Lookback period in hours"),
-    limit: int = Query(15, ge=1, le=100, description="Maximum number of results"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get top wind gust observations from ASOS stations.
-
-    Returns wind gusts from Iowa State Mesonet for configured filter_states.
-    """
-    settings = get_settings()
-    wind_service = get_wind_gusts_service()
-
-    # Use filter_states or defaults if empty
-    states_to_use = settings.filter_states if settings.filter_states else DEFAULT_GUST_STATES
-
-    gusts = await wind_service.fetch_gusts(
-        states=states_to_use,
-        hours=hours,
-        limit=limit,
-        force_refresh=refresh,
-    )
-
-    # Group by state for frontend display
-    gusts_by_state = wind_service.get_gusts_by_state(gusts)
-
-    return {
-        "count": len(gusts),
-        "filter_states": states_to_use,
-        "thresholds": {
-            "significant": GUST_THRESHOLD_SIGNIFICANT,
-            "severe": GUST_THRESHOLD_SEVERE,
-            "advisory": GUST_THRESHOLD_ADVISORY,
-        },
-        "gusts": [g.to_dict() for g in gusts],
-        "by_state": {
-            state: [g.to_dict() for g in state_gusts]
-            for state, state_gusts in gusts_by_state.items()
-        },
-    }
 
 
-@app.get("/api/wind-gusts/by-state")
-async def get_wind_gusts_by_state(
-    hours: int = Query(1, ge=1, le=24, description="Lookback period in hours"),
-    limit_per_state: int = Query(5, ge=1, le=50, description="Maximum results per state"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get wind gusts organized by state.
-
-    Returns gusts grouped by state with a per-state limit.
-    """
-    settings = get_settings()
-    wind_service = get_wind_gusts_service()
-
-    # Use filter_states or defaults if empty
-    states_to_use = settings.filter_states if settings.filter_states else DEFAULT_GUST_STATES
-
-    # Fetch all gusts (higher limit to allow per-state filtering)
-    gusts = await wind_service.fetch_gusts(
-        states=states_to_use,
-        hours=hours,
-        limit=100,
-        force_refresh=refresh,
-    )
-
-    # Group by state and limit each
-    gusts_by_state = wind_service.get_gusts_by_state(gusts)
-    result = {}
-    total = 0
-
-    for state in states_to_use:
-        if state in gusts_by_state:
-            state_gusts = gusts_by_state[state][:limit_per_state]
-            result[state] = [g.to_dict() for g in state_gusts]
-            total += len(state_gusts)
-        else:
-            result[state] = []
-
-    return {
-        "count": total,
-        "filter_states": states_to_use,
-        "thresholds": {
-            "significant": GUST_THRESHOLD_SIGNIFICANT,
-            "severe": GUST_THRESHOLD_SEVERE,
-            "advisory": GUST_THRESHOLD_ADVISORY,
-        },
-        "by_state": result,
-    }
 
 
-@app.get("/api/wind-gusts/stats")
-async def get_wind_gusts_stats():
-    """Get wind gusts service statistics."""
-    wind_service = get_wind_gusts_service()
-    return wind_service.get_statistics()
 
 
 # =============================================================================
@@ -2643,393 +2528,38 @@ async def get_asos_observations(
 # NWWS Products Feed Endpoints
 # =============================================================================
 
-@app.get("/api/nwws/products")
-async def get_nwws_products_feed(
-    limit: int = Query(50, ge=1, le=500, description="Number of products to return"),
-    offset: int = Query(0, ge=0, description="Offset for pagination"),
-    product_type: Optional[str] = Query(None, description="Filter by product type (e.g., SVS, FFW, AFD)"),
-    office: Optional[str] = Query(None, description="Filter by office code (e.g., CLE)"),
-):
-    """Get recent NWWS products for monitoring NWWS connection health."""
-    service = get_nwws_products_service()
-    nwws_handler = get_nwws_handler()
-
-    products = service.get_products(
-        limit=limit,
-        offset=offset,
-        product_type=product_type,
-        office=office,
-    )
-
-    return {
-        "count": len(products),
-        "total_received": service.get_product_count(),
-        "nwws_connected": nwws_handler.is_connected if nwws_handler else False,
-        "products": products,
-    }
 
 
-@app.get("/api/nwws/stats")
-async def get_nwws_products_stats():
-    """Get NWWS products service statistics."""
-    service = get_nwws_products_service()
-    nwws_handler = get_nwws_handler()
-
-    stats = service.get_statistics()
-    stats["nwws_connected"] = nwws_handler.is_connected if nwws_handler else False
-    return stats
 
 
 # =============================================================================
 # AFD (Area Forecast Discussion) Endpoints
 # =============================================================================
 
-@app.get("/api/afd")
-async def get_afd_offices():
-    """Get list of offices with available AFDs."""
-    service = get_nwws_products_service()
-    offices = service.get_afd_offices()
-
-    return {
-        "count": len(offices),
-        "offices": offices,
-    }
 
 
-@app.get("/api/afd/{office}")
-async def get_afd(
-    office: str,
-    index: int = Query(0, ge=0, le=4, description="AFD index (0=latest, up to 4)"),
-    fallback: bool = Query(True, description="Fetch from NWS API if not cached"),
-):
-    """Get AFD for a specific office. Checks NWWS cache first, then NWS API."""
-    service = get_nwws_products_service()
-
-    # Try NWWS cache first
-    afd = service.get_afd(office, index=index)
-
-    if afd:
-        return {
-            "source": "nwws",
-            "afd": afd,
-        }
-
-    # Fallback to NWS API
-    if fallback and index == 0:
-        afd = await service.fetch_afd_from_api(office)
-        if afd:
-            return {
-                "source": "api",
-                "afd": afd,
-            }
-
-    raise HTTPException(
-        status_code=404,
-        detail=f"No AFD available for office '{office.upper()}'"
-    )
 
 
-@app.get("/api/afd/{office}/headlines")
-async def get_afd_headlines(
-    office: str,
-    count: int = Query(4, ge=1, le=6, description="Number of headlines to extract"),
-):
-    """Extract weather headlines from an AFD for social media graphics."""
-    service = get_nwws_products_service()
-
-    # Try NWWS cache first
-    afd = service.get_afd(office)
-
-    # Fallback to API
-    if not afd:
-        afd = await service.fetch_afd_from_api(office)
-
-    if not afd:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No AFD available for office '{office.upper()}'"
-        )
-
-    headlines = await service.extract_headlines_llm(afd, max_headlines=count)
-
-    return {
-        "office": afd.get("office", office.upper()),
-        "wfo_name": afd.get("wfo_name", ""),
-        "received_at": afd.get("received_at", ""),
-        "headlines": headlines,
-    }
 
 
 # =============================================================================
 # LLM Assistant Endpoints
 # =============================================================================
 
-class ChatRequest(BaseModel):
-    """Request model for chat endpoint."""
-    message: str = Field(..., description="User message to send to assistant")
-    context: Optional[str] = Field(None, description="Optional additional context")
-    include_history: bool = Field(True, description="Include conversation history")
 
 
-class AnalyzeAlertRequest(BaseModel):
-    """Request model for alert analysis."""
-    alert_text: str = Field(..., description="Full alert text to analyze")
-    alert_type: str = Field(..., description="Type of alert (e.g., 'Tornado Warning')")
-    locations: list[str] = Field(default=[], description="Affected locations")
-    context: Optional[str] = Field(None, description="Additional context")
 
 
-@app.get("/api/assistant/status")
-async def get_assistant_status():
-    """
-    Get LLM assistant status.
-
-    Returns whether Ollama is running and the model is available.
-    """
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        return {
-            "enabled": False,
-            "available": False,
-            "message": "LLM assistant is disabled in settings",
-        }
-
-    llm_service = get_llm_service()
-    is_available = await llm_service.check_health()
-
-    return {
-        "enabled": True,
-        "available": is_available,
-        "model": llm_service.model,
-        "host": llm_service.host,
-        "statistics": llm_service.get_statistics(),
-    }
 
 
-@app.post("/api/assistant/chat")
-async def assistant_chat(request: ChatRequest):
-    """
-    Send a message to the LLM assistant.
-
-    Returns the assistant's response.
-    """
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        raise HTTPException(status_code=503, detail="LLM assistant is disabled")
-
-    llm_service = get_llm_service()
-
-    # Check if service is available
-    is_available = await llm_service.check_health()
-    if not is_available:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM service not available. Make sure Ollama is running."
-        )
-
-    # Build comprehensive context with all current weather data
-    context = request.context
-    if not context:
-        settings = get_settings()
-        alert_manager = get_alert_manager()
-        alerts = alert_manager.get_alerts_sorted()
-
-        # Get SPC data if available
-        spc_data = None
-        try:
-            spc_service = get_spc_service()
-            if spc_service:
-                spc_data = {
-                    "day1_categorical": None,
-                    "mesoscale_discussions": [],
-                }
-                # Try to get cached SPC data
-                try:
-                    day1 = await spc_service.get_day1_outlooks()
-                    if day1:
-                        spc_data["day1_categorical"] = day1.get("categorical")
-                except Exception:
-                    pass
-                try:
-                    mds = await spc_service.get_mesoscale_discussions()
-                    if mds:
-                        spc_data["mesoscale_discussions"] = [
-                            {"md_number": md.md_number, "title": md.title}
-                            for md in mds.discussions[:3]
-                        ]
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Get recent wind gusts if available
-        wind_gusts = None
-        try:
-            wind_service = get_wind_gusts_service()
-            if wind_service:
-                states = settings.filter_states if settings.filter_states else DEFAULT_GUST_STATES
-                wind_gusts = await wind_service.fetch_gusts(states=states, hours=1, limit=5)
-        except Exception:
-            pass
-
-        # Build comprehensive context
-        context = build_full_context(
-            alerts=alerts,
-            spc_data=spc_data,
-            wind_gusts=wind_gusts,
-            filter_states=settings.filter_states,
-        )
-
-    # Log context for debugging
-    logger.info(f"LLM chat context ({len(alerts)} alerts): {context[:500]}..." if len(context) > 500 else f"LLM chat context ({len(alerts)} alerts): {context}")
-
-    try:
-        response = await llm_service.chat(
-            message=request.message,
-            context=context,
-            include_history=request.include_history,
-        )
-
-        return {
-            "success": True,
-            "response": response.content,
-            "model": response.model,
-            "duration_ms": response.duration_ms,
-        }
-
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/assistant/analyze")
-async def analyze_alert(request: AnalyzeAlertRequest):
-    """
-    Analyze a weather alert and provide insights.
-
-    Returns AI-generated analysis of the alert.
-    """
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        raise HTTPException(status_code=503, detail="LLM assistant is disabled")
-
-    llm_service = get_llm_service()
-
-    is_available = await llm_service.check_health()
-    if not is_available:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM service not available. Make sure Ollama is running."
-        )
-
-    try:
-        analysis = await llm_service.analyze_alert(
-            alert_text=request.alert_text,
-            alert_type=request.alert_type,
-            locations=request.locations,
-            additional_context=request.context,
-        )
-
-        return {
-            "success": True,
-            "analysis": analysis,
-        }
-
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/assistant/history")
-async def get_chat_history():
-    """Get conversation history."""
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        return {"history": [], "message": "LLM assistant is disabled"}
-
-    llm_service = get_llm_service()
-    return {
-        "history": llm_service.get_history(),
-    }
 
 
-@app.delete("/api/assistant/history")
-async def clear_chat_history():
-    """Clear conversation history."""
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        return {"success": True, "message": "LLM assistant is disabled"}
-
-    llm_service = get_llm_service()
-    llm_service.clear_history()
-
-    return {
-        "success": True,
-        "message": "Conversation history cleared",
-    }
 
 
-@app.get("/api/assistant/insight")
-async def get_quick_insight(
-    insight_type: str = Query("general", description="Type of insight: general, wind, pattern, safety"),
-):
-    """
-    Generate a quick insight based on current conditions.
-
-    Returns a brief AI-generated insight.
-    """
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        raise HTTPException(status_code=503, detail="LLM assistant is disabled")
-
-    llm_service = get_llm_service()
-
-    is_available = await llm_service.check_health()
-    if not is_available:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM service not available. Make sure Ollama is running."
-        )
-
-    # Build comprehensive data summary
-    alert_manager = get_alert_manager()
-    alerts = alert_manager.get_alerts_sorted()
-
-    # Get wind gusts for wind-specific insight or general context
-    wind_gusts = None
-    try:
-        wind_service = get_wind_gusts_service()
-        if wind_service:
-            states = settings.filter_states if settings.filter_states else DEFAULT_GUST_STATES
-            wind_gusts = await wind_service.fetch_gusts(states=states, hours=1, limit=5)
-    except Exception:
-        pass
-
-    # Use comprehensive context for better insights
-    data_summary = build_full_context(
-        alerts=alerts,
-        wind_gusts=wind_gusts if insight_type == "wind" else None,
-        filter_states=settings.filter_states,
-    )
-
-    try:
-        insight = await llm_service.generate_insight(
-            data_summary=data_summary,
-            insight_type=insight_type,
-        )
-
-        return {
-            "success": True,
-            "insight_type": insight_type,
-            "insight": insight,
-        }
-
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
@@ -3037,250 +2567,14 @@ async def get_quick_insight(
 # =============================================================================
 
 
-@app.get("/api/debug/alerts-summary")
-async def debug_alerts_summary():
-    """
-    Debug endpoint to see all alerts with their polygon counts.
-    """
-    alert_manager = get_alert_manager()
-    alerts = alert_manager.get_alerts_sorted()
-
-    summary = []
-    for alert in alerts:
-        polygon_count = 0
-        if alert.polygon:
-            # Check if multi-polygon
-            if alert.polygon and len(alert.polygon) > 0:
-                if isinstance(alert.polygon[0], list) and len(alert.polygon[0]) > 0:
-                    if isinstance(alert.polygon[0][0], list):
-                        # Multi-polygon format
-                        polygon_count = len(alert.polygon)
-                    else:
-                        # Single polygon format (list of [lat, lon])
-                        polygon_count = 1
-
-        summary.append({
-            "product_id": alert.product_id,
-            "event_name": alert.event_name,
-            "significance": alert.significance.value if alert.significance else None,
-            "affected_areas_count": len(alert.affected_areas or []),
-            "polygon_count": polygon_count,
-            "has_polygon": polygon_count > 0,
-        })
-
-    return {
-        "alert_count": len(summary),
-        "alerts": summary,
-    }
 
 
-@app.get("/api/debug/alert/{product_id}/geometry")
-async def debug_alert_geometry(product_id: str):
-    """
-    Debug endpoint to inspect an alert's zone geometry.
-
-    Returns detailed info about the alert's polygon, affected_areas,
-    and what zones are in the cache.
-    """
-    alert_manager = get_alert_manager()
-    zone_service = get_zone_geometry_service()
-
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
-    # Check each zone in affected_areas
-    zone_details = []
-    for ugc in (alert.affected_areas or []):
-        zone_type = zone_service.get_zone_type(ugc)
-        cached = zone_service._get_from_cache(ugc)
-        zone_details.append({
-            "ugc": ugc,
-            "zone_type": zone_type,
-            "in_cache": cached is not None,
-            "cached_polygon_count": len(cached) if cached else 0,
-        })
-
-    # Count total polygons in current alert
-    polygon_info = None
-    if alert.polygon:
-        if isinstance(alert.polygon[0][0], list):
-            # Multi-polygon: [[[[lat, lon], ...]], [[[lat, lon], ...]]]
-            polygon_info = {
-                "format": "multi-polygon",
-                "polygon_count": len(alert.polygon),
-                "first_polygon_points": len(alert.polygon[0]) if alert.polygon else 0,
-            }
-        else:
-            # Single polygon or flat list: [[lat, lon], ...]
-            polygon_info = {
-                "format": "single-polygon or flat",
-                "point_count": len(alert.polygon),
-            }
-
-    return {
-        "product_id": product_id,
-        "event_name": alert.event_name,
-        "significance": alert.significance.value if alert.significance else None,
-        "affected_areas_count": len(alert.affected_areas or []),
-        "affected_areas": alert.affected_areas,
-        "zone_details": zone_details,
-        "polygon_info": polygon_info,
-        "cache_stats": zone_service.get_cache_stats(),
-    }
 
 
-@app.delete("/api/debug/zone-cache")
-async def debug_clear_zone_cache(
-    delete_file: bool = Query(False, description="Also delete the cache file on disk"),
-):
-    """
-    Debug endpoint to clear the zone geometry cache.
-
-    This forces a fresh fetch from the NWS API on next request.
-    """
-    zone_service = get_zone_geometry_service()
-    settings = get_settings()
-    stats_before = zone_service.get_cache_stats()
-
-    zone_service.clear_cache()
-
-    file_deleted = False
-    cache_file = settings.data_dir / "zone_geometry_cache.json"
-    if delete_file and cache_file.exists():
-        try:
-            cache_file.unlink()
-            file_deleted = True
-            logger.info(f"Deleted zone geometry cache file: {cache_file}")
-        except Exception as e:
-            logger.error(f"Failed to delete cache file: {e}")
-
-    stats_after = zone_service.get_cache_stats()
-
-    return {
-        "success": True,
-        "message": "Zone geometry cache cleared",
-        "file_deleted": file_deleted,
-        "cache_file": str(cache_file),
-        "before": stats_before,
-        "after": stats_after,
-    }
 
 
-@app.post("/api/debug/alert/{product_id}/add-zones")
-async def debug_add_zones(product_id: str, zones: str = Query(..., description="Comma-separated zone codes")):
-    """
-    Debug endpoint to manually add zones to an alert and repopulate geometry.
-
-    Use this when NWS issues multiple products for the same event covering different areas.
-    """
-    alert_manager = get_alert_manager()
-    zone_service = get_zone_geometry_service()
-
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
-    # Parse zone list
-    new_zones = [z.strip().upper() for z in zones.split(",") if z.strip()]
-
-    # Merge with existing
-    existing_zones = set(alert.affected_areas or [])
-    added_zones = [z for z in new_zones if z not in existing_zones]
-    existing_zones.update(new_zones)
-    alert.affected_areas = sorted(list(existing_zones))
-
-    # Fetch geometry for all zones (including new ones)
-    all_polygons = []
-    fetch_results = []
-
-    for ugc in alert.affected_areas:
-        zone_type = zone_service.get_zone_type(ugc)
-        if zone_type:
-            geometry = await zone_service.fetch_zone_geometry(ugc)
-            fetch_results.append({
-                "ugc": ugc,
-                "zone_type": zone_type,
-                "polygon_count": len(geometry) if geometry else 0,
-                "is_new": ugc in added_zones,
-            })
-            if geometry:
-                all_polygons.extend(geometry)
-
-    # Update alert
-    alert.polygon = all_polygons
-    alert_manager.save_to_file()
-
-    # Broadcast update
-    broker = get_message_broker()
-    await broker.broadcast_alert_update(alert)
-
-    return {
-        "product_id": product_id,
-        "zones_added": added_zones,
-        "total_zones": len(alert.affected_areas),
-        "total_polygons": len(all_polygons),
-        "fetch_results": fetch_results,
-    }
 
 
-@app.post("/api/debug/alert/{product_id}/repopulate")
-async def debug_repopulate_geometry(product_id: str, force: bool = Query(True)):
-    """
-    Debug endpoint to manually repopulate zone geometry for an alert.
-
-    Returns detailed debug info about what was fetched.
-    """
-    alert_manager = get_alert_manager()
-    zone_service = get_zone_geometry_service()
-
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
-    # Store original polygon info
-    original_polygon_count = len(alert.polygon) if alert.polygon else 0
-
-    # Clear existing polygon if forcing
-    if force:
-        alert.polygon = []
-
-    # Manually fetch each zone and track results
-    fetch_results = []
-    all_polygons = []
-
-    for ugc in (alert.affected_areas or []):
-        zone_type = zone_service.get_zone_type(ugc)
-        if zone_type:
-            geometry = await zone_service.fetch_zone_geometry(ugc)
-            fetch_results.append({
-                "ugc": ugc,
-                "zone_type": zone_type,
-                "polygon_count": len(geometry) if geometry else 0,
-                "success": geometry is not None,
-            })
-            if geometry:
-                all_polygons.extend(geometry)
-
-    # Update alert
-    alert.polygon = all_polygons
-
-    # Save the alert
-    alert_manager.save_to_file()
-
-    # Broadcast update
-    broker = get_message_broker()
-    await broker.broadcast_alert_update(alert)
-
-    return {
-        "product_id": product_id,
-        "event_name": alert.event_name,
-        "original_polygon_count": original_polygon_count,
-        "new_polygon_count": len(all_polygons),
-        "zones_processed": len(fetch_results),
-        "zones_with_geometry": sum(1 for r in fetch_results if r["success"]),
-        "fetch_results": fetch_results,
-    }
 
 
 # ==================== NEXRAD Radar Endpoints ====================
@@ -3720,130 +3014,16 @@ async def get_mrms_png():
     )
 
 
-@app.get("/api/hrrr/sounding.png")
-async def get_hrrr_sounding(lat: float, lon: float, fhour: int = 0, run: Optional[str] = None):
-    """Full SounderPy HRRR point sounding PNG at the EXACT lat/lon (Open-Meteo
-    pressure-level profile). fhour + run (YYYYMMDDHH) give a forecast-hour
-    sounding when the model is active; default is F00 (now). Falls back to the
-    nearest-BUFKIT-site render if the exact-point path fails. The radar app shows
-    an instant quick-look while this builds."""
-    from fastapi.responses import Response as FastResponse
-    from .services.hrrr_service import get_hrrr_service
-
-    svc = get_hrrr_service()
-    loop = asyncio.get_event_loop()
-    # Dedicated pool: a ~30 s SounderPy render must not occupy the default
-    # executor that also serves MRMS/HRRR-field/obs offloads.
-    try:
-        png, key = await loop.run_in_executor(svc.render_executor, lambda: svc.get_point_sounding_png(lat, lon, fhour, run))
-    except Exception as e:
-        try:  # exact-point failed (beyond Open-Meteo's ~45 h horizon?) → nearest
-            # BUFKIT site at the SAME forecast hour (BUFKIT reaches F48).
-            png, key = await loop.run_in_executor(svc.render_executor, lambda: svc.get_sounding_png(lat, lon, fhour))
-        except Exception:
-            raise HTTPException(status_code=503, detail="HRRR sounding unavailable")
-    return FastResponse(
-        content=png,
-        media_type="image/png",
-        headers={"Cache-Control": "no-store", "X-Sounding-Source": key},
-    )
 
 
-@app.get("/api/hrrr/runs")
-async def get_hrrr_runs(model: str = "hrrr", before: str | None = None):
-    """Manifest for a model's field overlays (model=hrrr|rrfs): the last ~10 runs
-    (with each run's max forecast hour), the available fields, and the model's
-    forecast-hour offset. Lazy/cached — see hrrr_field_service.
-
-    `before` (YYYYMMDDHH or an ISO instant) anchors the run list at a past time so
-    an event review can find the runs that were current during the event instead
-    of today's."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service, MODELS
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service, MODELS
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable (eccodes/scipy missing)")
-    runs = await asyncio.to_thread(svc.list_runs, model, 10, before)
-    mcfg = MODELS.get(model, MODELS["hrrr"])
-    return {
-        "runs": runs,
-        "fields": svc.fields(model),
-        "fhour_offset": mcfg.get("fhour_offset", 0),
-        "fhour_step": mcfg.get("fhour_step", 1),
-    }
 
 
-@app.get("/api/hrrr/field")
-async def get_hrrr_field(run: str, param: str, fhour: int = 0, model: str = "hrrr"):
-    """One model field as a compact lat/lon binary grid (magic 'HRRR') for the
-    app's WebGL layer. run=YYYYMMDDHH, param in the field registry, fhour int."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    from fastapi.responses import Response as FastResponse
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    data = await asyncio.to_thread(svc.get_field, model, run, param, fhour)
-    if data is None:
-        raise HTTPException(status_code=404, detail="HRRR field not available")
-    return FastResponse(
-        content=data,
-        media_type="application/octet-stream",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
 
 
-@app.get("/api/hrrr/barbs")
-async def get_hrrr_barbs(run: str, param: str, fhour: int = 0, model: str = "hrrr"):
-    """Downsampled wind vectors for a wind field → barb plotting ([lon,lat,kt,dir])."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    data = await asyncio.to_thread(svc.get_barbs, model, run, param, fhour)
-    if data is None:
-        raise HTTPException(status_code=404, detail="HRRR barbs not available")
-    return data
 
 
-@app.get("/api/hrrr/isobars")
-async def get_hrrr_isobars(run: str, fhour: int = 0, model: str = "hrrr"):
-    """MSLP isobars (GeoJSON LineStrings) for the run/forecast hour."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    data = await asyncio.to_thread(svc.get_isobars, model, run, fhour)
-    if data is None:
-        raise HTTPException(status_code=404, detail="HRRR isobars not available")
-    return data
 
 
-@app.get("/api/hrrr/contours")
-async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = "75,150", model: str = "hrrr"):
-    """Contour a registered model field at `levels` (GeoJSON; for the UH overlay)."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    lv = [float(x) for x in levels.split(",") if x.strip()]
-    data = await asyncio.to_thread(svc.get_contours, model, run, param, fhour, lv)
-    if data is None:
-        raise HTTPException(status_code=404, detail="HRRR contours not available")
-    return data
 
 
 # ── RAP mesoanalysis ────────────────────────────────────────────────────────
@@ -3853,49 +3033,12 @@ async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = 
 # adds no new download path. Everything is cached per RAP cycle — the first call
 # after a new cycle builds it (~10 s), the rest are instant.
 
-def _meso_service():
-    try:
-        from .services.mesoanalysis_service import get_mesoanalysis_service
-    except ImportError:
-        from backend.services.mesoanalysis_service import get_mesoanalysis_service
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    if not get_hrrr_field_service().available:
-        raise HTTPException(status_code=503, detail="Mesoanalysis unavailable (eccodes/scipy missing)")
-    return get_mesoanalysis_service()
 
 
-@app.get("/api/meso/analysis")
-async def get_meso_analysis(run: str | None = None):
-    """Threat assessment + cycle-over-cycle trends for a RAP analysis cycle.
-    Defaults to the newest cycle that has data."""
-    svc = _meso_service()
-    data = await asyncio.to_thread(svc.analysis, run)
-    if data is None:
-        raise HTTPException(status_code=503, detail="No RAP analysis available yet")
-    return JSONResponse(content=data, headers={"Cache-Control": "public, max-age=120"})
 
 
-@app.get("/api/meso/zones")
-async def get_meso_zones(run: str | None = None):
-    """Threat + watch areas as GeoJSON polygons (properties: kind, threat, level)."""
-    svc = _meso_service()
-    data = await asyncio.to_thread(svc.zones, run)
-    if data is None:
-        raise HTTPException(status_code=503, detail="No RAP analysis available yet")
-    return JSONResponse(content=data, headers={"Cache-Control": "public, max-age=120"})
 
 
-@app.get("/api/meso/point")
-async def get_meso_point(lat: float, lon: float, run: str | None = None):
-    """Every mesoanalysis parameter at a point, plus the threats covering it."""
-    svc = _meso_service()
-    data = await asyncio.to_thread(svc.point, lat, lon, run)
-    if data is None:
-        raise HTTPException(status_code=404, detail="Point outside the analysis domain")
-    return JSONResponse(content=data, headers={"Cache-Control": "public, max-age=120"})
 
 
 @app.get("/api/obs/surface")
@@ -4191,99 +3334,18 @@ async def set_radar_gate(request: RadarGateRequest):
 # ==================== Social Media Endpoints ====================
 
 
-class SocialPostRequest(BaseModel):
-    """Request body for posting to social media."""
-    platforms: list[str]
-    message: str
-    images: list[str] = []  # Base64-encoded images
-    alt_text: str = "Weather graphic from The Battin Front"
 
 
-class GenerateTextRequest(BaseModel):
-    """Request body for generating post text from alert/LSR data."""
-    source_type: str  # "alert" or "lsr"
-    source_id: Optional[str] = None
-    source_data: Optional[dict] = None
-    template: str = "default"
 
 
-@app.get("/api/social/status")
-async def social_media_status():
-    """Check if social media services are configured and available."""
-    service = get_social_media_service()
-    return service.get_status()
 
 
-@app.post("/api/social/post")
-async def social_media_post(request: SocialPostRequest):
-    """Post to one or more social media platforms."""
-    service = get_social_media_service()
-
-    # Decode base64 images to bytes
-    images = None
-    if request.images:
-        import base64 as b64
-        images = []
-        for img_str in request.images:
-            # Strip data URI prefix if present
-            if ";base64," in img_str:
-                img_str = img_str.split(";base64,", 1)[1]
-            images.append(b64.b64decode(img_str))
-
-    result = await service.post(
-        platforms=request.platforms,
-        message=request.message,
-        images=images,
-        alt_text=request.alt_text,
-    )
-    return result
 
 
-@app.post("/api/social/generate-text")
-async def social_media_generate_text(request: GenerateTextRequest):
-    """Generate post text from alert or LSR data using templates."""
-    service = get_social_media_service()
-
-    if request.source_type == "alert":
-        if request.source_id:
-            alert_manager = get_alert_manager()
-            alert = alert_manager.get_alert(request.source_id)
-            if not alert:
-                raise HTTPException(status_code=404, detail="Alert not found")
-            text = service.generate_alert_text(alert.to_dict(), request.template)
-        elif request.source_data:
-            text = service.generate_alert_text(request.source_data, request.template)
-        else:
-            raise HTTPException(status_code=400, detail="source_id or source_data required")
-    elif request.source_type == "lsr":
-        if not request.source_data:
-            raise HTTPException(status_code=400, detail="source_data required for LSR")
-        reports = request.source_data.get("reports", [request.source_data])
-        text = service.generate_lsr_text(reports, request.template)
-    else:
-        raise HTTPException(status_code=400, detail="source_type must be 'alert' or 'lsr'")
-
-    return {"text": text, "template": request.template}
 
 
-@app.get("/api/social/history")
-async def social_media_history():
-    """Get recent post history."""
-    service = get_social_media_service()
-    return {"posts": service.get_post_history()}
 
 
-@app.get("/api/social/templates")
-async def social_media_templates():
-    """Get available post templates."""
-    try:
-        from .services.social_media.templates import ALERT_TEMPLATES, LSR_TEMPLATES
-    except ImportError:
-        from backend.services.social_media.templates import ALERT_TEMPLATES, LSR_TEMPLATES
-    return {
-        "alert_templates": list(ALERT_TEMPLATES.keys()),
-        "lsr_templates": list(LSR_TEMPLATES.keys()),
-    }
 
 
 # ==================== Settings Endpoints ====================
@@ -5052,31 +4114,10 @@ async def get_chasers():
 # Chase Log API
 # =============================================================================
 
-@app.get("/api/chase-logs")
-async def list_chase_logs():
-    """List all chase log sessions."""
-    service = get_chase_log_service()
-    return {"sessions": service.list_sessions()}
 
 
-@app.get("/api/chase-logs/{date}")
-async def get_chase_log(date: str):
-    """Get a specific chase log by date (YYYY-MM-DD)."""
-    service = get_chase_log_service()
-    session = service.get_session(date)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"No chase log for {date}")
-    return session
 
 
-@app.get("/api/chase-logs/{date}/geojson")
-async def get_chase_log_geojson(date: str):
-    """Export a chase log as GeoJSON LineString."""
-    service = get_chase_log_service()
-    geojson = service.get_session_geojson(date)
-    if not geojson:
-        raise HTTPException(status_code=404, detail=f"No chase log for {date}")
-    return geojson
 
 
 # =============================================================================

@@ -111,7 +111,10 @@ class TestAllExtractedRouters:
                     continue
                 checked += 1
                 resp = client.get(r.path)
-                if resp.status_code >= 500:
+                # 503 = the handler ran and reported a dependency down (no
+                # Ollama, no radar service). That is a working handler.
+                # 500 is an unhandled exception, which is the failure here.
+                if resp.status_code >= 500 and resp.status_code != 503:
                     failures.append(
                         "{} -> {}: {}".format(r.path, resp.status_code, resp.text[:120]))
         assert checked > 0, "no extracted GET routes found to exercise"
