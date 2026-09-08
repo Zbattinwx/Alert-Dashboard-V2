@@ -6,6 +6,8 @@ movement, detect rotation/hail/debris signatures, and assign severity scores.
 
 import asyncio
 import logging
+
+from .failure_log import note_failure
 import math
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -914,7 +916,8 @@ class StormTrackingService:
                 arr = arr[~np.isnan(arr)]
                 if arr.size > 0:
                     return float(np.nanmean(arr))
-        except (AttributeError, KeyError, TypeError, ValueError):
+        except (AttributeError, KeyError, TypeError, ValueError) as _e:
+            note_failure("nyquist.1", "Nyquist velocity is unavailable; velocity dealiasing may be wrong", _e)
             pass
         return 28.0  # Conservative WSR-88D legacy VCP default
 
@@ -1093,7 +1096,8 @@ class StormTrackingService:
                 # cell_refl computed above for the mass-weighted centroid).
                 try:
                     lat, lon = self._grid_to_image_latlon(cy, cx)
-                except (IndexError, TypeError, ValueError):
+                except (IndexError, TypeError, ValueError) as _e:
+                    note_failure("cells2d.1", "A cell centroid could not be georeferenced and was dropped", _e)
                     continue
 
                 bbox = (int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max()))
@@ -1171,7 +1175,8 @@ class StormTrackingService:
             try:
                 refl = radar.get_field(sweep, "reflectivity")
                 az = radar.get_azimuth(sweep)
-            except Exception:
+            except Exception as _e:
+                note_failure("cells3d.1", "A sweep could not be read during volumetric cell identification", _e)
                 continue
             if refl is None or refl.shape[1] != ngates:
                 continue
@@ -1382,7 +1387,8 @@ class StormTrackingService:
             cell_refl = grid_refl[ys, xs]
             try:
                 lat, lon = self._grid_to_image_latlon(gy, gx)
-            except (IndexError, TypeError, ValueError):
+            except (IndexError, TypeError, ValueError) as _e:
+                note_failure("grid.1", "A grid point could not be georeferenced", _e)
                 continue
             cells.append(_InternalCell(
                 centroid_y=gy, centroid_x=gx, lat=lat, lon=lon,
@@ -1727,7 +1733,8 @@ class StormTrackingService:
         min_elev_deg = 0.5
         try:
             min_elev_deg = float(min(radar.fixed_angle["data"]))
-        except Exception:
+        except Exception as _e:
+            note_failure("rotation.1", "A cell could not be placed on the grid during rotation detection", _e)
             pass
 
         for cell in cells:
@@ -1743,7 +1750,8 @@ class StormTrackingService:
             # Get cell region from grid coordinates
             try:
                 cy, cx = self._latlon_to_grid(cell.lat, cell.lon)
-            except (ValueError, IndexError):
+            except (ValueError, IndexError) as _e:
+                note_failure("rotation.2", "A cell could not be placed on the grid during rotation detection", _e)
                 continue
 
             # Search area: cell extent + 5km buffer
@@ -1878,7 +1886,8 @@ class StormTrackingService:
                                                 f"lowest beam at {h_km:.2f} km AGL "
                                                 f"(>{TDS_MAX_BEAM_HEIGHT_KM} km)"
                                             )
-                                    except Exception:
+                                    except Exception as _e:
+                                        note_failure("rotation.3", "A cell could not be placed on the grid during rotation detection", _e)
                                         pass
 
                                 if tds_candidate:
@@ -1946,7 +1955,8 @@ class StormTrackingService:
 
             try:
                 cy, cx = self._latlon_to_grid(cell.lat, cell.lon)
-            except (ValueError, IndexError):
+            except (ValueError, IndexError) as _e:
+                note_failure("qlcs.1", "A cell could not be placed on the grid during QLCS rotation detection", _e)
                 continue
 
             # Tighter search radius for QLCS (typically 2–3 km couplets)
@@ -2029,7 +2039,8 @@ class StormTrackingService:
 
         try:
             fixed_angles = radar.fixed_angle["data"]
-        except Exception:
+        except Exception as _e:
+            note_failure("llsd.fixed_angle", "LLSD rotation detection is producing nothing (cannot read sweep angles)", _e)
             return
 
         # Pick the lowest sweep that ACTUALLY HAS velocity data.  Modern NEXRAD
@@ -2048,7 +2059,8 @@ class StormTrackingService:
             try:
                 s0 = int(radar.sweep_start_ray_index["data"][i])
                 s1 = int(radar.sweep_end_ray_index["data"][i])
-            except Exception:
+            except Exception as _e:
+                note_failure("llsd.1", "A sweep could not be read while selecting the LLSD tilt", _e)
                 continue
             sweep_vel = radar.fields[vel_key]["data"][s0:s1 + 1]
             n_valid = int(np.count_nonzero(~np.ma.getmaskarray(sweep_vel)))
@@ -2063,7 +2075,8 @@ class StormTrackingService:
         try:
             s_start = int(radar.sweep_start_ray_index["data"][sweep_idx])
             s_end = int(radar.sweep_end_ray_index["data"][sweep_idx])
-        except Exception:
+        except Exception as _e:
+            note_failure("llsd.sweep_index", "LLSD rotation detection is producing nothing (cannot read sweep indices)", _e)
             return
 
         azimuths = np.asarray(radar.azimuth["data"][s_start:s_end + 1], dtype=float)
@@ -2078,7 +2091,8 @@ class StormTrackingService:
         try:
             rad_lat = float(radar.latitude["data"][0])
             rad_lon = float(radar.longitude["data"][0])
-        except Exception:
+        except Exception as _e:
+            note_failure("llsd.geometry", "LLSD rotation detection is producing nothing (cannot read radar geometry)", _e)
             return
 
         n_rays = vel.shape[0]
@@ -2204,7 +2218,8 @@ class StormTrackingService:
             fixed_angles = radar.fixed_angle["data"]
             ranges_m = np.asarray(radar.range["data"], dtype=float)
             n_sweeps = len(fixed_angles)
-        except Exception:
+        except Exception as _e:
+            note_failure("rotation_profile.geometry", "Multi-tilt rotation profile is producing nothing (cannot read radar geometry)", _e)
             return
 
         R_e = 6_371_000.0
@@ -2255,7 +2270,8 @@ class StormTrackingService:
                 try:
                     s_start = int(radar.sweep_start_ray_index["data"][sw_idx])
                     s_end = int(radar.sweep_end_ray_index["data"][sw_idx])
-                except Exception:
+                except Exception as _e:
+                    note_failure("beam_height.1", "A sweep could not be read while computing beam height", _e)
                     continue
                 az = np.asarray(radar.azimuth["data"][s_start:s_end + 1], dtype=float)
                 vel = np.ma.filled(
@@ -2340,7 +2356,8 @@ class StormTrackingService:
             fixed_angles = radar.fixed_angle["data"]
             ranges_m = np.asarray(radar.range["data"], dtype=float)
             n_sweeps = len(fixed_angles)
-        except Exception:
+        except Exception as _e:
+            note_failure("cell_structure.geometry", "Cell structure (echo top / VIL) is producing nothing (cannot read radar geometry)", _e)
             return
 
         refl_all = np.ma.filled(radar.fields["reflectivity"]["data"], np.nan)
@@ -2394,7 +2411,8 @@ class StormTrackingService:
                 try:
                     s_start = int(radar.sweep_start_ray_index["data"][sw])
                     s_end = int(radar.sweep_end_ray_index["data"][sw])
-                except Exception:
+                except Exception as _e:
+                    note_failure("beam_height.2", "A sweep could not be read while computing beam height", _e)
                     continue
                 az = np.asarray(radar.azimuth["data"][s_start:s_end + 1], dtype=float)
                 diffs = (az - bearing_deg + 540.0) % 360.0 - 180.0
@@ -2990,7 +3008,8 @@ class StormTrackingService:
             try:
                 ss = int(radar.sweep_start_ray_index["data"][sw])
                 se = int(radar.sweep_end_ray_index["data"][sw])
-            except Exception:
+            except Exception as _e:
+                note_failure("tds.1", "A sweep could not be read while counting TDS tilts", _e)
                 continue
 
             az   = np.asarray(radar.azimuth["data"][ss:se + 1], dtype=float)
@@ -3050,7 +3069,8 @@ class StormTrackingService:
             rad_lon      = float(radar.longitude["data"][0])
             ranges_m     = np.asarray(radar.range["data"], dtype=float)
             fixed_angles = radar.fixed_angle["data"]
-        except Exception:
+        except Exception as _e:
+            note_failure("tbss.geometry", "Three-body scatter spike detection is producing nothing (cannot read radar geometry)", _e)
             return
 
         # Voronoi-gated reset: only clear flags for cells whose primary radar
@@ -3071,7 +3091,8 @@ class StormTrackingService:
         try:
             ss = int(radar.sweep_start_ray_index["data"][sweep_idx])
             se = int(radar.sweep_end_ray_index["data"][sweep_idx])
-        except Exception:
+        except Exception as _e:
+            note_failure("tbss.sweep_index", "Three-body scatter spike detection is producing nothing (cannot read sweep indices)", _e)
             return
 
         azimuths = np.asarray(radar.azimuth["data"][ss:se + 1], dtype=float)
@@ -3177,7 +3198,8 @@ class StormTrackingService:
             rad_lon      = float(radar.longitude["data"][0])
             ranges_m     = np.asarray(radar.range["data"], dtype=float)
             fixed_angles = radar.fixed_angle["data"]
-        except Exception:
+        except Exception as _e:
+            note_failure("downburst.geometry", "Downburst detection is producing nothing (cannot read radar geometry)", _e)
             return
 
         # Voronoi-gated reset
@@ -3197,7 +3219,8 @@ class StormTrackingService:
         try:
             s_start = int(radar.sweep_start_ray_index["data"][sweep_idx])
             s_end   = int(radar.sweep_end_ray_index["data"][sweep_idx])
-        except Exception:
+        except Exception as _e:
+            note_failure("downburst.sweep_index", "Downburst detection is producing nothing (cannot read sweep indices)", _e)
             return
 
         azimuths = np.asarray(radar.azimuth["data"][s_start:s_end + 1], dtype=float)
@@ -3300,7 +3323,8 @@ class StormTrackingService:
             ranges_m     = np.asarray(radar.range["data"], dtype=float)
             fixed_angles = radar.fixed_angle["data"]
             n_sweeps     = len(fixed_angles)
-        except Exception:
+        except Exception as _e:
+            note_failure("marc.geometry", "MARC detection is producing nothing (cannot read radar geometry)", _e)
             return
 
         # Voronoi-gated reset
@@ -3348,7 +3372,8 @@ class StormTrackingService:
                 try:
                     ss = int(radar.sweep_start_ray_index["data"][sw])
                     se = int(radar.sweep_end_ray_index["data"][sw])
-                except Exception:
+                except Exception as _e:
+                    note_failure("beam_height.3", "A sweep could not be read while computing beam height", _e)
                     continue
 
                 az  = np.asarray(radar.azimuth["data"][ss:se + 1], dtype=float)
@@ -3406,7 +3431,8 @@ class StormTrackingService:
             rad_lon      = float(radar.longitude["data"][0])
             ranges_m     = np.asarray(radar.range["data"], dtype=float)
             fixed_angles = radar.fixed_angle["data"]
-        except Exception:
+        except Exception as _e:
+            note_failure("straightline.geometry", "Straight-line wind detection is producing nothing (cannot read radar geometry)", _e)
             return
 
         # Voronoi-gated reset
@@ -3428,7 +3454,8 @@ class StormTrackingService:
         try:
             s_start = int(radar.sweep_start_ray_index["data"][sweep_idx])
             s_end   = int(radar.sweep_end_ray_index["data"][sweep_idx])
-        except Exception:
+        except Exception as _e:
+            note_failure("straightline.sweep_index", "Straight-line wind detection is producing nothing (cannot read sweep indices)", _e)
             return
 
         azimuths = np.asarray(radar.azimuth["data"][s_start:s_end + 1], dtype=float)
@@ -3546,7 +3573,8 @@ class StormTrackingService:
             ranges_m     = np.asarray(radar.range["data"], dtype=float)
             fixed_angles = radar.fixed_angle["data"]
             n_sweeps     = len(fixed_angles)
-        except Exception:
+        except Exception as _e:
+            note_failure("rear_inflow.geometry", "Rear-inflow-jet detection is producing nothing (cannot read radar geometry)", _e)
             return
 
         # Voronoi-gated reset: only clear flags for cells whose primary radar
@@ -3599,7 +3627,8 @@ class StormTrackingService:
                 try:
                     ss = int(radar.sweep_start_ray_index["data"][sw])
                     se = int(radar.sweep_end_ray_index["data"][sw])
-                except Exception:
+                except Exception as _e:
+                    note_failure("beam_height.4", "A sweep could not be read while computing beam height", _e)
                     continue
 
                 az  = np.asarray(radar.azimuth["data"][ss:se + 1], dtype=float)

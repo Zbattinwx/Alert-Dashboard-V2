@@ -4928,6 +4928,16 @@ async def model_paths_status():
             }
     except Exception as e:  # noqa: BLE001
         out["tracker"] = {"running": False, "error": f"{type(e).__name__}: {e}"}
+
+    # Detectors that have stopped producing anything. Empty means nothing has
+    # failed -- a real answer, not an absence of data. These used to `return`
+    # without a word, so a detector could be dead for months while the cell it
+    # described simply reported no signature.
+    try:
+        from .services.failure_log import snapshot as _degraded
+        out["degraded"] = _degraded()
+    except Exception as e:  # noqa: BLE001
+        out["degraded"] = {"error": f"{type(e).__name__}: {e}"}
     return out
 
 

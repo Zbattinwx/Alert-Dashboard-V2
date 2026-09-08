@@ -32,6 +32,11 @@ interface ModelSlot {
   path: string | null;
   source: 'runtime' | 'bundled' | null;
 }
+interface Degraded {
+  total: number;
+  detectors: { key: string; count: number; what: string }[];
+  error?: string;
+}
 interface PathsResponse {
   frozen: boolean;
   runtime_dir: string;
@@ -45,6 +50,7 @@ interface PathsResponse {
     note?: string;
     error?: string;
   };
+  degraded?: Degraded;
 }
 interface TargetScore {
   n: number;
@@ -210,6 +216,29 @@ export const SystemHealthPanel: React.FC = () => {
           untrained model — the cells are being tracked but scored with nothing.
           Check the backend log for &ldquo;MISSING FROM THIS BUILD&rdquo;.
         </p>
+      )}
+
+      {!!paths?.degraded?.total && (
+        <div className="health-degraded">
+          <div className="hd-head">
+            <span className="hd-title">Detectors reporting failures</span>
+            <span className="hd-total">{num(paths.degraded.total)} total</span>
+          </div>
+          <p className="model-hint">
+            These log once per run and then only count, so a detector that failed
+            on one bad sweep and one that has failed thousands of times read very
+            differently here and identically in the log.
+          </p>
+          <ul className="hd-list">
+            {paths.degraded.detectors.slice(0, 6).map((d) => (
+              <li key={d.key}>
+                <span className="hd-count">{num(d.count)}</span>
+                <span className="hd-what">{d.what}</span>
+                <code className="hd-key">{d.key}</code>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {/* ── Live scorecard ─────────────────────────────────────────────── */}

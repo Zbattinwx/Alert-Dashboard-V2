@@ -7,6 +7,8 @@ georeferenced PNG images for frontend display.
 import asyncio
 import io
 import logging
+
+from .failure_log import note_failure
 import math
 import os
 import shutil
@@ -1708,7 +1710,8 @@ class NexradService:
             sweep_start = radar.sweep_start_ray_index["data"]
             for i in range(radar.nsweeps):
                 elevation_angles.append(float(radar.elevation["data"][sweep_start[i]]))
-        except Exception:
+        except Exception as _e:
+            note_failure("volume.1", "Sweep metadata could not be read from a radar volume", _e)
             pass
 
         return frames, radar, scan_iso, bounds, elevation_angles, site_lat, site_lon
@@ -1734,7 +1737,8 @@ class NexradService:
         try:
             n_sweeps = int(radar.nsweeps)
             fixed_angles = np.asarray(radar.fixed_angle["data"], dtype=float)
-        except Exception:
+        except Exception as _e:
+            note_failure("lowtilt.sweeps", "No low-tilt scans identified (cannot read sweep count/angles) - this volume yields no radar frames or cells", _e)
             return []
         if n_sweeps == 0:
             return []
@@ -1750,7 +1754,8 @@ class NexradService:
             time_data = np.asarray(radar.time["data"], dtype=float)
             sweep_start = np.asarray(radar.sweep_start_ray_index["data"], dtype=int)
             sweep_end = np.asarray(radar.sweep_end_ray_index["data"], dtype=int)
-        except Exception:
+        except Exception as _e:
+            note_failure("lowtilt.times", "No low-tilt scans identified (cannot read sweep times) - this volume yields no radar frames or cells", _e)
             return []
 
         scans: list[tuple[int, Optional[int], datetime, str]] = []

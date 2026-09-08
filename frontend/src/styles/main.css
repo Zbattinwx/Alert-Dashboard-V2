@@ -5148,3 +5148,30 @@ body {
   font-size: .72rem; line-height: 1.4; max-width: 230px;
 }
 .radar-unavailable i { margin-right: 5px; }
+
+/* Detectors that have stopped producing anything. Sits above the scorecard
+   because a dead detector explains a bad scorecard — reading the numbers first
+   would lead to the wrong conclusion about the model. */
+.health-degraded {
+  margin-top: 14px; padding: 12px 13px; border-radius: 10px;
+  background: rgba(245,158,11,.08);
+  border: 1px solid rgba(245,158,11,.26);
+}
+.hd-head { display: flex; align-items: baseline; gap: 10px; }
+.hd-title { font-size: .85rem; font-weight: 600; color: var(--accent-yellow); }
+.hd-total {
+  margin-left: auto; font-size: .72rem; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.health-degraded .model-hint { margin: 6px 0 8px; }
+.hd-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.hd-list li {
+  display: grid; grid-template-columns: 68px 1fr auto; gap: 10px;
+  align-items: baseline; font-size: .76rem;
+}
+.hd-count {
+  font-variant-numeric: tabular-nums; font-weight: 600;
+  color: var(--accent-yellow); text-align: right;
+}
+.hd-what { color: var(--text-secondary); }
+.hd-key { font-size: .68rem; color: var(--text-muted); }
