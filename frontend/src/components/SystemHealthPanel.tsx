@@ -27,6 +27,8 @@
  */
 import React, { useCallback, useEffect, useState } from 'react';
 
+import { apiUrl } from '../utils/api';
+
 interface ModelSlot {
   found: boolean;
   path: string | null;
@@ -85,6 +87,25 @@ const TARGET_LABEL: Record<string, string> = {
   rotation: 'Tornado',
 };
 
+
+/** GET JSON, or fail with something a person can act on.
+ *
+ * `r.json()` on an HTML error page throws "Unexpected token '<'", which reads
+ * like a corrupt payload and is really a routing or auth problem. Name it.
+ */
+async function fetchJson(url: string): Promise<any> {
+  const r = await fetch(url);
+  const ct = r.headers.get('content-type') || '';
+  if (!ct.includes('json')) {
+    const body = (await r.text()).slice(0, 80).replace(/\s+/g, ' ');
+    throw new Error(
+      r.status === 404
+        ? `${url} returned 404 - the API is not reachable at this path`
+        : `${url} returned ${r.status} ${ct || 'unknown type'} instead of JSON: ${body}`);
+  }
+  return r.json();
+}
+
 export const SystemHealthPanel: React.FC = () => {
   const [paths, setPaths] = useState<PathsResponse | null>(null);
   const [card, setCard] = useState<Scorecard | null>(null);
@@ -95,9 +116,13 @@ export const SystemHealthPanel: React.FC = () => {
   const refresh = useCallback(async (d = days) => {
     setErr(null);
     try {
+      // apiUrl(), not a bare path. The dashboard is served under /dash/ on the
+      // Hub, and a bare /api/... misses that prefix, hits the SPA fallback and
+      // returns index.html -- which surfaces as "Unexpected token '<'" rather
+      // than as a routing problem.
       const [p, c] = await Promise.all([
-        fetch('/api/model/paths').then((r) => r.json()),
-        fetch(`/api/model/scorecard?days=${d}`).then((r) => r.json()),
+        fetchJson(apiUrl('/api/model/paths')),
+        fetchJson(apiUrl(`/api/model/scorecard?days=${d}`)),
       ]);
       setPaths(p);
       setCard(c);

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { SystemHealthPanel } from './SystemHealthPanel';
+import { apiUrl } from '../utils/api';
 
 /**
  * Model dashboard — the rotation classifier, its training archive, and the
@@ -100,12 +101,12 @@ export const ModelSection: React.FC = () => {
   const refresh = useCallback(async (withStats = false) => {
     try {
       const [m, j] = await Promise.all([
-        fetch('/api/model/rotation/status').then((r) => r.json()),
-        fetch('/api/model/backfill/status').then((r) => r.json()),
+        fetch(apiUrl('/api/model/rotation/status')).then((r) => r.json()),
+        fetch(apiUrl('/api/model/backfill/status')).then((r) => r.json()),
       ]);
       setModel(m); setJob(j);
       if (withStats) {
-        const s = await fetch('/api/model/training/stats').then((r) => r.json());
+        const s = await fetch(apiUrl('/api/model/training/stats')).then((r) => r.json());
         setStats(s);
       }
     } catch { /* transient; the poll will retry */ }
@@ -141,7 +142,7 @@ export const ModelSection: React.FC = () => {
     if (!picked.size) return note('err', 'Select at least one day.');
     setBusy('start');
     try {
-      const r = await fetch('/api/model/backfill/start', {
+      const r = await fetch(apiUrl('/api/model/backfill/start'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ days: [...picked], sites, workers, full_day: false, min_tor: minTor }),
       });
