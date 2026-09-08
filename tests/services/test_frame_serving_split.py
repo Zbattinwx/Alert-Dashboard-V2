@@ -67,11 +67,24 @@ class TestEndpointsAreHonest:
         say the frames are disabled -- the same ambiguity that let a model which
         failed to load look like a model that was never trained."""
         from pathlib import Path
-        import backend.main as m
 
-        src = Path(m.__file__).read_text(encoding="utf-8")
-        i = src.find(f'@app.get("{route}')
-        assert i != -1, f"route {route} not found"
-        block = src[i:i + 1800]
+        import backend.main as m
+        import backend.routers as R
+
+        # The radar routes moved to backend/routers/radar.py. Search wherever
+        # they live rather than pinning the test to a file, or the next
+        # extraction breaks a test that is still telling the truth.
+        candidates = [Path(m.__file__)] + sorted(Path(R.__path__[0]).glob("*.py"))
+        block = None
+        for f in candidates:
+            src = f.read_text(encoding="utf-8")
+            for deco in ('@app.get("', '@router.get("'):
+                i = src.find(deco + route)
+                if i != -1:
+                    block = src[i:i + 1800]
+                    break
+            if block:
+                break
+        assert block is not None, f"route {route} not found in main.py or any router"
         assert "nexrad_serve_frames" in block, f"{route} does not check the flag"
         assert "disabled" in block.lower()

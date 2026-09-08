@@ -1060,6 +1060,52 @@ app = FastAPI(
 # without it the bundled radar app's fetches (cameras, MRMS) are CORS-blocked.
 # allow_credentials=False is required when using a wildcard/regex origin
 # (the CORS spec forbids credentials=True with non-specific origins).
+# Route groups extracted from this file. See backend/routers/.
+from .routers.brand import router as _brand_router
+app.include_router(_brand_router)
+from .routers.obs import router as _obs_router
+app.include_router(_obs_router)
+from .routers.lsr import router as _lsr_router
+app.include_router(_lsr_router)
+from .routers.alert_graphics import router as _alert_graphics_router
+app.include_router(_alert_graphics_router)
+from .routers.stream import router as _stream_router
+app.include_router(_stream_router)
+from .routers.placefile import router as _placefile_router
+app.include_router(_placefile_router)
+from .routers.alerts import router as _alerts_router
+app.include_router(_alerts_router)
+from .routers.radar import router as _radar_router
+app.include_router(_radar_router)
+from .routers.spc import router as _spc_router
+app.include_router(_spc_router)
+from .routers.hrrr import router as _hrrr_router
+app.include_router(_hrrr_router)
+from .routers.meso import router as _meso_router
+app.include_router(_meso_router)
+from .routers.nwws import router as _nwws_router
+app.include_router(_nwws_router)
+from .routers.debug import router as _debug_router
+app.include_router(_debug_router)
+from .routers.chase_logs import router as _chase_logs_router
+app.include_router(_chase_logs_router)
+from .routers.afd import router as _afd_router
+app.include_router(_afd_router)
+from .routers.wind_gusts import router as _wind_gusts_router
+app.include_router(_wind_gusts_router)
+from .routers.assistant import router as _assistant_router
+app.include_router(_assistant_router)
+from .routers.social import router as _social_router
+app.include_router(_social_router)
+from .routers.goes import router as _goes_router
+app.include_router(_goes_router)
+from .routers.odot import router as _odot_router
+app.include_router(_odot_router)
+from .routers.agent import router as _agent_router
+app.include_router(_agent_router)
+from .routers.model import router as _model_router
+app.include_router(_model_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
@@ -1092,15 +1138,16 @@ logger.info(f"Hub login gate: {'ENABLED' if _hub_auth_enabled() else 'disabled (
 # Static Files (Frontend)
 # =============================================================================
 
-# Path to the frontend build directory
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
+# Shared filesystem locations. These were defined here, which made them the last
+# thing blocking seven route groups from moving out -- a router cannot import
+# from main.py, because main.py imports the router.
+from .paths import FRONTEND_DIR, SOUNDS_DIR, GRAPHICS_DIR as _GRAPHICS_DIR, ensure_runtime_dirs
 
 # Path to the widgets directory
 WIDGETS_DIR = Path(__file__).parent.parent / "widgets"
 
 # Path to custom alert sounds
-SOUNDS_DIR = Path("data/sounds")
-SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
+ensure_runtime_dirs()
 
 # Mount static files if the build directory exists
 if FRONTEND_DIR.exists():
@@ -1189,74 +1236,10 @@ async def health_check():
     }
 
 
-@app.get("/api/alerts")
-async def get_alerts(
-    state: Optional[str] = Query(None, description="Filter by state code (e.g., OH)"),
-    phenomenon: Optional[str] = Query(None, description="Filter by phenomenon code (e.g., TO)"),
-    priority: bool = Query(True, description="Sort by priority"),
-):
-    """
-    Get all active alerts.
-
-    Returns list of active weather alerts, optionally filtered.
-    """
-    alert_manager = get_alert_manager()
-
-    if state:
-        alerts = alert_manager.get_alerts_by_state(state)
-    elif phenomenon:
-        alerts = alert_manager.get_alerts_by_phenomenon(phenomenon)
-    else:
-        alerts = alert_manager.get_alerts_sorted(by_priority=priority)
-
-    return {
-        "count": len(alerts),
-        "alerts": [alert.to_dict() for alert in alerts],
-    }
 
 
-@app.get("/api/alerts/{product_id}")
-async def get_alert(product_id: str):
-    """Get a specific alert by product ID."""
-    alert_manager = get_alert_manager()
-    alert = alert_manager.get_alert(product_id)
-
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
-    return alert.to_dict()
 
 
-@app.post("/api/alerts/{product_id}/impact-scan")
-async def scan_alert_impact(product_id: str, push: bool = True, force: bool = False):
-    """Scan a warning polygon for at-risk places via OpenStreetMap/Overpass.
-
-    Returns the categorized impacted places (towns, mobile home parks, schools,
-    hospitals/care). When ``push`` is true and the scan found anything, the
-    result is also broadcast to the on-stream impact widget.
-    """
-    alert_manager = get_alert_manager()
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    if not alert.polygon or len(alert.polygon) < 3:
-        raise HTTPException(status_code=422, detail="Alert has no polygon to scan")
-
-    try:
-        from .services.osm_impact_service import get_osm_impact_service
-    except ImportError:
-        from backend.services.osm_impact_service import get_osm_impact_service
-
-    service = get_osm_impact_service()
-    result = await service.scan(
-        product_id, alert.polygon, event_name=alert.event_name, force=force
-    )
-
-    if push and result.get("total", 0) > 0:
-        broker = get_message_broker()
-        await broker.broadcast_impact_places(result)
-
-    return result
 
 
 @app.post("/api/impact/clear")
@@ -1267,31 +1250,8 @@ async def clear_impact_overlay():
     return {"success": True}
 
 
-@app.post("/api/alerts/{product_id}/focus")
-async def focus_alert_on_map(product_id: str):
-    """Tell map clients (the radar app) to zoom to and flash this alert.
-
-    Broadcasts the full alert dict so clients have the polygon, centroid, and
-    detail fields without another lookup.
-    """
-    alert_manager = get_alert_manager()
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    broker = get_message_broker()
-    await broker.broadcast_focus_alert(alert.to_dict())
-    return {"success": True}
 
 
-@app.delete("/api/alerts/{product_id}")
-async def clear_alert_manual(product_id: str):
-    """Manually clear an alert by product ID."""
-    alert_manager = get_alert_manager()
-
-    if alert_manager.remove_alert(product_id, reason="MANUAL"):
-        return {"success": True, "message": f"Alert {product_id} cleared manually"}
-    
-    raise HTTPException(status_code=404, detail="Alert not found or already removed")
 
 
 @app.get("/api/stats")
@@ -1549,24 +1509,10 @@ async def get_map_zones():
 # Current on-air radar product, shown by the stream's upper-third overlay.
 # Driven by the AutoHotkey passthrough hotkeys (same keys that switch the radar
 # app), so the label always matches what's on screen.
-_current_radar_product = "reflectivity"
+# Moved to backend/runtime_state.py: two route groups read it, and a module
+# variable cannot be shared across routers with `global`.
 
 
-@app.get("/api/stream/radar-product")
-async def stream_radar_product(value: Optional[str] = Query(None, alias="set")):
-    """
-    Get or set the on-air radar product label for the stream overlay.
-
-    - `GET /api/stream/radar-product`            → current product
-    - `GET /api/stream/radar-product?set=velocity` → set it + broadcast to overlays
-
-    GET-to-set keeps it trivial to call from AutoHotkey / curl on localhost.
-    """
-    global _current_radar_product
-    if value is not None:
-        _current_radar_product = value.strip().lower()
-        await get_message_broker().broadcast_radar_product(_current_radar_product)
-    return {"product": _current_radar_product}
 
 
 @app.get("/api/recent")
@@ -1617,149 +1563,26 @@ async def get_system_status():
 # never ship a .env). With credentials the dashboard gets instant alerts; without
 # them it falls back to NWS-API polling. Credentials persist per-user (app-data),
 # so the app only needs to ask once.
-class NWWSCredentialsUpdate(BaseModel):
-    username: str = Field(default="", description="NWWS-OI username (blank to clear)")
-    password: str = Field(default="", description="NWWS-OI password (blank to clear)")
 
 
-@app.get("/api/nwws/status")
-async def get_nwws_status():
-    """Whether NWWS is configured and connected (for the app's setup prompt)."""
-    settings = get_settings()
-    handler = get_nwws_handler()
-    return {
-        "configured": bool(settings.nwws_username and settings.nwws_password),
-        "connected": handler.is_connected if handler else False,
-        "username": settings.nwws_username or None,
-    }
 
 
-@app.post("/api/nwws/credentials")
-async def set_nwws_credentials(update: NWWSCredentialsUpdate):
-    """Save (or clear) the user's NWWS-OI credentials and reconnect.
-
-    Blank username/password clears the stored credentials → NWS-API fallback.
-    """
-    from .config.settings import save_nwws_credentials, reload_settings
-    from .services import restart_nwws_handler
-
-    username = (update.username or "").strip()
-    password = (update.password or "").strip()
-    save_nwws_credentials(username, password)
-    reload_settings()
-    try:
-        await restart_nwws_handler()
-    except Exception as e:
-        logger.error(f"Failed to (re)start NWWS after credential change: {e}")
-
-    settings = get_settings()
-    configured = bool(settings.nwws_username and settings.nwws_password)
-    logger.info(f"NWWS credentials {'set' if configured else 'cleared'} via API")
-    return {
-        "success": True,
-        "configured": configured,
-        "username": settings.nwws_username or None,
-    }
 
 
-def _resolve_brand_id(brand: Optional[str]) -> str:
-    """Resolve a requested white-label brand id, falling back to the active one
-    if none/invalid. Lets a stream overlay switch branding via ?brand=<id>."""
-    settings = get_settings()
-    if brand:
-        cand = brand.strip().lower()
-        if (brands_dir() / f"{cand}.json").exists():
-            return cand
-    return settings.brand
 
 
-@app.get("/api/brand")
-async def get_brand(brand: Optional[str] = Query(None, description="White-label brand override; defaults to the active brand")):
-    """Get brand configuration for the frontend + radar app (white-label).
-
-    Optional ?brand=<id> serves a specific brand (when a config exists) so a
-    stream overlay can switch branding by URL; otherwise the active brand.
-    """
-    brand_id = _resolve_brand_id(brand)
-    bcfg = get_brand_config(brand_id)
-    return {
-        "brand_id": brand_id,
-        "name": bcfg.name,
-        "short_name": bcfg.short_name,
-        "tagline": bcfg.tagline,
-        "logo": bcfg.logo,
-        "logo_url": f"/api/brand/logo?brand={brand_id}",  # matches the returned brand
-        "logo_is_wordmark": bcfg.logo_is_wordmark,
-        "colors": bcfg.colors.model_dump(),  # semantic palette; clients map to their own CSS vars
-        "website_url": bcfg.website_url,
-        "social_twitter": bcfg.social_twitter,
-        "css_overrides": bcfg.css_overrides,
-    }
 
 
-@app.get("/api/brand/logo")
-async def get_brand_logo(brand: Optional[str] = Query(None, description="White-label brand override; defaults to the active brand")):
-    """Serve a brand's logo (white-label), with default/TBF fallback."""
-    bcfg = get_brand_config(_resolve_brand_id(brand))
-    path = bcfg.get_asset_path(bcfg.logo, brands_dir())
-    if path.exists():
-        return FileResponse(path)
-    fallback = FRONTEND_DIR / "tbf_logo.png"
-    if fallback.exists():
-        return FileResponse(fallback, media_type="image/png")
-    raise HTTPException(status_code=404, detail="Brand logo not found")
 
 
 # =============================================================================
 # LSR (Local Storm Reports) Endpoints
 # =============================================================================
 
-@app.get("/api/lsr")
-async def get_storm_reports(
-    hours: int = Query(24, ge=1, le=168, description="Lookback period in hours"),
-    report_type: Optional[str] = Query(None, description="Filter by report type"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get Local Storm Reports from Iowa State Mesonet.
-
-    Returns tornado, hail, wind, flood, and other severe weather reports.
-    """
-    lsr_service = get_lsr_service()
-    settings = get_settings()
-
-    # Fetch reports
-    reports = await lsr_service.fetch_reports(
-        states=settings.filter_states,
-        hours=hours,
-        force_refresh=refresh,
-    )
-
-    # Filter by type if specified
-    if report_type:
-        reports = [r for r in reports if r.report_type.upper() == report_type.upper()]
-
-    return {
-        "count": len(reports),
-        "reports": [r.to_dict() for r in reports],
-        "type_colors": LSR_TYPE_COLORS,
-    }
 
 
-@app.get("/api/lsr/stats")
-async def get_lsr_stats():
-    """Get LSR statistics."""
-    lsr_service = get_lsr_service()
-    return lsr_service.get_statistics()
 
 
-@app.get("/api/lsr/types")
-async def get_lsr_types():
-    """Get available LSR types and their colors."""
-    return {
-        "types": list(LSR_TYPE_COLORS.keys()),
-        "colors": LSR_TYPE_COLORS,
-    }
 
 
 @app.get("/api/proxy/spc-image")
@@ -1836,159 +1659,18 @@ async def proxy_mesoanalysis(
         raise HTTPException(status_code=502, detail=f"Failed to fetch from SPC: {e}")
 
 
-_PLACEFILE_MAX_BYTES = 5 * 1024 * 1024  # placefiles + icon sheets are small
 
 
-def _placefile_url_ok(url: str) -> bool:
-    """SSRF guard for the placefile proxy: http/https only, and the host must
-    not resolve to loopback/private/link-local/reserved space (the dashboard is
-    reachable over DDNS, so this endpoint is not local-only in practice)."""
-    import ipaddress
-    import socket
-    from urllib.parse import urlparse
-
-    p = urlparse(url)
-    if p.scheme not in ("http", "https") or not p.hostname:
-        return False
-    try:
-        infos = socket.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80))
-    except OSError:
-        return False
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        if (
-            ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
-        ):
-            return False
-    return True
 
 
-@app.get("/api/placefile")
-async def proxy_placefile(url: str = Query(..., description="GR placefile (or icon image) URL")):
-    """Proxy a GR placefile or its icon image so the browser can load it despite
-    CORS. Presents a GR-compatible User-Agent (placefile hosts gate on it).
-    SSRF-guarded: public http/https hosts only, redirects re-validated per hop,
-    response size capped."""
-    from fastapi.responses import Response
-
-    if not await asyncio.to_thread(_placefile_url_ok, url):  # DNS lookup — off the loop
-        raise HTTPException(status_code=400, detail="URL not allowed")
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Follow up to 3 redirects manually so every hop is re-validated —
-            # an allowed public host could otherwise redirect us to the LAN.
-            target = url
-            for _ in range(4):
-                async with session.get(
-                    target,
-                    timeout=aiohttp.ClientTimeout(total=20),
-                    headers={"User-Agent": "GRLevel3 2.0 (TheBattinFront Radar placefile client)"},
-                    allow_redirects=False,
-                ) as resp:
-                    if resp.status in (301, 302, 303, 307, 308):
-                        loc = resp.headers.get("Location")
-                        if not loc:
-                            raise HTTPException(status_code=502, detail="Bad redirect from upstream")
-                        from urllib.parse import urljoin
-                        target = urljoin(target, loc)
-                        if not await asyncio.to_thread(_placefile_url_ok, target):
-                            raise HTTPException(status_code=400, detail="URL not allowed")
-                        continue
-                    if resp.status != 200:
-                        raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
-                    if int(resp.headers.get("Content-Length") or 0) > _PLACEFILE_MAX_BYTES:
-                        raise HTTPException(status_code=502, detail="Upstream response too large")
-                    data = bytearray()
-                    async for chunk in resp.content.iter_chunked(64 * 1024):
-                        data.extend(chunk)
-                        if len(data) > _PLACEFILE_MAX_BYTES:
-                            raise HTTPException(status_code=502, detail="Upstream response too large")
-                    ctype = resp.headers.get("Content-Type", "text/plain; charset=utf-8")
-                    return Response(content=bytes(data), media_type=ctype, headers={"Cache-Control": "no-store"})
-            raise HTTPException(status_code=502, detail="Too many redirects")
-    except aiohttp.ClientError as e:
-        logger.error(f"Placefile proxy fetch failed for {url}: {e}")
-        raise HTTPException(status_code=502, detail="Fetch failed")
 
 
-@app.get("/api/lsr/summary-graphic")
-async def get_lsr_summary_graphic(
-    hours: int = Query(24, ge=1, le=168, description="Lookback hours"),
-    title: Optional[str] = Query(None, description="Graphic title override"),
-    save: bool = Query(False, description="Also save to alert graphics gallery"),
-):
-    """
-    Generate a server-side rendered LSR damage survey summary graphic (PNG).
-
-    Returns a PNG image showing storm report markers on a coordinate map
-    with a stats panel. Suitable for recap posts and on-stream display.
-    """
-    from fastapi.responses import StreamingResponse
-    import io
-
-    try:
-        from .services.lsr_graphic_service import generate_lsr_summary_graphic
-    except ImportError:
-        from backend.services.lsr_graphic_service import generate_lsr_summary_graphic
-
-    lsr_service = get_lsr_service()
-    settings = get_settings()
-    brand = get_brand_config(settings.brand)
-
-    reports = await lsr_service.fetch_reports(states=settings.filter_states, hours=hours)
-
-    if title is None:
-        title = f"Storm Report Summary — {', '.join(settings.filter_states) if settings.filter_states else 'All States'}"
-
-    try:
-        png_bytes = generate_lsr_summary_graphic(
-            reports=reports,
-            title=title,
-            hours=hours,
-            brand_name=brand.name,
-            states=settings.filter_states or None,
-        )
-    except Exception as e:
-        logger.exception(f"LSR summary graphic generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Graphic generation failed: {e}")
-
-    if save:
-        import re as _re
-        import json as _json
-        from datetime import datetime, timezone
-        _GRAPHICS_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        safe_id = f"lsr_summary_{ts}"
-        img_path = _GRAPHICS_DIR / f"{safe_id}.png"
-        img_path.write_bytes(png_bytes)
-        meta_path = _GRAPHICS_DIR / f"{safe_id}.json"
-        meta_path.write_text(_json.dumps({"product_id": safe_id, "event_name": title}))
-        logger.info(f"Saved LSR summary graphic: {safe_id}.png")
-
-    return StreamingResponse(
-        io.BytesIO(png_bytes),
-        media_type="image/png",
-        headers={"Content-Disposition": f'inline; filename="lsr_summary.png"'},
-    )
 
 
 # =============================================================================
 # Viewer Report Models
 # =============================================================================
 
-class ViewerReportSubmission(BaseModel):
-    """Model for viewer report submission from dashboard."""
-    report_type: str = Field(..., description="Report type (TORNADO, HAIL, etc.)")
-    lat: float = Field(..., description="Latitude")
-    lon: float = Field(..., description="Longitude")
-    magnitude: Optional[str] = Field(None, description="Magnitude (e.g., '1.00 INCH', '65 MPH')")
-    remarks: Optional[str] = Field(None, description="Additional remarks")
-    location: Optional[str] = Field(None, description="Human-readable location")
-    submitter: Optional[str] = Field("Anonymous", description="Submitter name")
 
 
 class WebsiteReportSubmission(BaseModel):
@@ -2008,135 +1690,14 @@ class WebsiteReportSubmission(BaseModel):
 # Viewer Report Endpoints
 # =============================================================================
 
-@app.get("/api/lsr/all")
-async def get_all_storm_reports(
-    hours: int = Query(24, ge=1, le=168, description="Lookback period in hours"),
-    report_type: Optional[str] = Query(None, description="Filter by report type"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get all storm reports (official + viewer).
-
-    Official reports are filtered by state settings, viewer reports are always included.
-    """
-    lsr_service = get_lsr_service()
-    settings = get_settings()
-
-    # Fetch official reports (filtered by state)
-    await lsr_service.fetch_reports(
-        states=settings.filter_states,
-        hours=hours,
-        force_refresh=refresh,
-    )
-
-    # Get all reports (official filtered by state + all viewer reports)
-    reports = lsr_service.get_all_reports(states=settings.filter_states)
-
-    # Filter by type if specified
-    if report_type:
-        reports = [r for r in reports if r.report_type.upper() == report_type.upper()]
-
-    return {
-        "count": len(reports),
-        "reports": [r.to_dict() for r in reports],
-        "viewer_count": sum(1 for r in reports if r.is_viewer),
-        "type_colors": LSR_TYPE_COLORS,
-    }
 
 
-@app.get("/api/lsr/viewer")
-async def get_viewer_reports():
-    """Get all viewer-submitted reports."""
-    lsr_service = get_lsr_service()
-    reports = lsr_service.get_manual_reports()
-
-    return {
-        "count": len(reports),
-        "reports": [r.to_dict() for r in reports],
-    }
 
 
-@app.post("/api/lsr/viewer")
-async def submit_viewer_report(report: ViewerReportSubmission):
-    """
-    Submit a storm report from the dashboard.
-
-    Used for manual report entry by dashboard users.
-    """
-    lsr_service = get_lsr_service()
-
-    # Normalize report type
-    report_type = report.report_type.upper()
-
-    # Create StormReport
-    storm_report = StormReport(
-        id=f"viewer_{uuid.uuid4().hex[:12]}",
-        report_type=report_type,
-        magnitude=report.magnitude,
-        lat=report.lat,
-        lon=report.lon,
-        valid_time=datetime.now(timezone.utc).isoformat(),
-        remark=report.remarks or "",
-        location_text=report.location or "",
-        submitter=report.submitter or "Anonymous",
-        is_viewer=True,
-        source="VIEWER",
-    )
-
-    lsr_service.add_manual_report(storm_report)
-
-    # Broadcast to WebSocket clients
-    broker = get_message_broker()
-    await broker.broadcast(
-        MessageType.SYSTEM_STATUS,
-        {
-            "event": "viewer_report_added",
-            "report": storm_report.to_dict(),
-        }
-    )
-
-    return {
-        "success": True,
-        "report": storm_report.to_dict(),
-    }
 
 
-@app.delete("/api/lsr/viewer/{report_id}")
-async def remove_viewer_report(report_id: str):
-    """Remove a viewer-submitted report by ID."""
-    lsr_service = get_lsr_service()
-
-    if lsr_service.remove_manual_report(report_id):
-        # Broadcast removal to WebSocket clients
-        broker = get_message_broker()
-        await broker.broadcast(
-            MessageType.SYSTEM_STATUS,
-            {
-                "event": "viewer_report_removed",
-                "report_id": report_id,
-            }
-        )
-        return {"success": True, "message": f"Report {report_id} removed"}
-
-    raise HTTPException(status_code=404, detail="Viewer report not found")
 
 
-@app.delete("/api/lsr/viewer")
-async def clear_viewer_reports():
-    """Clear all viewer-submitted reports."""
-    lsr_service = get_lsr_service()
-    lsr_service.clear_manual_reports()
-
-    # Broadcast to WebSocket clients
-    broker = get_message_broker()
-    await broker.broadcast(
-        MessageType.SYSTEM_STATUS,
-        {
-            "event": "viewer_reports_cleared",
-        }
-    )
-
-    return {"success": True, "message": "All viewer reports cleared"}
 
 
 @app.post("/api/submit_storm_report")
@@ -2278,425 +1839,30 @@ async def get_all_cameras(
 # ODOT (Ohio DOT) Endpoints
 # =============================================================================
 
-@app.get("/api/odot/cameras")
-async def get_odot_cameras(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get all ODOT traffic cameras.
 
-    Returns camera locations with live image URLs.
-    """
-    odot_service = get_odot_service()
-    cameras = await odot_service.fetch_cameras(force_refresh=refresh)
 
-    return {
-        "count": len(cameras),
-        "cameras": [c.to_dict() for c in cameras],
-    }
 
 
-@app.get("/api/odot/sensors")
-async def get_odot_sensors(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get all ODOT road weather sensors.
 
-    Returns sensor data including pavement and air temperatures.
-    """
-    odot_service = get_odot_service()
-    sensors = await odot_service.fetch_sensors(force_refresh=refresh)
 
-    return {
-        "count": len(sensors),
-        "sensors": [s.to_dict() for s in sensors],
-    }
 
 
-@app.get("/api/odot/cold-sensors")
-async def get_cold_sensors(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get sensors with cold pavement (below threshold).
 
-    Returns sensors sorted by temperature (coldest first).
-    """
-    settings = get_settings()
-    odot_service = get_odot_service()
 
-    # Ensure we have fresh data
-    await odot_service.fetch_sensors(force_refresh=refresh)
 
-    cold_sensors = odot_service.get_cold_sensors()
-    freezing_sensors = odot_service.get_freezing_sensors()
 
-    # Sort by pavement temperature (coldest first)
-    cold_sensors.sort(key=lambda s: s.pavement_temp if s.pavement_temp is not None else 100)
 
-    return {
-        "count": len(cold_sensors),
-        "freezing_count": len(freezing_sensors),
-        "cold_threshold": settings.cold_pavement_threshold,
-        "freezing_threshold": settings.freezing_pavement_threshold,
-        "sensors": [s.to_dict() for s in cold_sensors],
-    }
 
-
-@app.get("/api/odot/cameras-in-alerts")
-async def get_cameras_in_alerts(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get cameras that are inside active weather alert polygons.
-
-    Only checks alerts matching the configured camera_alert_phenomena.
-    """
-    settings = get_settings()
-    odot_service = get_odot_service()
-    alert_manager = get_alert_manager()
-
-    # Ensure we have fresh camera data
-    await odot_service.fetch_cameras(force_refresh=refresh)
-
-    # Get all active alerts with polygons
-    alerts = alert_manager.get_alerts_sorted()
-    alert_dicts = [a.to_dict() for a in alerts]
-
-    # Find cameras in alerts
-    cameras_in_alerts = odot_service.find_cameras_in_alerts(
-        alert_dicts,
-        phenomena_filter=settings.camera_alert_phenomena
-    )
-
-    return {
-        "count": len(cameras_in_alerts),
-        "phenomena_filter": settings.camera_alert_phenomena,
-        "cameras": [c.to_dict() for c in cameras_in_alerts],
-    }
-
-
-@app.get("/api/odot/stats")
-async def get_odot_stats():
-    """Get ODOT service statistics."""
-    odot_service = get_odot_service()
-    return odot_service.get_statistics()
-
-
-# =============================================================================
-# SPC (Storm Prediction Center) Endpoints
-# =============================================================================
-
-@app.get("/api/spc/outlooks")
-async def get_spc_outlooks(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get all SPC convective outlooks (Day 1-3).
-
-    Returns categorical outlooks with risk level polygons.
-    """
-    spc_service = get_spc_service()
-
-    if refresh:
-        await spc_service.fetch_all_outlooks(force_refresh=True)
-    else:
-        # Fetch day1 categorical if not cached
-        await spc_service.fetch_outlook("day1_categorical")
-
-    outlooks = {}
-    for key in ["day1_categorical", "day2_categorical", "day3_categorical"]:
-        outlook = spc_service._outlooks.get(key)
-        if outlook:
-            outlooks[key] = outlook.to_dict()
-
-    return {
-        "outlooks": outlooks,
-        "risk_colors": RISK_COLORS,
-        "risk_names": RISK_NAMES,
-    }
-
-
-@app.get("/api/spc/outlook/{outlook_key}")
-async def get_spc_outlook(
-    outlook_key: str,
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get a specific SPC outlook.
-
-    Valid outlook_key values:
-    - day1_categorical, day2_categorical, day3_categorical
-    - day1_tornado, day1_wind, day1_hail
-    """
-    spc_service = get_spc_service()
-    outlook = await spc_service.fetch_outlook(outlook_key, force_refresh=refresh)
-
-    if not outlook:
-        raise HTTPException(status_code=404, detail=f"Outlook '{outlook_key}' not found or unavailable")
-
-    return {
-        "outlook": outlook.to_dict(),
-        "risk_colors": RISK_COLORS,
-        "risk_names": RISK_NAMES,
-    }
-
-
-@app.get("/api/spc/day1")
-async def get_spc_day1(
-    include_probabilities: bool = Query(False, description="Include probabilistic outlooks"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get Day 1 SPC outlooks.
-
-    Returns categorical outlook and optionally tornado/wind/hail probabilities.
-    """
-    spc_service = get_spc_service()
-
-    # Always fetch categorical
-    categorical = await spc_service.fetch_outlook("day1_categorical", force_refresh=refresh)
-
-    result = {
-        "categorical": categorical.to_dict() if categorical else None,
-        "risk_colors": RISK_COLORS,
-        "risk_names": RISK_NAMES,
-    }
-
-    if include_probabilities:
-        tornado = await spc_service.fetch_outlook("day1_tornado", force_refresh=refresh)
-        wind = await spc_service.fetch_outlook("day1_wind", force_refresh=refresh)
-        hail = await spc_service.fetch_outlook("day1_hail", force_refresh=refresh)
-        # CIG (Conditional Intensity Group) overlays
-        cig_torn = await spc_service.fetch_outlook("day1_cigtorn", force_refresh=refresh)
-        cig_wind = await spc_service.fetch_outlook("day1_cigwind", force_refresh=refresh)
-        cig_hail = await spc_service.fetch_outlook("day1_cighail", force_refresh=refresh)
-
-        result["tornado"] = tornado.to_dict() if tornado else None
-        result["wind"] = wind.to_dict() if wind else None
-        result["hail"] = hail.to_dict() if hail else None
-        result["cig_tornado"] = cig_torn.to_dict() if cig_torn and cig_torn.polygons else None
-        result["cig_wind"] = cig_wind.to_dict() if cig_wind and cig_wind.polygons else None
-        result["cig_hail"] = cig_hail.to_dict() if cig_hail and cig_hail.polygons else None
-
-    return result
-
-
-@app.get("/api/spc/mesoscale-discussions")
-async def get_mesoscale_discussions(
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get current SPC Mesoscale Discussions.
-
-    Mesoscale discussions are filtered to states matching filter_states setting.
-    """
-    settings = get_settings()
-    spc_service = get_spc_service()
-
-    mds = await spc_service.fetch_mesoscale_discussions(force_refresh=refresh)
-
-    # Filter by configured states
-    filtered_mds = spc_service.filter_mds_by_states(mds, settings.filter_states)
-
-    return {
-        "count": len(filtered_mds),
-        "total_count": len(mds),
-        "filter_states": settings.filter_states,
-        "discussions": [md.to_dict() for md in filtered_mds],
-    }
-
-
-@app.get("/api/spc/state-images")
-async def get_spc_state_images(
-    day: int = Query(1, ge=1, le=3, description="Outlook day (1-3)"),
-):
-    """
-    Get state-specific SPC outlook image URLs.
-
-    Returns image URLs for each state in filter_states setting.
-    """
-    settings = get_settings()
-    spc_service = get_spc_service()
-
-    state_images = spc_service.get_state_outlook_urls(settings.filter_states, day=day)
-
-    return {
-        "day": day,
-        "states": settings.filter_states,
-        "images": state_images,
-    }
-
-
-@app.get("/api/spc/risk-at-point")
-async def get_risk_at_point(
-    lat: float = Query(..., description="Latitude"),
-    lon: float = Query(..., description="Longitude"),
-    outlook_key: str = Query("day1_categorical", description="Which outlook to check"),
-):
-    """
-    Get the highest risk level at a specific point.
-
-    Useful for checking what risk level affects a specific location.
-    """
-    spc_service = get_spc_service()
-
-    # Ensure we have the outlook data
-    await spc_service.fetch_outlook(outlook_key)
-
-    risk = spc_service.get_highest_risk_for_point(lat, lon, outlook_key)
-
-    if not risk:
-        return {
-            "lat": lat,
-            "lon": lon,
-            "outlook_key": outlook_key,
-            "risk": None,
-            "message": "No risk at this location",
-        }
-
-    return {
-        "lat": lat,
-        "lon": lon,
-        "outlook_key": outlook_key,
-        "risk": risk.to_dict(),
-    }
-
-
-@app.get("/api/spc/discussion")
-async def get_spc_discussion(
-    day: int = Query(1, ge=1, le=3, description="Outlook day (1-3)"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get SPC outlook discussion text.
-
-    Returns the official SPC discussion text for the specified day.
-    """
-    spc_service = get_spc_service()
-    text = await spc_service.fetch_discussion(day=day, force_refresh=refresh)
-
-    if not text:
-        raise HTTPException(status_code=404, detail=f"Day {day} discussion not available")
-
-    return {
-        "day": day,
-        "text": text,
-        "url": f"https://www.spc.noaa.gov/products/outlook/day{day}otlk.html",
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-@app.get("/api/spc/stats")
-async def get_spc_stats():
-    """Get SPC service statistics."""
-    spc_service = get_spc_service()
-    return spc_service.get_statistics()
 
 
 # =============================================================================
 # Wind Gusts Endpoints
 # =============================================================================
 
-@app.get("/api/wind-gusts")
-async def get_wind_gusts(
-    hours: int = Query(1, ge=1, le=24, description="Lookback period in hours"),
-    limit: int = Query(15, ge=1, le=100, description="Maximum number of results"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get top wind gust observations from ASOS stations.
-
-    Returns wind gusts from Iowa State Mesonet for configured filter_states.
-    """
-    settings = get_settings()
-    wind_service = get_wind_gusts_service()
-
-    # Use filter_states or defaults if empty
-    states_to_use = settings.filter_states if settings.filter_states else DEFAULT_GUST_STATES
-
-    gusts = await wind_service.fetch_gusts(
-        states=states_to_use,
-        hours=hours,
-        limit=limit,
-        force_refresh=refresh,
-    )
-
-    # Group by state for frontend display
-    gusts_by_state = wind_service.get_gusts_by_state(gusts)
-
-    return {
-        "count": len(gusts),
-        "filter_states": states_to_use,
-        "thresholds": {
-            "significant": GUST_THRESHOLD_SIGNIFICANT,
-            "severe": GUST_THRESHOLD_SEVERE,
-            "advisory": GUST_THRESHOLD_ADVISORY,
-        },
-        "gusts": [g.to_dict() for g in gusts],
-        "by_state": {
-            state: [g.to_dict() for g in state_gusts]
-            for state, state_gusts in gusts_by_state.items()
-        },
-    }
 
 
-@app.get("/api/wind-gusts/by-state")
-async def get_wind_gusts_by_state(
-    hours: int = Query(1, ge=1, le=24, description="Lookback period in hours"),
-    limit_per_state: int = Query(5, ge=1, le=50, description="Maximum results per state"),
-    refresh: bool = Query(False, description="Force refresh from API"),
-):
-    """
-    Get wind gusts organized by state.
-
-    Returns gusts grouped by state with a per-state limit.
-    """
-    settings = get_settings()
-    wind_service = get_wind_gusts_service()
-
-    # Use filter_states or defaults if empty
-    states_to_use = settings.filter_states if settings.filter_states else DEFAULT_GUST_STATES
-
-    # Fetch all gusts (higher limit to allow per-state filtering)
-    gusts = await wind_service.fetch_gusts(
-        states=states_to_use,
-        hours=hours,
-        limit=100,
-        force_refresh=refresh,
-    )
-
-    # Group by state and limit each
-    gusts_by_state = wind_service.get_gusts_by_state(gusts)
-    result = {}
-    total = 0
-
-    for state in states_to_use:
-        if state in gusts_by_state:
-            state_gusts = gusts_by_state[state][:limit_per_state]
-            result[state] = [g.to_dict() for g in state_gusts]
-            total += len(state_gusts)
-        else:
-            result[state] = []
-
-    return {
-        "count": total,
-        "filter_states": states_to_use,
-        "thresholds": {
-            "significant": GUST_THRESHOLD_SIGNIFICANT,
-            "severe": GUST_THRESHOLD_SEVERE,
-            "advisory": GUST_THRESHOLD_ADVISORY,
-        },
-        "by_state": result,
-    }
 
 
-@app.get("/api/wind-gusts/stats")
-async def get_wind_gusts_stats():
-    """Get wind gusts service statistics."""
-    wind_service = get_wind_gusts_service()
-    return wind_service.get_statistics()
 
 
 # =============================================================================
@@ -2743,393 +1909,38 @@ async def get_asos_observations(
 # NWWS Products Feed Endpoints
 # =============================================================================
 
-@app.get("/api/nwws/products")
-async def get_nwws_products_feed(
-    limit: int = Query(50, ge=1, le=500, description="Number of products to return"),
-    offset: int = Query(0, ge=0, description="Offset for pagination"),
-    product_type: Optional[str] = Query(None, description="Filter by product type (e.g., SVS, FFW, AFD)"),
-    office: Optional[str] = Query(None, description="Filter by office code (e.g., CLE)"),
-):
-    """Get recent NWWS products for monitoring NWWS connection health."""
-    service = get_nwws_products_service()
-    nwws_handler = get_nwws_handler()
-
-    products = service.get_products(
-        limit=limit,
-        offset=offset,
-        product_type=product_type,
-        office=office,
-    )
-
-    return {
-        "count": len(products),
-        "total_received": service.get_product_count(),
-        "nwws_connected": nwws_handler.is_connected if nwws_handler else False,
-        "products": products,
-    }
 
 
-@app.get("/api/nwws/stats")
-async def get_nwws_products_stats():
-    """Get NWWS products service statistics."""
-    service = get_nwws_products_service()
-    nwws_handler = get_nwws_handler()
-
-    stats = service.get_statistics()
-    stats["nwws_connected"] = nwws_handler.is_connected if nwws_handler else False
-    return stats
 
 
 # =============================================================================
 # AFD (Area Forecast Discussion) Endpoints
 # =============================================================================
 
-@app.get("/api/afd")
-async def get_afd_offices():
-    """Get list of offices with available AFDs."""
-    service = get_nwws_products_service()
-    offices = service.get_afd_offices()
-
-    return {
-        "count": len(offices),
-        "offices": offices,
-    }
 
 
-@app.get("/api/afd/{office}")
-async def get_afd(
-    office: str,
-    index: int = Query(0, ge=0, le=4, description="AFD index (0=latest, up to 4)"),
-    fallback: bool = Query(True, description="Fetch from NWS API if not cached"),
-):
-    """Get AFD for a specific office. Checks NWWS cache first, then NWS API."""
-    service = get_nwws_products_service()
-
-    # Try NWWS cache first
-    afd = service.get_afd(office, index=index)
-
-    if afd:
-        return {
-            "source": "nwws",
-            "afd": afd,
-        }
-
-    # Fallback to NWS API
-    if fallback and index == 0:
-        afd = await service.fetch_afd_from_api(office)
-        if afd:
-            return {
-                "source": "api",
-                "afd": afd,
-            }
-
-    raise HTTPException(
-        status_code=404,
-        detail=f"No AFD available for office '{office.upper()}'"
-    )
 
 
-@app.get("/api/afd/{office}/headlines")
-async def get_afd_headlines(
-    office: str,
-    count: int = Query(4, ge=1, le=6, description="Number of headlines to extract"),
-):
-    """Extract weather headlines from an AFD for social media graphics."""
-    service = get_nwws_products_service()
-
-    # Try NWWS cache first
-    afd = service.get_afd(office)
-
-    # Fallback to API
-    if not afd:
-        afd = await service.fetch_afd_from_api(office)
-
-    if not afd:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No AFD available for office '{office.upper()}'"
-        )
-
-    headlines = await service.extract_headlines_llm(afd, max_headlines=count)
-
-    return {
-        "office": afd.get("office", office.upper()),
-        "wfo_name": afd.get("wfo_name", ""),
-        "received_at": afd.get("received_at", ""),
-        "headlines": headlines,
-    }
 
 
 # =============================================================================
 # LLM Assistant Endpoints
 # =============================================================================
 
-class ChatRequest(BaseModel):
-    """Request model for chat endpoint."""
-    message: str = Field(..., description="User message to send to assistant")
-    context: Optional[str] = Field(None, description="Optional additional context")
-    include_history: bool = Field(True, description="Include conversation history")
 
 
-class AnalyzeAlertRequest(BaseModel):
-    """Request model for alert analysis."""
-    alert_text: str = Field(..., description="Full alert text to analyze")
-    alert_type: str = Field(..., description="Type of alert (e.g., 'Tornado Warning')")
-    locations: list[str] = Field(default=[], description="Affected locations")
-    context: Optional[str] = Field(None, description="Additional context")
 
 
-@app.get("/api/assistant/status")
-async def get_assistant_status():
-    """
-    Get LLM assistant status.
-
-    Returns whether Ollama is running and the model is available.
-    """
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        return {
-            "enabled": False,
-            "available": False,
-            "message": "LLM assistant is disabled in settings",
-        }
-
-    llm_service = get_llm_service()
-    is_available = await llm_service.check_health()
-
-    return {
-        "enabled": True,
-        "available": is_available,
-        "model": llm_service.model,
-        "host": llm_service.host,
-        "statistics": llm_service.get_statistics(),
-    }
 
 
-@app.post("/api/assistant/chat")
-async def assistant_chat(request: ChatRequest):
-    """
-    Send a message to the LLM assistant.
-
-    Returns the assistant's response.
-    """
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        raise HTTPException(status_code=503, detail="LLM assistant is disabled")
-
-    llm_service = get_llm_service()
-
-    # Check if service is available
-    is_available = await llm_service.check_health()
-    if not is_available:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM service not available. Make sure Ollama is running."
-        )
-
-    # Build comprehensive context with all current weather data
-    context = request.context
-    if not context:
-        settings = get_settings()
-        alert_manager = get_alert_manager()
-        alerts = alert_manager.get_alerts_sorted()
-
-        # Get SPC data if available
-        spc_data = None
-        try:
-            spc_service = get_spc_service()
-            if spc_service:
-                spc_data = {
-                    "day1_categorical": None,
-                    "mesoscale_discussions": [],
-                }
-                # Try to get cached SPC data
-                try:
-                    day1 = await spc_service.get_day1_outlooks()
-                    if day1:
-                        spc_data["day1_categorical"] = day1.get("categorical")
-                except Exception:
-                    pass
-                try:
-                    mds = await spc_service.get_mesoscale_discussions()
-                    if mds:
-                        spc_data["mesoscale_discussions"] = [
-                            {"md_number": md.md_number, "title": md.title}
-                            for md in mds.discussions[:3]
-                        ]
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Get recent wind gusts if available
-        wind_gusts = None
-        try:
-            wind_service = get_wind_gusts_service()
-            if wind_service:
-                states = settings.filter_states if settings.filter_states else DEFAULT_GUST_STATES
-                wind_gusts = await wind_service.fetch_gusts(states=states, hours=1, limit=5)
-        except Exception:
-            pass
-
-        # Build comprehensive context
-        context = build_full_context(
-            alerts=alerts,
-            spc_data=spc_data,
-            wind_gusts=wind_gusts,
-            filter_states=settings.filter_states,
-        )
-
-    # Log context for debugging
-    logger.info(f"LLM chat context ({len(alerts)} alerts): {context[:500]}..." if len(context) > 500 else f"LLM chat context ({len(alerts)} alerts): {context}")
-
-    try:
-        response = await llm_service.chat(
-            message=request.message,
-            context=context,
-            include_history=request.include_history,
-        )
-
-        return {
-            "success": True,
-            "response": response.content,
-            "model": response.model,
-            "duration_ms": response.duration_ms,
-        }
-
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/assistant/analyze")
-async def analyze_alert(request: AnalyzeAlertRequest):
-    """
-    Analyze a weather alert and provide insights.
-
-    Returns AI-generated analysis of the alert.
-    """
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        raise HTTPException(status_code=503, detail="LLM assistant is disabled")
-
-    llm_service = get_llm_service()
-
-    is_available = await llm_service.check_health()
-    if not is_available:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM service not available. Make sure Ollama is running."
-        )
-
-    try:
-        analysis = await llm_service.analyze_alert(
-            alert_text=request.alert_text,
-            alert_type=request.alert_type,
-            locations=request.locations,
-            additional_context=request.context,
-        )
-
-        return {
-            "success": True,
-            "analysis": analysis,
-        }
-
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/assistant/history")
-async def get_chat_history():
-    """Get conversation history."""
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        return {"history": [], "message": "LLM assistant is disabled"}
-
-    llm_service = get_llm_service()
-    return {
-        "history": llm_service.get_history(),
-    }
 
 
-@app.delete("/api/assistant/history")
-async def clear_chat_history():
-    """Clear conversation history."""
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        return {"success": True, "message": "LLM assistant is disabled"}
-
-    llm_service = get_llm_service()
-    llm_service.clear_history()
-
-    return {
-        "success": True,
-        "message": "Conversation history cleared",
-    }
 
 
-@app.get("/api/assistant/insight")
-async def get_quick_insight(
-    insight_type: str = Query("general", description="Type of insight: general, wind, pattern, safety"),
-):
-    """
-    Generate a quick insight based on current conditions.
-
-    Returns a brief AI-generated insight.
-    """
-    settings = get_settings()
-
-    if not settings.llm_enabled:
-        raise HTTPException(status_code=503, detail="LLM assistant is disabled")
-
-    llm_service = get_llm_service()
-
-    is_available = await llm_service.check_health()
-    if not is_available:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM service not available. Make sure Ollama is running."
-        )
-
-    # Build comprehensive data summary
-    alert_manager = get_alert_manager()
-    alerts = alert_manager.get_alerts_sorted()
-
-    # Get wind gusts for wind-specific insight or general context
-    wind_gusts = None
-    try:
-        wind_service = get_wind_gusts_service()
-        if wind_service:
-            states = settings.filter_states if settings.filter_states else DEFAULT_GUST_STATES
-            wind_gusts = await wind_service.fetch_gusts(states=states, hours=1, limit=5)
-    except Exception:
-        pass
-
-    # Use comprehensive context for better insights
-    data_summary = build_full_context(
-        alerts=alerts,
-        wind_gusts=wind_gusts if insight_type == "wind" else None,
-        filter_states=settings.filter_states,
-    )
-
-    try:
-        insight = await llm_service.generate_insight(
-            data_summary=data_summary,
-            insight_type=insight_type,
-        )
-
-        return {
-            "success": True,
-            "insight_type": insight_type,
-            "insight": insight,
-        }
-
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
@@ -3137,693 +1948,50 @@ async def get_quick_insight(
 # =============================================================================
 
 
-@app.get("/api/agent/status")
-async def agent_status():
-    """Get AI agent status and availability."""
-    settings = get_settings()
-
-    if not settings.agent_enabled:
-        return {
-            "enabled": False,
-            "available": False,
-            "model": settings.agent_model,
-        }
-
-    agent = get_agent_service()
-    is_available = await agent.check_health()
-
-    return {
-        "enabled": True,
-        "available": is_available,
-        **agent.get_status(),
-    }
 
 
-@app.post("/api/agent/chat")
-async def agent_chat(request: Request):
-    """
-    Send a message to the AI agent with tool-calling capabilities.
-
-    The agent can use weather tools to query real-time data before responding.
-    Returns the response along with a log of all tool calls made.
-    """
-    settings = get_settings()
-
-    if not settings.agent_enabled:
-        raise HTTPException(status_code=503, detail="AI agent is disabled")
-
-    agent = get_agent_service()
-    is_available = await agent.check_health()
-    if not is_available:
-        raise HTTPException(
-            status_code=503,
-            detail="AI agent not available. Make sure Ollama is running with the agent model."
-        )
-
-    body = await request.json()
-    message = body.get("message", "").strip()
-    include_history = body.get("include_history", True)
-
-    if not message:
-        raise HTTPException(status_code=400, detail="Message is required")
-
-    try:
-        response = await agent.run(message, include_history=include_history)
-        return {
-            "success": True,
-            "response": response.content,
-            "tool_calls": [
-                {
-                    "tool": tc.tool,
-                    "arguments": tc.arguments,
-                    "result": tc.result,
-                    "status": tc.status,
-                    "duration_ms": tc.duration_ms,
-                }
-                for tc in response.tool_calls
-            ],
-            "rounds": response.rounds,
-            "model": response.model,
-            "duration_ms": response.total_duration_ms,
-        }
-    except Exception as e:
-        logger.exception(f"Agent chat error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/agent/tools")
-async def list_agent_tools():
-    """List all tools available to the AI agent."""
-    agent = get_agent_service()
-    return {"tools": agent.tools.list_tools()}
 
 
-@app.get("/api/agent/history")
-async def get_agent_history():
-    """Get agent conversation history."""
-    agent = get_agent_service()
-    return {"history": agent.get_history()}
 
 
-@app.delete("/api/agent/history")
-async def clear_agent_history():
-    """Clear agent conversation history."""
-    agent = get_agent_service()
-    agent.clear_history()
-    return {"success": True, "message": "Agent history cleared"}
-
-
-# =============================================================================
-# Widget Configuration Endpoints
-# =============================================================================
-
-# =============================================================================
-# Debug Endpoints (Zone Geometry)
-# =============================================================================
-
-@app.get("/api/debug/alerts-summary")
-async def debug_alerts_summary():
-    """
-    Debug endpoint to see all alerts with their polygon counts.
-    """
-    alert_manager = get_alert_manager()
-    alerts = alert_manager.get_alerts_sorted()
-
-    summary = []
-    for alert in alerts:
-        polygon_count = 0
-        if alert.polygon:
-            # Check if multi-polygon
-            if alert.polygon and len(alert.polygon) > 0:
-                if isinstance(alert.polygon[0], list) and len(alert.polygon[0]) > 0:
-                    if isinstance(alert.polygon[0][0], list):
-                        # Multi-polygon format
-                        polygon_count = len(alert.polygon)
-                    else:
-                        # Single polygon format (list of [lat, lon])
-                        polygon_count = 1
-
-        summary.append({
-            "product_id": alert.product_id,
-            "event_name": alert.event_name,
-            "significance": alert.significance.value if alert.significance else None,
-            "affected_areas_count": len(alert.affected_areas or []),
-            "polygon_count": polygon_count,
-            "has_polygon": polygon_count > 0,
-        })
-
-    return {
-        "alert_count": len(summary),
-        "alerts": summary,
-    }
-
-
-@app.get("/api/debug/alert/{product_id}/geometry")
-async def debug_alert_geometry(product_id: str):
-    """
-    Debug endpoint to inspect an alert's zone geometry.
-
-    Returns detailed info about the alert's polygon, affected_areas,
-    and what zones are in the cache.
-    """
-    alert_manager = get_alert_manager()
-    zone_service = get_zone_geometry_service()
-
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
-    # Check each zone in affected_areas
-    zone_details = []
-    for ugc in (alert.affected_areas or []):
-        zone_type = zone_service.get_zone_type(ugc)
-        cached = zone_service._get_from_cache(ugc)
-        zone_details.append({
-            "ugc": ugc,
-            "zone_type": zone_type,
-            "in_cache": cached is not None,
-            "cached_polygon_count": len(cached) if cached else 0,
-        })
-
-    # Count total polygons in current alert
-    polygon_info = None
-    if alert.polygon:
-        if isinstance(alert.polygon[0][0], list):
-            # Multi-polygon: [[[[lat, lon], ...]], [[[lat, lon], ...]]]
-            polygon_info = {
-                "format": "multi-polygon",
-                "polygon_count": len(alert.polygon),
-                "first_polygon_points": len(alert.polygon[0]) if alert.polygon else 0,
-            }
-        else:
-            # Single polygon or flat list: [[lat, lon], ...]
-            polygon_info = {
-                "format": "single-polygon or flat",
-                "point_count": len(alert.polygon),
-            }
-
-    return {
-        "product_id": product_id,
-        "event_name": alert.event_name,
-        "significance": alert.significance.value if alert.significance else None,
-        "affected_areas_count": len(alert.affected_areas or []),
-        "affected_areas": alert.affected_areas,
-        "zone_details": zone_details,
-        "polygon_info": polygon_info,
-        "cache_stats": zone_service.get_cache_stats(),
-    }
-
-
-@app.delete("/api/debug/zone-cache")
-async def debug_clear_zone_cache(
-    delete_file: bool = Query(False, description="Also delete the cache file on disk"),
-):
-    """
-    Debug endpoint to clear the zone geometry cache.
-
-    This forces a fresh fetch from the NWS API on next request.
-    """
-    zone_service = get_zone_geometry_service()
-    settings = get_settings()
-    stats_before = zone_service.get_cache_stats()
-
-    zone_service.clear_cache()
-
-    file_deleted = False
-    cache_file = settings.data_dir / "zone_geometry_cache.json"
-    if delete_file and cache_file.exists():
-        try:
-            cache_file.unlink()
-            file_deleted = True
-            logger.info(f"Deleted zone geometry cache file: {cache_file}")
-        except Exception as e:
-            logger.error(f"Failed to delete cache file: {e}")
-
-    stats_after = zone_service.get_cache_stats()
-
-    return {
-        "success": True,
-        "message": "Zone geometry cache cleared",
-        "file_deleted": file_deleted,
-        "cache_file": str(cache_file),
-        "before": stats_before,
-        "after": stats_after,
-    }
-
-
-@app.post("/api/debug/alert/{product_id}/add-zones")
-async def debug_add_zones(product_id: str, zones: str = Query(..., description="Comma-separated zone codes")):
-    """
-    Debug endpoint to manually add zones to an alert and repopulate geometry.
-
-    Use this when NWS issues multiple products for the same event covering different areas.
-    """
-    alert_manager = get_alert_manager()
-    zone_service = get_zone_geometry_service()
-
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
-    # Parse zone list
-    new_zones = [z.strip().upper() for z in zones.split(",") if z.strip()]
-
-    # Merge with existing
-    existing_zones = set(alert.affected_areas or [])
-    added_zones = [z for z in new_zones if z not in existing_zones]
-    existing_zones.update(new_zones)
-    alert.affected_areas = sorted(list(existing_zones))
-
-    # Fetch geometry for all zones (including new ones)
-    all_polygons = []
-    fetch_results = []
-
-    for ugc in alert.affected_areas:
-        zone_type = zone_service.get_zone_type(ugc)
-        if zone_type:
-            geometry = await zone_service.fetch_zone_geometry(ugc)
-            fetch_results.append({
-                "ugc": ugc,
-                "zone_type": zone_type,
-                "polygon_count": len(geometry) if geometry else 0,
-                "is_new": ugc in added_zones,
-            })
-            if geometry:
-                all_polygons.extend(geometry)
-
-    # Update alert
-    alert.polygon = all_polygons
-    alert_manager.save_to_file()
-
-    # Broadcast update
-    broker = get_message_broker()
-    await broker.broadcast_alert_update(alert)
-
-    return {
-        "product_id": product_id,
-        "zones_added": added_zones,
-        "total_zones": len(alert.affected_areas),
-        "total_polygons": len(all_polygons),
-        "fetch_results": fetch_results,
-    }
-
-
-@app.post("/api/debug/alert/{product_id}/repopulate")
-async def debug_repopulate_geometry(product_id: str, force: bool = Query(True)):
-    """
-    Debug endpoint to manually repopulate zone geometry for an alert.
-
-    Returns detailed debug info about what was fetched.
-    """
-    alert_manager = get_alert_manager()
-    zone_service = get_zone_geometry_service()
-
-    alert = alert_manager.get_alert(product_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
-    # Store original polygon info
-    original_polygon_count = len(alert.polygon) if alert.polygon else 0
-
-    # Clear existing polygon if forcing
-    if force:
-        alert.polygon = []
-
-    # Manually fetch each zone and track results
-    fetch_results = []
-    all_polygons = []
-
-    for ugc in (alert.affected_areas or []):
-        zone_type = zone_service.get_zone_type(ugc)
-        if zone_type:
-            geometry = await zone_service.fetch_zone_geometry(ugc)
-            fetch_results.append({
-                "ugc": ugc,
-                "zone_type": zone_type,
-                "polygon_count": len(geometry) if geometry else 0,
-                "success": geometry is not None,
-            })
-            if geometry:
-                all_polygons.extend(geometry)
-
-    # Update alert
-    alert.polygon = all_polygons
-
-    # Save the alert
-    alert_manager.save_to_file()
-
-    # Broadcast update
-    broker = get_message_broker()
-    await broker.broadcast_alert_update(alert)
-
-    return {
-        "product_id": product_id,
-        "event_name": alert.event_name,
-        "original_polygon_count": original_polygon_count,
-        "new_polygon_count": len(all_polygons),
-        "zones_processed": len(fetch_results),
-        "zones_with_geometry": sum(1 for r in fetch_results if r["success"]),
-        "fetch_results": fetch_results,
-    }
 
 
 # ==================== NEXRAD Radar Endpoints ====================
 
 
-class RadarSiteRequest(BaseModel):
-    """Request body for setting active radar site."""
-    site_id: str
 
 
-@app.get("/api/radar/status")
-async def get_radar_status():
-    """Get current NEXRAD radar service status."""
-    settings = get_settings()
-    if not settings.nexrad_enabled:
-        return {"enabled": False, "active_site": None, "active_sites": [], "last_update": None, "processing": False}
-    svc = get_nexrad_service()
-    if not svc:
-        return {"enabled": False, "active_site": None, "active_sites": [], "last_update": None, "processing": False}
-    return svc.status.to_dict()
 
 
-@app.get("/api/radar/chunks/diagnostic")
-async def get_radar_chunks_diagnostic():
-    """Per-site chunks-bucket pipeline diagnostics.
-
-    Empty diagnostics block if the chunks path is disabled — no error.
-    """
-    settings = get_settings()
-    if not settings.nexrad_chunks_enabled:
-        return {
-            "enabled": False,
-            "reason": "nexrad_chunks_enabled = false",
-            "diagnostics": {},
-        }
-    try:
-        from .services.nexrad_chunks_service import get_nexrad_chunks_service
-        svc = get_nexrad_chunks_service()
-    except Exception as e:
-        return {"enabled": False, "reason": f"load error: {e}", "diagnostics": {}}
-    if svc is None:
-        return {"enabled": False, "reason": "service not started", "diagnostics": {}}
-    return {
-        "enabled":        True,
-        "poll_interval_s": svc._poll_interval,
-        "min_partial":    svc._min_partial,
-        "render_on_complete": svc._render_on_complete,
-        "now_utc":        datetime.now(timezone.utc).isoformat(),
-        "diagnostics":    svc.diagnostics,
-    }
 
 
-@app.get("/api/radar/diagnostic")
-async def get_radar_diagnostic():
-    """Per-site pipeline diagnostics for latency debugging.
-
-    Returns, per active site, the latest scan we're showing, the latest scan
-    available on S3, and a breakdown of stage timings (list/download/parse/
-    dealias/render/grid).  When complaints come in like "the scan is 12 min
-    old" this endpoint tells you whether the upstream is slow, the network
-    is slow, or our pipeline is slow.
-    """
-    settings = get_settings()
-    if not settings.nexrad_enabled:
-        return {"enabled": False, "active_sites": [], "diagnostics": {}}
-    svc = get_nexrad_service()
-    if not svc:
-        return {"enabled": False, "active_sites": [], "diagnostics": {}}
-
-    from datetime import datetime as _dt, timezone as _tz
-    now = _dt.now(_tz.utc)
-
-    # VCP-duration estimates from NEXRAD VCP catalog.  Used to compute the
-    # archive-bucket "irreducible floor": you cannot show a scan before the
-    # last tilt has been collected.  Tilt count is a coarse proxy because
-    # SAILS/MRLE inject extra low-level passes, but it's good enough to tell
-    # the user whether their lag is pipeline-induced or VCP-induced.
-    def _vcp_duration_seconds(tilt_count):
-        if not tilt_count or tilt_count <= 0:
-            return None
-        if tilt_count <= 5:   return 600   # VCP 31/32 clear-air (10 min)
-        if tilt_count <= 7:   return 420   # VCP 35 clear-air (7 min)
-        if tilt_count <= 9:   return 360   # VCP 21/121 (6 min)
-        if tilt_count <= 14:  return 270   # VCP 12/211/212 base (4.5 min)
-        if tilt_count <= 15:  return 360   # VCP 215 (6 min)
-        if tilt_count <= 17:  return 300   # 212/215 + SAILSx3 (~5 min)
-        return 360                          # severe + SAILS + MRLE, ~6 min
-
-    diag_out = {}
-    for site, d in svc.diagnostics.items():
-        entry = dict(d)
-        # Recompute "live" ages so they reflect now, not when diag was written
-        showing = entry.get("showing_scan_ts")
-        if showing:
-            try:
-                entry["showing_age_s_live"] = round(
-                    (now - _dt.fromisoformat(showing)).total_seconds(), 1
-                )
-            except (ValueError, TypeError):
-                pass
-        s3_ts = entry.get("latest_available_ts")
-        if s3_ts:
-            try:
-                entry["latest_available_age_s_live"] = round(
-                    (now - _dt.fromisoformat(s3_ts)).total_seconds(), 1
-                )
-            except (ValueError, TypeError):
-                pass
-
-        # Latency budget breakdown — surfaces whether the user's pipeline
-        # overhead is meaningful relative to the unavoidable VCP duration.
-        tilts = entry.get("last_tilt_count")
-        vcp_s = _vcp_duration_seconds(tilts)
-        if vcp_s is not None:
-            entry["vcp_estimated_duration_s"] = vcp_s
-            # Archive floor ≈ VCP duration + S3 propagation (30s) + poll discovery
-            poll_int = getattr(svc, "_poll_interval", 10) or 10
-            entry["archive_bucket_floor_s"] = vcp_s + 30 + poll_int
-            # How much we add on top of the floor
-            stage_sum = sum(
-                float(entry.get(k, 0) or 0)
-                for k in (
-                    "last_list_duration_s",
-                    "last_download_duration_s",
-                    "last_parse_duration_s",
-                    "last_dealias_duration_s",
-                    "last_render_duration_s",
-                )
-            )
-            entry["pipeline_overhead_s"] = round(stage_sum, 2)
-            # Headline number: if showing_age_s_live ≈ archive_bucket_floor_s,
-            # the lag is the radar, not us.  If it's much higher, we've got
-            # work to do.
-            if "showing_age_s_live" in entry:
-                entry["excess_over_archive_floor_s"] = round(
-                    entry["showing_age_s_live"] - entry["archive_bucket_floor_s"], 1
-                )
-
-        diag_out[site] = entry
-    return {
-        "enabled":        True,
-        "active_sites":   svc.active_sites,
-        "poll_interval_s": getattr(svc, "_poll_interval", None),
-        "now_utc":        now.isoformat(),
-        "diagnostics":    diag_out,
-    }
 
 
-@app.get("/api/radar/sites")
-async def get_radar_sites(lat: Optional[float] = None, lon: Optional[float] = None):
-    """Get list of NEXRAD radar sites, optionally sorted by distance from a point."""
-    if lat is not None and lon is not None:
-        return get_nearest_sites(lat, lon, count=20)
-    # Return all sites
-    sites = []
-    for site_id, info in NEXRAD_SITES.items():
-        sites.append({
-            "id": site_id,
-            "name": info["name"],
-            "lat": info["lat"],
-            "lon": info["lon"],
-            "state": info["state"],
-        })
-    sites.sort(key=lambda s: (s["state"], s["name"]))
-    return sites
 
 
-@app.get("/api/radar/frame/{product}")
-async def get_radar_frame(product: str):
-    """Get the latest radar frame(s) for a product — one per active site."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    from .services.nexrad_service import RADAR_PRODUCTS as _RP
-    if product not in _RP:
-        raise HTTPException(status_code=400, detail=f"Unknown product: {product}")
-
-    if not settings.nexrad_serve_frames:
-        raise HTTPException(
-            status_code=409,
-            detail=("Radar display frames are disabled on this server "
-                    "(nexrad_serve_frames=false). Ingestion and storm-cell "
-                    "tracking are unaffected; the radar app decodes Level 2 "
-                    "client-side and does not use this endpoint."))
-
-    frames = svc.get_latest_frames_for_product(product)
-    return [f.to_dict() for f in frames]
 
 
-@app.get("/api/radar/frames/{product}")
-async def get_radar_frame_history(product: str, count: int = 10, site: str | None = None):
-    """Get frame history for animation. Optional ?site= for a specific active site."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    from .services.nexrad_service import RADAR_PRODUCTS as _RP
-    if product not in _RP:
-        raise HTTPException(status_code=400, detail=f"Unknown product: {product}")
-    if not settings.nexrad_serve_frames:
-        raise HTTPException(
-            status_code=409,
-            detail=("Radar display frames are disabled on this server "
-                    "(nexrad_serve_frames=false). Ingestion and storm-cell "
-                    "tracking are unaffected; the radar app decodes Level 2 "
-                    "client-side and does not use this endpoint."))
 
 
-    frames = svc.get_frame_history(product, count, site=site)
-    return [f.to_dict() for f in frames]
 
 
-@app.post("/api/radar/site")
-async def set_radar_site(request: RadarSiteRequest):
-    """Replace all active sites with one site (backward compat)."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    try:
-        await svc.set_active_site(request.site_id)
-        return {"status": "ok", "active_sites": svc.active_sites}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/radar/sites/add")
-async def add_radar_site(request: RadarSiteRequest):
-    """Add a site to the active radar set (max 3)."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    try:
-        await svc.add_site(request.site_id)
-        return {"status": "ok", "active_sites": svc.active_sites}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/radar/sites/remove")
-async def remove_radar_site(request: RadarSiteRequest):
-    """Remove a site from the active radar set."""
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not enabled")
-
-    try:
-        await svc.remove_site(request.site_id)
-        return {"status": "ok", "active_sites": svc.active_sites}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/radar/systems")
-async def get_mcs_systems():
-    """Get all currently detected MCS/QLCS systems."""
-    svc = get_storm_tracking_service()
-    if not svc:
-        return []
-    return [s.to_dict() for s in svc.tracked_systems]
 
 
-@app.get("/api/radar/cells")
-async def get_storm_cells():
-    """Get all currently tracked storm cells."""
-    svc = get_storm_tracking_service()
-    if not svc:
-        return []
-    return [c.to_dict() for c in svc.tracked_cells]
-
-
-@app.get("/api/radar/cell/{cell_id}")
-async def get_storm_cell(cell_id: str):
-    """Get detailed info for a specific storm cell."""
-    svc = get_storm_tracking_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Storm tracking service not enabled")
-
-    cell = svc.get_cell(cell_id)
-    if not cell:
-        raise HTTPException(status_code=404, detail=f"Cell not found: {cell_id}")
-    return cell.to_dict()
 
 
 # Serve radar images as static files (legacy oneshot_frame / social graphics)
-@app.get("/api/radar/images/{site}/{filename}")
-async def serve_radar_image(site: str, filename: str):
-    """Serve rendered radar images (WebP or PNG) — used by social graphic pipeline."""
-    settings = get_settings()
-    image_path = Path(settings.data_dir) / "radar" / site / filename
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Image not found")
-    media_type = "image/webp" if filename.endswith(".webp") else "image/png"
-    return FileResponse(
-        str(image_path),
-        media_type=media_type,
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
 
 
-@app.get("/api/radar/cached/{site}")
-async def get_cached_radar_frame(site: str):
-    """Return the latest cached reflectivity binary for any NEXRAD site.
-
-    Returns 404 if the site has never been loaded this session.  The frontend
-    uses this to show a stale-but-instant frame when switching sites while
-    the fresh download runs in the background.
-    """
-    from fastapi.responses import Response as FastResponse
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not running")
-    binary = svc.get_cached_frame(site)
-    if not binary:
-        raise HTTPException(status_code=404, detail="No cached frame for this site")
-    return FastResponse(
-        content=binary,
-        media_type="application/octet-stream",
-        headers={"Cache-Control": "no-store"},
-    )
 
 
-@app.get("/api/radar/binary/{site}/{product}/{frame_id}")
-async def get_radar_binary_frame(site: str, product: str, frame_id: str):
-    """Return a cached binary radar frame by ID (RDRF wire format) for history scrubber."""
-    from fastapi.responses import Response as FastResponse
-    svc = get_nexrad_service()
-    if not svc:
-        raise HTTPException(status_code=503, detail="Radar service not running")
-    frame = svc.get_frame_by_id(site, product, frame_id)
-    if not frame or not frame.binary_data:
-        raise HTTPException(status_code=404, detail="Frame not found")
-    return FastResponse(
-        content=frame.binary_data,
-        media_type="application/octet-stream",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
 
 
 @app.get("/api/mrms/status")
@@ -3906,53 +2074,6 @@ async def get_mrms_binary(product: str | None = None):
     )
 
 
-@app.get("/api/goes/meso")
-async def goes_meso(sat: str = "east", sector: str = "1", band: str = "ir"):
-    """Meta for the latest GOES mesoscale sector frame: time + lat/lon bbox [w,s,e,n]."""
-    from .services.goes_meso_service import get_goes_meso_service
-    ent = await get_goes_meso_service().get(sat, sector, band)
-    if not ent:
-        raise HTTPException(status_code=503, detail="GOES meso not available")
-    return {"time": ent["time"], "bbox": ent["bbox"]}
-
-
-@app.get("/api/goes/meso/frames")
-async def goes_meso_frames(sat: str = "east", sector: str = "1", band: str = "ir",
-                           n: int = 8, span: int = 0):
-    """`n` GOES mesoscale frames [{time, bbox}], oldest→newest — for looping.
-    The sector floats, so each frame carries its own bbox.
-
-    `span` (minutes) spreads those n frames across that window instead of
-    returning the newest n consecutive ones. The meso sector is a 1-minute
-    product, so without it a 3-hour loop request came back as the newest ~24
-    MINUTES. Omitted/0 keeps the original behaviour."""
-    from .services.goes_meso_service import get_goes_meso_service
-    frames = await get_goes_meso_service().get_frames(sat, sector, band, n, span)
-    if not frames:
-        raise HTTPException(status_code=503, detail="GOES meso not available")
-    return {"frames": frames}
-
-
-@app.get("/api/goes/meso/image")
-async def goes_meso_image(sat: str = "east", sector: str = "1", band: str = "ir", t: str = ""):
-    """Reprojected GOES mesoscale PNG for a MapLibre image source. `t` selects the
-    frame time (from /frames); empty serves the latest."""
-    from fastapi.responses import Response as FastResponse
-    from .services.goes_meso_service import get_goes_meso_service
-    svc = get_goes_meso_service()
-    png = await svc.get_image(sat, sector, band, t) if t else None
-    if png is None:
-        ent = await svc.get(sat, sector, band)
-        png = ent["png"] if ent else None
-    if png is None:
-        raise HTTPException(status_code=503, detail="GOES meso not available")
-    return FastResponse(
-        content=png,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=120"},
-    )
-
-
 @app.get("/api/mrms/latest.png")
 async def get_mrms_png():
     """Latest MRMS composite reflectivity as a RGBA PNG (CONUS, ~1.5 MB)."""
@@ -3971,130 +2092,16 @@ async def get_mrms_png():
     )
 
 
-@app.get("/api/hrrr/sounding.png")
-async def get_hrrr_sounding(lat: float, lon: float, fhour: int = 0, run: Optional[str] = None):
-    """Full SounderPy HRRR point sounding PNG at the EXACT lat/lon (Open-Meteo
-    pressure-level profile). fhour + run (YYYYMMDDHH) give a forecast-hour
-    sounding when the model is active; default is F00 (now). Falls back to the
-    nearest-BUFKIT-site render if the exact-point path fails. The radar app shows
-    an instant quick-look while this builds."""
-    from fastapi.responses import Response as FastResponse
-    from .services.hrrr_service import get_hrrr_service
-
-    svc = get_hrrr_service()
-    loop = asyncio.get_event_loop()
-    # Dedicated pool: a ~30 s SounderPy render must not occupy the default
-    # executor that also serves MRMS/HRRR-field/obs offloads.
-    try:
-        png, key = await loop.run_in_executor(svc.render_executor, lambda: svc.get_point_sounding_png(lat, lon, fhour, run))
-    except Exception as e:
-        try:  # exact-point failed (beyond Open-Meteo's ~45 h horizon?) → nearest
-            # BUFKIT site at the SAME forecast hour (BUFKIT reaches F48).
-            png, key = await loop.run_in_executor(svc.render_executor, lambda: svc.get_sounding_png(lat, lon, fhour))
-        except Exception:
-            raise HTTPException(status_code=503, detail="HRRR sounding unavailable")
-    return FastResponse(
-        content=png,
-        media_type="image/png",
-        headers={"Cache-Control": "no-store", "X-Sounding-Source": key},
-    )
 
 
-@app.get("/api/hrrr/runs")
-async def get_hrrr_runs(model: str = "hrrr", before: str | None = None):
-    """Manifest for a model's field overlays (model=hrrr|rrfs): the last ~10 runs
-    (with each run's max forecast hour), the available fields, and the model's
-    forecast-hour offset. Lazy/cached — see hrrr_field_service.
-
-    `before` (YYYYMMDDHH or an ISO instant) anchors the run list at a past time so
-    an event review can find the runs that were current during the event instead
-    of today's."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service, MODELS
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service, MODELS
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable (eccodes/scipy missing)")
-    runs = await asyncio.to_thread(svc.list_runs, model, 10, before)
-    mcfg = MODELS.get(model, MODELS["hrrr"])
-    return {
-        "runs": runs,
-        "fields": svc.fields(model),
-        "fhour_offset": mcfg.get("fhour_offset", 0),
-        "fhour_step": mcfg.get("fhour_step", 1),
-    }
 
 
-@app.get("/api/hrrr/field")
-async def get_hrrr_field(run: str, param: str, fhour: int = 0, model: str = "hrrr"):
-    """One model field as a compact lat/lon binary grid (magic 'HRRR') for the
-    app's WebGL layer. run=YYYYMMDDHH, param in the field registry, fhour int."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    from fastapi.responses import Response as FastResponse
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    data = await asyncio.to_thread(svc.get_field, model, run, param, fhour)
-    if data is None:
-        raise HTTPException(status_code=404, detail="HRRR field not available")
-    return FastResponse(
-        content=data,
-        media_type="application/octet-stream",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
 
 
-@app.get("/api/hrrr/barbs")
-async def get_hrrr_barbs(run: str, param: str, fhour: int = 0, model: str = "hrrr"):
-    """Downsampled wind vectors for a wind field → barb plotting ([lon,lat,kt,dir])."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    data = await asyncio.to_thread(svc.get_barbs, model, run, param, fhour)
-    if data is None:
-        raise HTTPException(status_code=404, detail="HRRR barbs not available")
-    return data
 
 
-@app.get("/api/hrrr/isobars")
-async def get_hrrr_isobars(run: str, fhour: int = 0, model: str = "hrrr"):
-    """MSLP isobars (GeoJSON LineStrings) for the run/forecast hour."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    data = await asyncio.to_thread(svc.get_isobars, model, run, fhour)
-    if data is None:
-        raise HTTPException(status_code=404, detail="HRRR isobars not available")
-    return data
 
 
-@app.get("/api/hrrr/contours")
-async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = "75,150", model: str = "hrrr"):
-    """Contour a registered model field at `levels` (GeoJSON; for the UH overlay)."""
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    svc = get_hrrr_field_service()
-    if not svc.available:
-        raise HTTPException(status_code=503, detail="HRRR fields unavailable")
-    lv = [float(x) for x in levels.split(",") if x.strip()]
-    data = await asyncio.to_thread(svc.get_contours, model, run, param, fhour, lv)
-    if data is None:
-        raise HTTPException(status_code=404, detail="HRRR contours not available")
-    return data
 
 
 # ── RAP mesoanalysis ────────────────────────────────────────────────────────
@@ -4104,89 +2111,18 @@ async def get_hrrr_contours(run: str, param: str, fhour: int = 0, levels: str = 
 # adds no new download path. Everything is cached per RAP cycle — the first call
 # after a new cycle builds it (~10 s), the rest are instant.
 
-def _meso_service():
-    try:
-        from .services.mesoanalysis_service import get_mesoanalysis_service
-    except ImportError:
-        from backend.services.mesoanalysis_service import get_mesoanalysis_service
-    try:
-        from .services.hrrr_field_service import get_hrrr_field_service
-    except ImportError:
-        from backend.services.hrrr_field_service import get_hrrr_field_service
-    if not get_hrrr_field_service().available:
-        raise HTTPException(status_code=503, detail="Mesoanalysis unavailable (eccodes/scipy missing)")
-    return get_mesoanalysis_service()
 
 
-@app.get("/api/meso/analysis")
-async def get_meso_analysis(run: str | None = None):
-    """Threat assessment + cycle-over-cycle trends for a RAP analysis cycle.
-    Defaults to the newest cycle that has data."""
-    svc = _meso_service()
-    data = await asyncio.to_thread(svc.analysis, run)
-    if data is None:
-        raise HTTPException(status_code=503, detail="No RAP analysis available yet")
-    return JSONResponse(content=data, headers={"Cache-Control": "public, max-age=120"})
 
 
-@app.get("/api/meso/zones")
-async def get_meso_zones(run: str | None = None):
-    """Threat + watch areas as GeoJSON polygons (properties: kind, threat, level)."""
-    svc = _meso_service()
-    data = await asyncio.to_thread(svc.zones, run)
-    if data is None:
-        raise HTTPException(status_code=503, detail="No RAP analysis available yet")
-    return JSONResponse(content=data, headers={"Cache-Control": "public, max-age=120"})
 
 
-@app.get("/api/meso/point")
-async def get_meso_point(lat: float, lon: float, run: str | None = None):
-    """Every mesoanalysis parameter at a point, plus the threats covering it."""
-    svc = _meso_service()
-    data = await asyncio.to_thread(svc.point, lat, lon, run)
-    if data is None:
-        raise HTTPException(status_code=404, detail="Point outside the analysis domain")
-    return JSONResponse(content=data, headers={"Cache-Control": "public, max-age=120"})
 
 
-@app.get("/api/obs/surface")
-async def get_surface_obs(lat: float | None = None, lon: float | None = None, radius_km: float = 400.0):
-    """Surface station obs (METAR) for the radar app's Observations layer. With
-    lat/lon → a dense box around the active radar site (aviationweather.gov caps a
-    query at ~400 stations, so a site-centered box returns far more local stations
-    than the national snapshot); without → the national set. Each ob includes
-    decoded extras (visibility, clouds/ceiling, flight category, raw METAR)."""
-    try:
-        from .services.surface_obs_service import get_surface_obs_service
-    except ImportError:
-        from backend.services.surface_obs_service import get_surface_obs_service
-    svc = get_surface_obs_service()
-    obs = await asyncio.to_thread(svc.get_obs, lat, lon, radius_km)
-    return {"obs": obs}
 
 
-@app.get("/api/obs/analysis")
-async def get_surface_analysis():
-    """Objective surface analysis from the obs: High/Low pressure centers + fronts
-    (thermal-gradient zones classified warm/cold/stationary by advection)."""
-    try:
-        from .services.surface_obs_service import get_surface_obs_service
-    except ImportError:
-        from backend.services.surface_obs_service import get_surface_obs_service
-    svc = get_surface_obs_service()
-    return await asyncio.to_thread(svc.get_analysis)
 
 
-@app.get("/api/obs/wpc")
-async def get_wpc_surface():
-    """Official WPC surface analysis — hand-analyzed fronts + High/Low centers
-    (parsed from the Coded Surface Bulletin)."""
-    try:
-        from .services.wpc_fronts_service import get_wpc_fronts_service
-    except ImportError:
-        from backend.services.wpc_fronts_service import get_wpc_fronts_service
-    svc = get_wpc_fronts_service()
-    return await asyncio.to_thread(svc.get)
 
 
 @app.get("/api/wpc/ero")
@@ -4212,36 +2148,6 @@ async def get_wpc_ero(day: int = Query(1, ge=1, le=5, description="ERO forecast 
     return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
 
 
-@app.get("/api/spc/geojson")
-async def get_spc_geojson(url: str = Query(..., description="An spc.noaa.gov outlook GeoJSON URL")):
-    """Proxy an SPC outlook GeoJSON for the radar app. The browser is CORS-blocked on
-    spc.noaa.gov for these files from the app's origin (the hub's SPC layer rendered
-    blank and the recipe engine captured bare maps labelled as 'the outlook'), so the
-    app falls back to fetching them through here, exactly as it already does for
-    WPC's ERO. Strictly allow-listed: only SPC's outlook trees, only .geojson."""
-    from urllib.parse import urlsplit
-    u = urlsplit(url)
-    ok_host = u.scheme == "https" and u.netloc == "www.spc.noaa.gov"
-    ok_path = u.path.startswith(("/products/outlook/", "/products/exper/day4-8/",
-                                 "/products/fire_wx/")) and u.path.endswith(".geojson")
-    if not (ok_host and ok_path) or ".." in u.path:
-        raise HTTPException(status_code=400, detail="Not an SPC outlook GeoJSON URL")
-    clean = f"https://www.spc.noaa.gov{u.path}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                clean,
-                timeout=aiohttp.ClientTimeout(total=20),
-                headers={"User-Agent": "TheBattinFront Radar (dashboard SPC proxy)"},
-            ) as resp:
-                if resp.status != 200:
-                    raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status}")
-                data = await resp.json(content_type=None)
-    except aiohttp.ClientError as e:
-        logger.error(f"SPC GeoJSON proxy fetch failed for {clean}: {e}")
-        raise HTTPException(status_code=502, detail="Fetch failed")
-    from fastapi.responses import JSONResponse
-    return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/aviation/{kind}")
@@ -4418,123 +2324,27 @@ async def get_glm_status():
     }
 
 
-@app.get("/api/radar/gate")
-async def get_radar_gate():
-    """Get current reflectivity gate threshold (dBZ)."""
-    service = get_nexrad_service()
-    # service can be None before NEXRAD finishes starting (or if disabled);
-    # fall back to the default threshold instead of raising a 500.
-    return {"gate_dbz": getattr(service, "_gate_dbz", 10.0)}
 
 
-class RadarGateRequest(BaseModel):
-    gate_dbz: float = Field(..., ge=-20, le=40, description="Reflectivity gate threshold in dBZ")
 
 
-@app.post("/api/radar/gate")
-async def set_radar_gate(request: RadarGateRequest):
-    """Set reflectivity gate threshold and re-render current scan."""
-    service = get_nexrad_service()
-    await service.set_gate_dbz(request.gate_dbz)
-    return {"gate_dbz": service._gate_dbz}
 
 
 # ==================== Social Media Endpoints ====================
 
 
-class SocialPostRequest(BaseModel):
-    """Request body for posting to social media."""
-    platforms: list[str]
-    message: str
-    images: list[str] = []  # Base64-encoded images
-    alt_text: str = "Weather graphic from The Battin Front"
 
 
-class GenerateTextRequest(BaseModel):
-    """Request body for generating post text from alert/LSR data."""
-    source_type: str  # "alert" or "lsr"
-    source_id: Optional[str] = None
-    source_data: Optional[dict] = None
-    template: str = "default"
 
 
-@app.get("/api/social/status")
-async def social_media_status():
-    """Check if social media services are configured and available."""
-    service = get_social_media_service()
-    return service.get_status()
 
 
-@app.post("/api/social/post")
-async def social_media_post(request: SocialPostRequest):
-    """Post to one or more social media platforms."""
-    service = get_social_media_service()
-
-    # Decode base64 images to bytes
-    images = None
-    if request.images:
-        import base64 as b64
-        images = []
-        for img_str in request.images:
-            # Strip data URI prefix if present
-            if ";base64," in img_str:
-                img_str = img_str.split(";base64,", 1)[1]
-            images.append(b64.b64decode(img_str))
-
-    result = await service.post(
-        platforms=request.platforms,
-        message=request.message,
-        images=images,
-        alt_text=request.alt_text,
-    )
-    return result
 
 
-@app.post("/api/social/generate-text")
-async def social_media_generate_text(request: GenerateTextRequest):
-    """Generate post text from alert or LSR data using templates."""
-    service = get_social_media_service()
-
-    if request.source_type == "alert":
-        if request.source_id:
-            alert_manager = get_alert_manager()
-            alert = alert_manager.get_alert(request.source_id)
-            if not alert:
-                raise HTTPException(status_code=404, detail="Alert not found")
-            text = service.generate_alert_text(alert.to_dict(), request.template)
-        elif request.source_data:
-            text = service.generate_alert_text(request.source_data, request.template)
-        else:
-            raise HTTPException(status_code=400, detail="source_id or source_data required")
-    elif request.source_type == "lsr":
-        if not request.source_data:
-            raise HTTPException(status_code=400, detail="source_data required for LSR")
-        reports = request.source_data.get("reports", [request.source_data])
-        text = service.generate_lsr_text(reports, request.template)
-    else:
-        raise HTTPException(status_code=400, detail="source_type must be 'alert' or 'lsr'")
-
-    return {"text": text, "template": request.template}
 
 
-@app.get("/api/social/history")
-async def social_media_history():
-    """Get recent post history."""
-    service = get_social_media_service()
-    return {"posts": service.get_post_history()}
 
 
-@app.get("/api/social/templates")
-async def social_media_templates():
-    """Get available post templates."""
-    try:
-        from .services.social_media.templates import ALERT_TEMPLATES, LSR_TEMPLATES
-    except ImportError:
-        from backend.services.social_media.templates import ALERT_TEMPLATES, LSR_TEMPLATES
-    return {
-        "alert_templates": list(ALERT_TEMPLATES.keys()),
-        "lsr_templates": list(LSR_TEMPLATES.keys()),
-    }
 
 
 # ==================== Settings Endpoints ====================
@@ -4875,188 +2685,6 @@ class CountiesSettingsUpdate(BaseModel):
 
 
 # ── Rotation-classifier auto-retraining ──────────────────────────────────────
-
-@app.get("/api/model/scorecard")
-async def model_scorecard(days: int = 14):
-    """TBF Escalation Index -- live performance over the trailing `days`.
-
-    Scored from the training archive itself: every collected row carries the
-    probability AS SCORED AT THE TIME, and the labeller later fills in what
-    actually happened, so a labelled row with a probability is a completed
-    prediction. This is measured on the live population, not on the fixed
-    historical holdout the trainer reports.
-    """
-    import asyncio as _a
-    from pathlib import Path as _P
-    from .services.model_scorecard import scorecard, verdict
-    from .services.model_paths import runtime_data_dir, describe
-
-    data_dir = runtime_data_dir()
-    card = await _a.to_thread(
-        scorecard, data_dir / "training_data.jsonl", data_dir, days)
-    return {**card, "verdict": verdict(card), "models": describe()}
-
-
-@app.get("/api/model/paths")
-async def model_paths_status():
-    """Where the models resolved from -- runtime copy, bundled seed, or missing.
-
-    Exists because a model that fails to load used to be invisible: the failure
-    logged as "running pure physics", which reads identically to "nothing has
-    been trained yet". Make it inspectable.
-    """
-    from .services.model_paths import describe
-    out = describe()
-
-    # Whether the LIVE tracker actually holds the models, not merely whether the
-    # files resolve. These differ: sklearn missing from the bundle resolved the
-    # paths fine and still loaded nothing. Absence of an error in a log is not
-    # evidence of success -- that assumption is why this went unnoticed for
-    # months -- so report the loaded state as a fact.
-    try:
-        from .services.storm_tracking_service import get_storm_tracking_service
-        svc = get_storm_tracking_service()
-        if svc is None:
-            out["tracker"] = {"running": False,
-                              "note": "storm tracking is not running (nexrad_enabled?)"}
-        else:
-            out["tracker"] = {
-                "running": True,
-                "rotation_loaded": svc._rotation_model is not None,
-                "severe_loaded": svc._severe_model is not None,
-                "features": len(svc._rotation_model_features or []),
-            }
-    except Exception as e:  # noqa: BLE001
-        out["tracker"] = {"running": False, "error": f"{type(e).__name__}: {e}"}
-
-    # Detectors that have stopped producing anything. Empty means nothing has
-    # failed -- a real answer, not an absence of data. These used to `return`
-    # without a word, so a detector could be dead for months while the cell it
-    # described simply reported no signature.
-    try:
-        from .services.failure_log import snapshot as _degraded
-        out["degraded"] = _degraded()
-    except Exception as e:  # noqa: BLE001
-        out["degraded"] = {"error": f"{type(e).__name__}: {e}"}
-    return out
-
-
-@app.get("/api/model/rotation/status")
-async def rotation_model_status():
-    """Current model, last cycle, and recent promote/reject history."""
-    from .services.model_training_service import get_model_training_service
-    svc = get_model_training_service()
-    if svc is None:
-        return {"available": False}
-    return {"available": True, **svc.status()}
-
-
-@app.post("/api/model/rotation/retrain")
-async def rotation_model_retrain(force: bool = True):
-    """Run a cycle now.
-
-    `force` skips the new-label floor and the severe-weather stand-down; it is
-    the default here because a human asking for this has already decided.  The
-    promotion gate still applies — this cannot push a worse model live.
-    """
-    from .services.model_training_service import get_model_training_service
-    svc = get_model_training_service()
-    if svc is None:
-        raise HTTPException(status_code=503, detail="training service unavailable")
-    return await svc.run_cycle(force=force)
-
-
-@app.post("/api/model/rotation/rollback")
-async def rotation_model_rollback():
-    """Restore the previously promoted model and reload the tracker."""
-    from .services.model_training_service import get_model_training_service
-    svc = get_model_training_service()
-    if svc is None:
-        raise HTTPException(status_code=503, detail="training service unavailable")
-    result = svc.rollback()
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error", "rollback failed"))
-    await svc._reload_tracker()
-    return result
-
-
-# ── Training-data backfill (Model dashboard) ─────────────────────────────────
-
-class BackfillStartRequest(BaseModel):
-    days: list[str] = Field(..., description="Convective days, YYYY-MM-DD")
-    sites: list[str] = Field(..., description="Radar sites, e.g. ['KILN','KIWX']")
-    workers: int = Field(default=3, ge=1, le=12)
-    full_day: bool = Field(default=False,
-                           description="Replay the whole UTC day instead of the warned window")
-    min_tor: int = Field(default=1, ge=0, le=100,
-                         description="Skip a (site, day) with fewer tornado warnings than this. "
-                                     "Positives come only from warned cells, so a site-day at 0 "
-                                     "is all negatives -- 22% of the 2024 run was spent on those.")
-
-
-@app.get("/api/model/backfill/candidates")
-async def backfill_candidates(start: str, end: str, sites: str,
-                              min_tor: int = 1):
-    """Severe days worth replaying. `sites` is comma-separated."""
-    from .services.backfill_service import get_backfill_service
-    site_list = [s.strip().upper() for s in sites.split(",") if s.strip()]
-    if not site_list:
-        raise HTTPException(status_code=400, detail="no sites given")
-    try:
-        # Hits IEM for the whole range, so keep it off the event loop.
-        days = await asyncio.to_thread(
-            get_backfill_service().find_days, start, end, site_list, min_tor)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"days": days, "sites": site_list}
-
-
-@app.get("/api/model/backfill/status")
-async def backfill_status():
-    from .services.backfill_service import get_backfill_service
-    return get_backfill_service().status()
-
-
-@app.post("/api/model/backfill/start")
-async def backfill_start(req: BackfillStartRequest):
-    from .services.backfill_service import get_backfill_service
-    result = get_backfill_service().start(
-        days=req.days, sites=[s.upper() for s in req.sites],
-        workers=req.workers, full_day=req.full_day, min_tor=req.min_tor)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error", "start failed"))
-    return result
-
-
-@app.post("/api/model/backfill/stop")
-async def backfill_stop():
-    from .services.backfill_service import get_backfill_service
-    result = get_backfill_service().stop()
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error", "stop failed"))
-    return result
-
-
-@app.post("/api/model/backfill/merge")
-async def backfill_merge():
-    """Append the completed backfill rows onto the main training archive."""
-    from .services.backfill_service import get_backfill_service
-    result = await asyncio.to_thread(get_backfill_service().merge_backfill)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error", "merge failed"))
-    return result
-
-
-@app.get("/api/model/training/stats")
-async def training_data_stats(which: str = "main"):
-    """Label balance, month coverage and feature population for the archive."""
-    from .services.backfill_service import (
-        BACKFILL_OUT, TRAINING_DATA, get_backfill_service,
-    )
-    path = BACKFILL_OUT if which == "backfill" else TRAINING_DATA
-    # Streams a multi-hundred-MB file; cached inside the service.
-    return await asyncio.to_thread(get_backfill_service().data_stats, path)
-
 
 @app.get("/api/settings/counties")
 async def get_counties_settings():
@@ -5485,133 +3113,24 @@ async def get_chasers():
 # Chase Log API
 # =============================================================================
 
-@app.get("/api/chase-logs")
-async def list_chase_logs():
-    """List all chase log sessions."""
-    service = get_chase_log_service()
-    return {"sessions": service.list_sessions()}
 
 
-@app.get("/api/chase-logs/{date}")
-async def get_chase_log(date: str):
-    """Get a specific chase log by date (YYYY-MM-DD)."""
-    service = get_chase_log_service()
-    session = service.get_session(date)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"No chase log for {date}")
-    return session
 
 
-@app.get("/api/chase-logs/{date}/geojson")
-async def get_chase_log_geojson(date: str):
-    """Export a chase log as GeoJSON LineString."""
-    service = get_chase_log_service()
-    geojson = service.get_session_geojson(date)
-    if not geojson:
-        raise HTTPException(status_code=404, detail=f"No chase log for {date}")
-    return geojson
 
 
 # =============================================================================
 # Alert Graphics
 # =============================================================================
 
-_GRAPHICS_DIR = Path(__file__).parent.parent / "data" / "alert_graphics"
 
 
-@app.post("/api/alert-graphics/save")
-async def save_alert_graphic(request: Request):
-    """Save a generated alert graphic PNG (base64) to disk."""
-    import base64 as _base64
-    data = await request.json()
-    product_id = data.get("product_id", "").strip()
-    event_name = data.get("event_name", "")
-    image_data: str = data.get("image_data", "")
-
-    if not product_id or not image_data:
-        raise HTTPException(status_code=400, detail="Missing product_id or image_data")
-
-    # Strip data URL prefix if present
-    if "," in image_data:
-        image_data = image_data.split(",", 1)[1]
-
-    try:
-        img_bytes = _base64.b64decode(image_data)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid base64 image data")
-
-    _GRAPHICS_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Safe filename: replace anything that isn't alphanumeric, dash, or dot
-    import re as _re
-    safe_id = _re.sub(r"[^\w\-.]", "_", product_id)
-    img_path = _GRAPHICS_DIR / f"{safe_id}.png"
-    img_path.write_bytes(img_bytes)
-
-    # Save metadata sidecar so we can show event_name in the gallery
-    meta_path = _GRAPHICS_DIR / f"{safe_id}.json"
-    import json as _json
-    meta_path.write_text(_json.dumps({"product_id": product_id, "event_name": event_name}))
-
-    return {"status": "saved", "product_id": product_id}
 
 
-@app.get("/api/alert-graphics")
-async def list_alert_graphics():
-    """List all saved alert graphics, newest first."""
-    import json as _json
-    if not _GRAPHICS_DIR.exists():
-        return {"graphics": []}
-
-    graphics = []
-    for img_path in sorted(
-        _GRAPHICS_DIR.glob("*.png"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    ):
-        product_id = img_path.stem
-        event_name = product_id
-        meta_path = img_path.with_suffix(".json")
-        if meta_path.exists():
-            try:
-                meta = _json.loads(meta_path.read_text())
-                product_id = meta.get("product_id", product_id)
-                event_name = meta.get("event_name", event_name)
-            except Exception:
-                pass
-        graphics.append({
-            "product_id": product_id,
-            "event_name": event_name,
-            "url": f"/api/alert-graphics/image/{img_path.name}",
-            "created_at": datetime.fromtimestamp(img_path.stat().st_mtime, timezone.utc).isoformat(),
-        })
-    return {"graphics": graphics}
 
 
-@app.get("/api/alert-graphics/image/{filename}")
-async def get_alert_graphic_image(filename: str):
-    """Serve a saved alert graphic PNG."""
-    import re as _re
-    if not _re.match(r"^[\w\-.]+\.png$", filename):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    img_path = _GRAPHICS_DIR / filename
-    if not img_path.exists():
-        raise HTTPException(status_code=404, detail="Graphic not found")
-    return FileResponse(str(img_path), media_type="image/png")
 
 
-@app.delete("/api/alert-graphics/{product_id}")
-async def delete_alert_graphic(product_id: str):
-    """Delete a saved alert graphic."""
-    import re as _re
-    safe_id = _re.sub(r"[^\w\-.]", "_", product_id)
-    img_path = _GRAPHICS_DIR / f"{safe_id}.png"
-    meta_path = _GRAPHICS_DIR / f"{safe_id}.json"
-    if img_path.exists():
-        img_path.unlink()
-    if meta_path.exists():
-        meta_path.unlink()
-    return {"status": "deleted"}
 
 
 # =============================================================================
@@ -6005,14 +3524,6 @@ async def save_alert_broadcast_graphic(product_id: str):
 # SPA Catch-All Route (must be after all API routes)
 # =============================================================================
 
-@app.get("/obs")
-@app.get("/obs/{path:path}")
-async def serve_obs_overlay(path: str = ""):
-    """Serve the frontend for OBS overlay route."""
-    index_file = FRONTEND_DIR / "index.html"
-    if index_file.exists():
-        return FileResponse(index_file)
-    raise HTTPException(status_code=404, detail="Frontend not built")
 
 
 @app.get("/chase")

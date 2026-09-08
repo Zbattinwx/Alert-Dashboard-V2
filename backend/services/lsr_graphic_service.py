@@ -276,9 +276,15 @@ def generate_lsr_summary_graphic(
                       fontweight="bold", ha="right", transform=ax_stats.transAxes)
         y -= 0.05
 
-    # Divider
+    # Divider.
+    #
+    # axhline REFUSES a `transform` kwarg -- it builds its own blended transform
+    # (x in axes coords, y in data coords) and matplotlib raises rather than
+    # silently ignoring it. That raise took the whole LSR summary graphic down
+    # with a 500. The y here is already an axes fraction, which is exactly what
+    # axhline's own transform expects, so the kwarg was never needed.
     ax_stats.axhline(y - 0.01, color=BORDER_COLOR, linewidth=0.8,
-                     transform=ax_stats.transAxes, xmin=0.04, xmax=0.96)
+                     xmin=0.04, xmax=0.96)
     y -= 0.04
 
     # Brand watermark
