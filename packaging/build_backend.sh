@@ -21,6 +21,19 @@ PYI="$VENVPY -m PyInstaller"
 
 cd "$ROOT"
 
+# Fail fast and legibly if the model seeds are missing: --add-data on a path
+# that does not exist fails deep inside PyInstaller with a much worse message.
+"$VENVPY" -c "import sklearn, joblib" 2>/dev/null || {
+  echo "ERROR: .venv-build lacks scikit-learn/joblib - the frozen backend"
+  echo "       would load no models. Fix with:"
+  echo "       $VENVPY -m pip install scikit-learn joblib threadpoolctl"
+  exit 1
+}
+
+for m in data/rotation_model.joblib data/severe_model.joblib; do
+  [ -f "$m" ] || { echo "ERROR: $m is missing - train it before freezing"; exit 1; }
+done
+
 # Rebuild the dashboard frontend so the bundled dist always matches source.
 # PyInstaller below only copies frontend/dist (--add-data) — it never builds it,
 # so without this the bundled dashboard quietly drifts behind the frontend code.
@@ -71,7 +84,26 @@ $PYI --noconfirm --clean --onedir --name dashboard-backend \
   --collect-all PIL \
   --collect-all eccodes \
   --collect-all findlibs \
+  `# The models are pickled sklearn estimators. PyInstaller cannot see that` \
+  `# through a pickle -- the import is data, not code -- so collect it` \
+  `# explicitly or the exe fails with "No module named sklearn" and drops` \
+  `# to physics-only. Keep .venv-build on the sklearn version that TRAINED` \
+  `# the models; unpickling across a major version can score differently.` \
+  --collect-all sklearn \
+  --collect-all joblib \
+  --collect-all threadpoolctl \
   --collect-submodules backend \
+  `# scripts/ carries FEATURE_NAMES and the trainer the retrain loop calls.` \
+  `# WITHOUT THIS the tracker's "from scripts.train_rotation_model import ..."` \
+  `# raises ImportError inside the exe and the backend silently drops to` \
+  `# physics-only -- which is what every shipped build did until 2026-09-07.` \
+  --collect-submodules scripts \
+  --add-data "$ROOT_WIN/scripts;scripts" \
+  `# Trained models as a read-only SEED so a fresh install classifies on day` \
+  `# one. backend/services/model_paths.py prefers a retrained copy written` \
+  `# beside the .exe, so shipping these cannot pin anyone to a stale model.` \
+  --add-data "$ROOT_WIN/data/rotation_model.joblib;data" \
+  --add-data "$ROOT_WIN/data/severe_model.joblib;data" \
   --add-data "$ROOT_WIN/backend/data;backend/data" \
   --add-data "$ROOT_WIN/frontend/dist;frontend/dist" \
   `# US state outlines — the mesoanalysis land mask rasterizes these. Shipped` \

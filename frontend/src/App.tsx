@@ -24,6 +24,7 @@ import { OBSOverlay } from './components/OBSOverlay';
 import { ChaseMode } from './components/ChaseMode';
 import { AlertMapGraphic } from './components/AlertMapGraphic';
 import { AlertGraphicsSection } from './components/AlertGraphicsSection';
+import { ModelSection } from './components/ModelSection';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useAlertChimes } from './hooks/useAlertChimes';
 import type { Alert, AgentNotification } from './types/alert';
@@ -286,6 +287,10 @@ const Dashboard: React.FC = () => {
               lightningFlashes={lightningFlashes}
               focusedCellId={focusedCellId}
             />
+          )}
+
+          {activeSection === 'model' && (
+            <ModelSection />
           )}
 
           {activeSection === 'lsr' && (

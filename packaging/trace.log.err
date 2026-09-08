@@ -1,0 +1,21 @@
++ set -euo pipefail
++++ dirname packaging/build_backend.sh
+++ cd packaging/..
+++ pwd
++ ROOT=/f/Apps/tbf/AlertDashboard
++ VENV=/f/Apps/tbf/AlertDashboard/.venv-build
++ PYI=/f/Apps/tbf/AlertDashboard/.venv-build/Scripts/pyinstaller.exe
++ '[' -x /f/Apps/tbf/AlertDashboard/.venv-build/Scripts/pyinstaller.exe ']'
++ cd /f/Apps/tbf/AlertDashboard
++ echo 'Building dashboard frontend (frontend/dist)...'
++ cd /f/Apps/tbf/AlertDashboard/frontend
++ '[' -d node_modules ']'
++ npm run build
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+++ pwd -W
++ ROOT_WIN=F:/Apps/tbf/AlertDashboard
++ /f/Apps/tbf/AlertDashboard/.venv-build/Scripts/pyinstaller.exe --noconfirm --clean --onedir --name dashboard-backend --distpath packaging/dist --workpath packaging/build --specpath packaging --paths . --collect-all uvicorn --collect-all sounderpy --collect-all metpy --collect-all cartopy --collect-all pyproj --collect-all shapely --collect-all netCDF4 --collect-all matplotlib --collect-all slixmpp --collect-all pyart --collect-all pint --collect-all xradar --collect-all cmweather --collect-all open_radar_data --collect-all xarray --collect-all h5netcdf --collect-all h5py --collect-all boto3 --collect-all botocore --collect-all PIL --collect-all eccodes --collect-all findlibs --collect-submodules backend --add-data 'F:/Apps/tbf/AlertDashboard/backend/data;backend/data' --add-data 'F:/Apps/tbf/AlertDashboard/frontend/dist;frontend/dist' --add-data 'F:/Apps/tbf/AlertDashboard/frontend/src/data;frontend/src/data' --add-data 'F:/Apps/tbf/AlertDashboard/widgets;widgets' --add-data 'F:/Apps/tbf/AlertDashboard/config/brands;config/brands' packaging/run_backend.py

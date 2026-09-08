@@ -591,7 +591,24 @@ class AlertParser:
             if not cls._is_target_phenomenon(alert.phenomenon):
                 logger.debug(f"Filtering out non-target phenomenon: {alert.phenomenon}")
                 return None
-            if not cls._is_target_state(alert.affected_areas):
+
+            # A VTEC cancellation that carries no UGC at all cannot be attributed
+            # to a state, so every area-based filter below would reject it -- and
+            # dropping it leaves the warning it cancels on screen until it
+            # expires by itself. alert_manager matches a cancellation to the
+            # existing alert by product_id and clears it whole when there are no
+            # cancelled_areas; it never needed the UGC.
+            #
+            # Narrow on purpose: NO areas at all. An alert whose counties were
+            # filtered away is still dropped, because it was never displayed.
+            arealess_cancellation = (
+                alert.status == AlertStatus.CANCELLED
+                and alert.vtec is not None
+                and bool(alert.product_id)
+                and not alert.affected_areas
+            )
+
+            if not arealess_cancellation and not cls._is_target_state(alert.affected_areas):
                 logger.debug(f"Filtering out alert for non-target state: {alert.affected_areas}")
                 return None
 
@@ -609,6 +626,23 @@ class AlertParser:
                 )
 
             if not alert.affected_areas:
+                # A VTEC cancellation that never had areas is still actionable.
+                # alert_manager matches it to the existing alert by product_id
+                # and, with no cancelled_areas, clears the whole thing -- it does
+                # not need the UGC. Dropping it here leaves a cancelled warning
+                # on screen until it expires by itself, which for a tornado
+                # warning is precisely the window that matters.
+                #
+                # Only when there were NO areas at all. An alert whose counties
+                # were filtered away is still rejected: we never displayed it,
+                # so there is nothing to clear.
+                if arealess_cancellation and not original_areas:
+                    logger.info(
+                        f"Keeping area-less cancellation {alert.product_id} - "
+                        "alert_manager clears the matching alert by product_id"
+                    )
+                    return alert
+
                 # Expected: alert touches the target state but none of the target
                 # counties (county filter doing its job on adjacent-area alerts).
                 # Repeats every poll for the same alerts — debug, not a warning.

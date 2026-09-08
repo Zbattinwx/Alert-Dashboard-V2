@@ -23,6 +23,7 @@ const navItems: NavItem[] = [
   { id: 'social', label: 'Social Media', icon: 'fa-share-nodes' },
   { id: 'event-stats', label: 'Event Stats', icon: 'fa-chart-bar' },
   { id: 'alert-graphics', label: 'Alert Graphics', icon: 'fa-images' },
+  { id: 'model', label: 'Model & Training', icon: 'fa-brain' },
   { id: 'settings', label: 'Settings', icon: 'fa-sliders-h' },
 ];
 

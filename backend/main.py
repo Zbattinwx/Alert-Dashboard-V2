@@ -211,6 +211,20 @@ async def startup_services():
     # 6. Start periodic API polling (backup to NWWS)
     asyncio.create_task(api_polling_loop())
 
+    # 6b. Automated rotation-classifier retraining.  Off by default; the loop
+    # itself stands down during severe weather and never replaces the live model
+    # unless a candidate beats it on held-out days.
+    try:
+        from .services.model_training_service import create_model_training_service
+        _retrain = create_model_training_service(settings=settings)
+        if settings.auto_retrain_enabled:
+            _retrain.start()
+        else:
+            logger.info("Auto-retraining is available but disabled "
+                        "(set auto_retrain_enabled to turn it on)")
+    except Exception as e:
+        logger.warning(f"Auto-retraining service unavailable: {e}")
+
     # 7-11b. Start independent data + AI services concurrently. None depend on
     # one another, so overlapping their initial fetches and (for LLM/Agent) the
     # Ollama health checks cuts seconds off startup vs the old sequential awaits.
@@ -313,6 +327,7 @@ async def startup_services():
                             log_file=log_file,
                             min_score=settings.live_qa_min_score,
                             verbose=settings.live_qa_verbose,
+                            log_min_dbz=settings.live_qa_log_min_dbz,
                         )
 
                     # Give the analyst a callback to reach the agent LLM
@@ -481,6 +496,13 @@ async def shutdown_services():
     logger.info("Shutting down services...")
 
     # Stop in reverse order
+    try:
+        from .services.model_training_service import get_model_training_service
+        _rt = get_model_training_service()
+        if _rt is not None:
+            await _rt.stop()
+    except Exception:
+        pass
     try:
         from .services.mrms_rotation_service import stop_mrms_rotation_service
         await stop_mrms_rotation_service()
@@ -3641,6 +3663,14 @@ async def get_radar_frame(product: str):
     if product not in _RP:
         raise HTTPException(status_code=400, detail=f"Unknown product: {product}")
 
+    if not settings.nexrad_serve_frames:
+        raise HTTPException(
+            status_code=409,
+            detail=("Radar display frames are disabled on this server "
+                    "(nexrad_serve_frames=false). Ingestion and storm-cell "
+                    "tracking are unaffected; the radar app decodes Level 2 "
+                    "client-side and does not use this endpoint."))
+
     frames = svc.get_latest_frames_for_product(product)
     return [f.to_dict() for f in frames]
 
@@ -3655,6 +3685,14 @@ async def get_radar_frame_history(product: str, count: int = 10, site: str | Non
     from .services.nexrad_service import RADAR_PRODUCTS as _RP
     if product not in _RP:
         raise HTTPException(status_code=400, detail=f"Unknown product: {product}")
+    if not settings.nexrad_serve_frames:
+        raise HTTPException(
+            status_code=409,
+            detail=("Radar display frames are disabled on this server "
+                    "(nexrad_serve_frames=false). Ingestion and storm-cell "
+                    "tracking are unaffected; the radar app decodes Level 2 "
+                    "client-side and does not use this endpoint."))
+
 
     frames = svc.get_frame_history(product, count, site=site)
     return [f.to_dict() for f in frames]
@@ -4834,6 +4872,180 @@ class CountiesSettingsUpdate(BaseModel):
     filter_counties: dict[str, list[str]] = Field(
         ..., description="Map of state code -> list of county UGC codes to keep ([] = all)"
     )
+
+
+# ── Rotation-classifier auto-retraining ──────────────────────────────────────
+
+@app.get("/api/model/scorecard")
+async def model_scorecard(days: int = 14):
+    """TBF Escalation Index -- live performance over the trailing `days`.
+
+    Scored from the training archive itself: every collected row carries the
+    probability AS SCORED AT THE TIME, and the labeller later fills in what
+    actually happened, so a labelled row with a probability is a completed
+    prediction. This is measured on the live population, not on the fixed
+    historical holdout the trainer reports.
+    """
+    import asyncio as _a
+    from pathlib import Path as _P
+    from .services.model_scorecard import scorecard, verdict
+    from .services.model_paths import runtime_data_dir, describe
+
+    data_dir = runtime_data_dir()
+    card = await _a.to_thread(
+        scorecard, data_dir / "training_data.jsonl", data_dir, days)
+    return {**card, "verdict": verdict(card), "models": describe()}
+
+
+@app.get("/api/model/paths")
+async def model_paths_status():
+    """Where the models resolved from -- runtime copy, bundled seed, or missing.
+
+    Exists because a model that fails to load used to be invisible: the failure
+    logged as "running pure physics", which reads identically to "nothing has
+    been trained yet". Make it inspectable.
+    """
+    from .services.model_paths import describe
+    out = describe()
+
+    # Whether the LIVE tracker actually holds the models, not merely whether the
+    # files resolve. These differ: sklearn missing from the bundle resolved the
+    # paths fine and still loaded nothing. Absence of an error in a log is not
+    # evidence of success -- that assumption is why this went unnoticed for
+    # months -- so report the loaded state as a fact.
+    try:
+        from .services.storm_tracking_service import get_storm_tracking_service
+        svc = get_storm_tracking_service()
+        if svc is None:
+            out["tracker"] = {"running": False,
+                              "note": "storm tracking is not running (nexrad_enabled?)"}
+        else:
+            out["tracker"] = {
+                "running": True,
+                "rotation_loaded": svc._rotation_model is not None,
+                "severe_loaded": svc._severe_model is not None,
+                "features": len(svc._rotation_model_features or []),
+            }
+    except Exception as e:  # noqa: BLE001
+        out["tracker"] = {"running": False, "error": f"{type(e).__name__}: {e}"}
+    return out
+
+
+@app.get("/api/model/rotation/status")
+async def rotation_model_status():
+    """Current model, last cycle, and recent promote/reject history."""
+    from .services.model_training_service import get_model_training_service
+    svc = get_model_training_service()
+    if svc is None:
+        return {"available": False}
+    return {"available": True, **svc.status()}
+
+
+@app.post("/api/model/rotation/retrain")
+async def rotation_model_retrain(force: bool = True):
+    """Run a cycle now.
+
+    `force` skips the new-label floor and the severe-weather stand-down; it is
+    the default here because a human asking for this has already decided.  The
+    promotion gate still applies — this cannot push a worse model live.
+    """
+    from .services.model_training_service import get_model_training_service
+    svc = get_model_training_service()
+    if svc is None:
+        raise HTTPException(status_code=503, detail="training service unavailable")
+    return await svc.run_cycle(force=force)
+
+
+@app.post("/api/model/rotation/rollback")
+async def rotation_model_rollback():
+    """Restore the previously promoted model and reload the tracker."""
+    from .services.model_training_service import get_model_training_service
+    svc = get_model_training_service()
+    if svc is None:
+        raise HTTPException(status_code=503, detail="training service unavailable")
+    result = svc.rollback()
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "rollback failed"))
+    await svc._reload_tracker()
+    return result
+
+
+# ── Training-data backfill (Model dashboard) ─────────────────────────────────
+
+class BackfillStartRequest(BaseModel):
+    days: list[str] = Field(..., description="Convective days, YYYY-MM-DD")
+    sites: list[str] = Field(..., description="Radar sites, e.g. ['KILN','KIWX']")
+    workers: int = Field(default=3, ge=1, le=12)
+    full_day: bool = Field(default=False,
+                           description="Replay the whole UTC day instead of the warned window")
+    min_tor: int = Field(default=1, ge=0, le=100,
+                         description="Skip a (site, day) with fewer tornado warnings than this. "
+                                     "Positives come only from warned cells, so a site-day at 0 "
+                                     "is all negatives -- 22% of the 2024 run was spent on those.")
+
+
+@app.get("/api/model/backfill/candidates")
+async def backfill_candidates(start: str, end: str, sites: str,
+                              min_tor: int = 1):
+    """Severe days worth replaying. `sites` is comma-separated."""
+    from .services.backfill_service import get_backfill_service
+    site_list = [s.strip().upper() for s in sites.split(",") if s.strip()]
+    if not site_list:
+        raise HTTPException(status_code=400, detail="no sites given")
+    try:
+        # Hits IEM for the whole range, so keep it off the event loop.
+        days = await asyncio.to_thread(
+            get_backfill_service().find_days, start, end, site_list, min_tor)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"days": days, "sites": site_list}
+
+
+@app.get("/api/model/backfill/status")
+async def backfill_status():
+    from .services.backfill_service import get_backfill_service
+    return get_backfill_service().status()
+
+
+@app.post("/api/model/backfill/start")
+async def backfill_start(req: BackfillStartRequest):
+    from .services.backfill_service import get_backfill_service
+    result = get_backfill_service().start(
+        days=req.days, sites=[s.upper() for s in req.sites],
+        workers=req.workers, full_day=req.full_day, min_tor=req.min_tor)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "start failed"))
+    return result
+
+
+@app.post("/api/model/backfill/stop")
+async def backfill_stop():
+    from .services.backfill_service import get_backfill_service
+    result = get_backfill_service().stop()
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "stop failed"))
+    return result
+
+
+@app.post("/api/model/backfill/merge")
+async def backfill_merge():
+    """Append the completed backfill rows onto the main training archive."""
+    from .services.backfill_service import get_backfill_service
+    result = await asyncio.to_thread(get_backfill_service().merge_backfill)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "merge failed"))
+    return result
+
+
+@app.get("/api/model/training/stats")
+async def training_data_stats(which: str = "main"):
+    """Label balance, month coverage and feature population for the archive."""
+    from .services.backfill_service import (
+        BACKFILL_OUT, TRAINING_DATA, get_backfill_service,
+    )
+    path = BACKFILL_OUT if which == "backfill" else TRAINING_DATA
+    # Streams a multi-hundred-MB file; cached inside the service.
+    return await asyncio.to_thread(get_backfill_service().data_stats, path)
 
 
 @app.get("/api/settings/counties")

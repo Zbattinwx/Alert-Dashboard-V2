@@ -9,21 +9,34 @@ rotation_detected flag in storm_tracking_service.py.
 
 ## Workflow
 
-1.  Collect unlabeled data:
-        python live_qa.py --log
+Normally none of this is run by hand — `backend/services/model_training_service.py`
+performs the whole cycle on a schedule and promotes the result only if it beats
+the live model on held-out days.  The manual path still exists:
 
-2.  Apply ground-truth labels via SPC LSR crosscheck:
-        python scripts/label_from_lsr.py   (see that script for details)
+1.  Collect unlabeled data: the live QA reporter appends every tracked cell to
+    data/training_data.jsonl when `live_qa_log_training_data` is on.
 
-    OR label manually: open data/training_data.jsonl and set "label": true/false
+2.  Apply ground-truth labels from NWS warning polygons:
+        python scripts/label_from_warnings.py --days 10 --strict-tornado
+    (`--all --overwrite` re-labels the entire archive; that is a maintenance
+    action, not something the scheduled job does.)
 
 3.  Train:
-        python scripts/train_rotation_model.py
+        python scripts/train_rotation_model.py [--out candidate.joblib]
 
-4.  Evaluate, inspect feature importances, save model to data/rotation_model.joblib
+4.  Read the held-out numbers and the metrics sidecar written beside the model.
 
-5.  To use in the live system, the storm tracker calls load_rotation_model() from
-    this file and calls predict_rotation(cell) on each TrackedStormCell.
+5.  In the live system the storm tracker calls load_rotation_model() from this
+    file and predict_rotation(cell) on each TrackedStormCell.
+
+## Reading the numbers
+
+The only scores reported are on rows withheld from fitting AND from calibration,
+grouped by convective day.  An earlier version split randomly, which put one
+storm's consecutive scans on both sides of the split and reported memorisation
+as skill.  Watch **average precision**, not ROC-AUC: at the real class balance
+(~0.25% of tracked cells are under a tornado warning) AUC stays flattering while
+the precision that matters on air moves a lot.
 
 ## Features used (25 total — all computed or derived by the storm tracker)
 
@@ -67,11 +80,18 @@ NWS tornado warnings via IEM SBW archive are far better labels than LSRs:
 
 ## Model
 
-GradientBoostingClassifier (sklearn) — ~5 ms inference per scan.
-Outputs probability p_rotation in [0, 1].
+HistGradientBoostingClassifier (sklearn), isotonically calibrated on a
+day-disjoint holdout — ~5 ms inference per scan.  Outputs p_rotation in [0, 1].
 Decision threshold: 0.45 (configurable; lower = more sensitive, more FP).
+
+Histogram boosting rather than exact boosting because correct labelling grew the
+archive to ~400k labelled rows, where exact boosting's per-split sort makes a
+CV + fit run take tens of minutes — too slow for an unattended daily job.  It is
+also the published choice for this task (HGBT beat a U-Net for SPC-style
+probabilistic severe guidance, arXiv 2603.20250).
 """
 
+import datetime as _dt
 import json
 import sys
 from pathlib import Path
@@ -128,12 +148,129 @@ FEATURE_NAMES = [
 
 DECISION_THRESHOLD = 0.45
 
+# The most recent N convective days are withheld from fitting entirely, so a
+# freshly trained candidate and the incumbent it would replace can be scored on
+# the same never-seen data.  Each retrain excludes the newest window, and an
+# older incumbent's cutoff is older still, so neither has seen it.
+HOLDOUT_DAYS = 21
+
+# Below this many positives the holdout cannot discriminate between two models
+# and the promotion gate must not act on it.
+MIN_HOLDOUT_POS = 25
+
+# ...and they must be spread across at least this many convective days, or the
+# comparison is really a comparison on one storm.
+MIN_HOLDOUT_POS_DAYS = 3
+
+# Absolute skill floor a candidate must clear before it is eligible at all.
+#
+# These exist because of a real near-miss: a candidate with AUC 0.457 and ZERO
+# true positives was voted through on Brier score alone.  At this class balance
+# (~0.02% of held-out rows are positive) a model that predicts ~0 for every row
+# earns a near-perfect Brier while catching nothing, so calibration can only be
+# a tie-break BETWEEN models that already discriminate -- never a reason to
+# promote one that does not.
+MIN_USEFUL_AUC = 0.60      # below this it is not ranking storms at all
+MIN_AP_LIFT = 2.0          # AP must beat the base rate by this factor
+
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_labeled_records(path: Path) -> tuple[list, list]:
-    """Return (X_rows, y_labels) for all labeled records in the JSONL file."""
-    X, y = [], []
+def convective_day(ts: str) -> str:
+    """Map a scan timestamp to its CONVECTIVE day (12Z -> 12Z), as YYYY-MM-DD.
+
+    This is the grouping unit for every split below.  Calendar days would cut a
+    severe evening in half — an Ohio event running 22Z to 04Z would put its
+    first hours in train and its last hours in test, which is the leak we are
+    trying to remove, not a split.
+    """
+    from datetime import datetime, timedelta
+    try:
+        dt = datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return "unknown"
+    return (dt - timedelta(hours=12)).strftime("%Y-%m-%d")
+
+
+# Features that are only ever absent, never legitimately zero.  Copolar
+# correlation for a weather target sits at 0.8-1.0; CC at exactly 0.0 means the
+# dual-pol analysis did not run, NOT total decorrelation.
+#
+# This distinction is not cosmetic.  CC collapsing toward zero IS the debris
+# signature — the strongest single tornado indicator on radar — so storing
+# "not computed" as 0.0 told the model that 391,471 ordinary storms (78% of the
+# archive, every row collected before the dual-pol fix) looked like debris
+# balls.  That is worse than missing data: it is confidently wrong data, and it
+# doubles as a giveaway for which collection era a row came from.
+#
+# HistGradientBoostingClassifier handles NaN natively, learning a default branch
+# direction per split, so "unknown" is representable and costs nothing.
+DUALPOL_FEATURES = ("mean_cc", "min_cc", "mean_zdr")
+DUALPOL_SENTINEL = "mean_cc"   # if this is 0/absent, none of them were computed
+
+
+def feature_row(feats: dict) -> list:
+    """Feature vector with genuinely-absent values as NaN rather than 0.0.
+
+    Must stay in lockstep with `StormTrackingService._cell_to_feature_vector`,
+    which does the same thing at inference time.
+    """
+    import math
+    dual_missing = not feats.get(DUALPOL_SENTINEL)
+    row = []
+    for name in FEATURE_NAMES:
+        if name in DUALPOL_FEATURES and dual_missing:
+            row.append(math.nan)
+        else:
+            row.append(float(feats.get(name, 0.0)))
+    return row
+
+
+# ── Prediction targets ────────────────────────────────────────────────────────
+# Both are derived from ONE non-strict labelling pass; see the module docstring
+# for why SV.W is excluded from the rotation target rather than counted negative.
+TARGETS = ("rotation", "severe")
+
+
+def target_label(rec: dict, target: str):
+    """Map a labelled record to 1 / 0 for this target, or None to exclude it.
+
+    Returning None is a real third outcome, not an error: the rotation target
+    must DROP severe-thunderstorm-only rows. Calling them negative would teach
+    the model that a rotating storm a forecaster warned on is a non-event.
+    """
+    lab = rec.get("label")
+    if lab is None:
+        return None
+    src = rec.get("label_source") or ""
+
+    if target == "severe":
+        # Any warning is a positive. A record labelled True can only have come
+        # from a TO.W or SV.W match, so `lab` alone is the answer.
+        return 1 if lab else 0
+
+    # rotation
+    if not lab:
+        return 0
+    if src.startswith("TO"):
+        return 1
+    return None      # SV.W-only: ambiguous, exclude
+
+
+def load_labeled_records(path: Path, target: str = "rotation"):
+    """Return (X_rows, y_labels, groups, times) for all labeled records.
+
+    `target` selects which question is being asked of the same archive --
+    "will this cell be tornado-warned" or "will it be warned at all". See
+    TARGETS / target_label.
+
+    `groups` is the convective day of each row.  It exists because storm cells
+    are tracked across consecutive volume scans, so one storm contributes dozens
+    of near-identical rows a few minutes apart.  Any split that separates those
+    rows at random puts scan N in train and scan N+1 in validation and reports
+    an AUC that measures memorisation, not skill.
+    """
+    X, y, groups, times = [], [], [], []
     skipped = 0
     with path.open(encoding="utf-8") as f:
         for line in f:
@@ -145,160 +282,302 @@ def load_labeled_records(path: Path) -> tuple[list, list]:
             except json.JSONDecodeError:
                 skipped += 1
                 continue
-            if rec.get("label") is None:
+            lab = target_label(rec, target)
+            if lab is None:
+                # Unlabelled, or excluded by this target (SV.W under rotation).
                 skipped += 1
                 continue
             feats = rec.get("features") or {}
-            row = [float(feats.get(name, 0.0)) for name in FEATURE_NAMES]
-            X.append(row)
-            y.append(1 if rec["label"] else 0)
+            X.append(feature_row(feats))
+            y.append(lab)
+            ts = rec.get("ts") or ""
+            groups.append(convective_day(ts))
+            times.append(ts)
 
-    print(f"Loaded {len(X)} labeled records ({skipped} skipped / unlabeled)")
+    print(f"Loaded {len(X)} labeled records for target={target!r} "
+          f"({skipped} skipped / unlabeled / excluded)")
     pos = sum(y)
-    print(f"  Positives (real meso): {pos}  Negatives: {len(y)-pos}")
-    return X, y
+    kind = "tornado-warned" if target == "rotation" else "warned (SVR or TOR)"
+    print(f"  Positives ({kind}): {pos}  Negatives: {len(y)-pos}")
+    print(f"  Convective days: {len(set(groups))}")
+    return X, y, groups, times
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
-def train(X, y):
+def evaluate(model, X, y, label="holdout") -> dict:
+    """Score a fitted model on data it has never seen.
+
+    Returned verbatim into the metrics sidecar and read by the promotion gate,
+    so every number here must come from held-out rows only.
+    """
+    import numpy as np
+    from sklearn.metrics import (
+        average_precision_score, brier_score_loss, confusion_matrix,
+        roc_auc_score,
+    )
+
+    Xa, ya = np.asarray(X, dtype=float), np.asarray(y, dtype=int)
+    n_pos = int(ya.sum())
+    out = {"set": label, "n": int(len(ya)), "n_pos": n_pos,
+           "n_neg": int(len(ya) - n_pos)}
+    if n_pos == 0 or n_pos == len(ya):
+        # A single-class holdout cannot rank anything.  Say so rather than
+        # emitting a number the promotion gate would compare against.
+        out["degenerate"] = True
+        return out
+
+    p = model.predict_proba(Xa)[:, 1]
+    pred = (p >= DECISION_THRESHOLD).astype(int)
+    tn, fp, fn, tp = confusion_matrix(ya, pred, labels=[0, 1]).ravel()
+
+    # A FIXED probability threshold is meaningless across base rates.  0.45 was
+    # chosen when the archive was 60% positive (from mislabelled data); at the
+    # real ~3% rate an isotonically-calibrated model's scores barely reach it, so
+    # a genuinely skilful model reported tp=0 / precision=0 and would have been
+    # thrown out by the promotion gate.  Derive the operating point from the
+    # held-out data instead, and report both.
+    from sklearn.metrics import precision_recall_curve
+    prec, rec, thr = precision_recall_curve(ya, p)
+    # precision_recall_curve returns one more prec/rec than thresholds.
+    prec, rec = prec[:-1], rec[:-1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f1 = np.where((prec + rec) > 0, 2 * prec * rec / (prec + rec), 0.0)
+    best = int(np.argmax(f1)) if len(f1) else 0
+    op_thr = float(thr[best]) if len(thr) else DECISION_THRESHOLD
+    op_pred = (p >= op_thr).astype(int)
+    o_tn, o_fp, o_fn, o_tp = confusion_matrix(ya, op_pred, labels=[0, 1]).ravel()
+    out.update(
+        op_threshold=op_thr,
+        op_precision=float(prec[best]) if len(prec) else 0.0,
+        op_recall=float(rec[best]) if len(rec) else 0.0,
+        op_f1=float(f1[best]) if len(f1) else 0.0,
+        op_tp=int(o_tp), op_fp=int(o_fp), op_tn=int(o_tn), op_fn=int(o_fn),
+    )
+
+    out.update(
+        auc=float(roc_auc_score(ya, p)),
+        # Average precision is the number to watch on an imbalanced problem:
+        # ROC-AUC stays flattering when negatives dominate, AP does not.
+        ap=float(average_precision_score(ya, p)),
+        brier=float(brier_score_loss(ya, p)),
+        precision=float(tp / (tp + fp)) if (tp + fp) else 0.0,
+        recall=float(tp / (tp + fn)) if (tp + fn) else 0.0,
+        tp=int(tp), fp=int(fp), tn=int(tn), fn=int(fn),
+        degenerate=False,
+    )
+    return out
+
+
+def train(X, y, groups=None, times=None, out_path=None,
+          holdout_days: int = HOLDOUT_DAYS):
     """Train a class-balanced, probability-calibrated rotation classifier.
 
-    Pipeline (each addresses a problem we hit in earlier training rounds):
+    Every split here is grouped by CONVECTIVE DAY.  That is the whole point: a
+    tracked storm emits one row per volume scan, so neighbouring rows are nearly
+    identical, and the previous random `train_test_split` put scan N in train
+    and scan N+1 in the calibration set.  The resulting ROC-AUC measured how
+    well the model remembered a storm it had already seen — exactly the number
+    an automated promotion gate must not be fed.
 
-    1. **Inverse-class-frequency sample weights.**  Our training data is
-       heavily skewed positive (~79% in the strict-TOR run) because cells
-       collect mostly during severe weather events.  Weighting each sample
-       by 1/class_freq restores the effective 50/50 balance during fitting
-       so the model isn't free-riding on the majority class.
+    Three splits, all day-disjoint:
 
-    2. **Isotonic probability calibration on a held-out 20% set.**  Raw
-       GradientBoosting scores aren't true probabilities — a model output
-       of 0.7 might correspond to a 50% true positive rate on an imbalanced
-       dataset.  The storm tracking service uses fixed probability
-       thresholds (0.10 / 0.80) for its score nudges, so the scores
-       *have* to be calibrated for those thresholds to mean anything.
-       Isotonic regression is non-parametric and the safer choice when
-       the score-probability map isn't sigmoid-shaped.
+    1. **Temporal holdout** - the most recent `holdout_days` convective days are
+       removed before anything is fitted, and no model ever trains on them.
+       Because each retrain excludes the newest window, a previously-trained
+       incumbent (whose own cutoff is older) has not seen the current holdout
+       either, so scoring both on it is a fair comparison.
+    2. **Calibration set** - a day-disjoint 20% of what remains, so the isotonic
+       map is fitted on rows the base model has not seen.
+    3. **GroupKFold CV** - reported for stability, grouped the same way.
 
-    Saves the wrapped (calibrated) model to MODEL_OUT.
+    Returns (calibrated_model, metrics_dict).
     """
     import numpy as np
     from sklearn.base import clone
     from sklearn.calibration import CalibratedClassifierCV
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.metrics import (
-        brier_score_loss, classification_report,
-        confusion_matrix, roc_auc_score,
-    )
-    from sklearn.model_selection import StratifiedKFold, train_test_split
-    from sklearn.preprocessing import StandardScaler
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import GroupKFold, GroupShuffleSplit
     from sklearn.pipeline import Pipeline
     import joblib
 
+    out_path = Path(out_path) if out_path else MODEL_OUT
     Xarr = np.array(X, dtype=float)
     yarr = np.array(y, dtype=int)
+    garr = np.array(groups if groups is not None else ["all"] * len(yarr))
 
-    # ── Class-balanced sample weights ───────────────────────────────────
-    counts = np.bincount(yarr)
-    n_classes = len(counts)
-    class_weights = len(yarr) / (n_classes * counts)
-    sample_weights = class_weights[yarr]
-    print(f"Class weights (inverse frequency):")
+    metrics = {
+        "trained_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "n_rows": int(len(yarr)),
+        "n_pos": int(yarr.sum()),
+        "n_days": int(len(set(garr.tolist()))),
+        "features": list(FEATURE_NAMES),
+        "decision_threshold": DECISION_THRESHOLD,
+    }
+
+    # -- 1. Temporal holdout by convective day --------------------------------
+    days = sorted({d for d in garr.tolist() if d != "unknown"})
+    hold_days = set(days[-holdout_days:]) if len(days) > holdout_days else set()
+    if hold_days:
+        hold_mask = np.isin(garr, list(hold_days))
+        # Refuse a holdout that cannot discriminate: an all-negative window (a
+        # quiet fortnight) would score every candidate identically and the gate
+        # would promote on noise.
+        if yarr[hold_mask].sum() < MIN_HOLDOUT_POS or (~hold_mask).sum() < 50:
+            print(f"  holdout of {len(hold_days)} days holds "
+                  f"{int(yarr[hold_mask].sum())} positives (< {MIN_HOLDOUT_POS})"
+                  " - falling back to a grouped random holdout")
+            hold_days = set()
+    if not hold_days:
+        gss0 = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        _, ho_i = next(gss0.split(Xarr, yarr, garr))
+        hold_mask = np.zeros(len(yarr), dtype=bool)
+        hold_mask[ho_i] = True
+        metrics["holdout_kind"] = "grouped_random"
+    else:
+        metrics["holdout_kind"] = "temporal"
+
+    # Record the holdout days in BOTH cases.  The promotion gate has to score the
+    # incumbent on exactly these rows, and it can only reconstruct them from this
+    # list — an unreproducible holdout makes the comparison meaningless.
+    metrics["holdout_days"] = sorted(set(garr[hold_mask].tolist()))
+
+    X_hold, y_hold = Xarr[hold_mask], yarr[hold_mask]
+    X_fit, y_fit, g_fit = Xarr[~hold_mask], yarr[~hold_mask], garr[~hold_mask]
+    print(f"\nHoldout ({metrics['holdout_kind']}): {len(y_hold)} rows, "
+          f"{int(y_hold.sum())} positive, "
+          f"across {len(set(garr[hold_mask].tolist()))} day(s)")
+    print(f"Training pool: {len(y_fit)} rows across {len(set(g_fit.tolist()))} day(s)")
+
+    if len(set(y_fit.tolist())) < 2:
+        raise SystemExit("Training pool has only one class - cannot fit.")
+
+    # -- Class-balanced sample weights ----------------------------------------
+    counts = np.bincount(y_fit, minlength=2)
+    class_weights = len(y_fit) / (2 * np.maximum(counts, 1))
+    w_fit = class_weights[y_fit]
+    print("Class weights (inverse frequency):")
     for cls, w in enumerate(class_weights):
-        label = "meso" if cls else "no-meso"
-        print(f"  {label}: {w:.3f}  (count={counts[cls]})")
+        name = "meso" if cls else "no-meso"
+        print(f"  {name:<8} {w:.3f}  (count={counts[cls]})")
 
+    # Histogram gradient boosting, not the exact GradientBoostingClassifier the
+    # first version used.  Two reasons:
+    #
+    #  * Speed.  Correct labelling took the archive from 27k labelled rows to
+    #    401k (most cells are not under a tornado warning, which is the point),
+    #    and exact boosting sorts every feature at every split — a 5-fold CV plus
+    #    a final fit ran into the tens of minutes, which is not something a daily
+    #    unattended job can afford.  Binned splits handle this size in seconds.
+    #  * It is the published choice for this task: the HGBT baseline beat a U-Net
+    #    for SPC-style probabilistic severe guidance (arXiv 2603.20250).
+    #
+    # `early_stopping=False` is deliberate.  HistGB's internal early-stopping
+    # split is RANDOM, which would put scan N in its fit and scan N+1 in its
+    # validation set — reintroducing, inside the estimator, exactly the leak the
+    # grouped splits above exist to remove.
+    #
+    # No scaler: tree splits are scale-invariant, and dropping it removes a
+    # fitted transform from the artefact the tracker loads.
     base = Pipeline([
-        ("scaler", StandardScaler()),
-        ("clf", GradientBoostingClassifier(
-            n_estimators=200,
-            learning_rate=0.05,
-            max_depth=4,
-            subsample=0.8,
-            min_samples_leaf=5,
+        ("clf", HistGradientBoostingClassifier(
+            max_iter=300,
+            learning_rate=0.06,
+            max_leaf_nodes=31,
+            min_samples_leaf=20,
+            l2_regularization=1.0,
+            early_stopping=False,
             random_state=42,
         )),
     ])
 
-    # ── Hold out 20% for calibration ────────────────────────────────────
-    # The calibration step needs data the base model has not seen so the
-    # isotonic map doesn't overfit.  Stratified to preserve class balance.
-    X_tr, X_cal, y_tr, y_cal, w_tr, _ = train_test_split(
-        Xarr, yarr, sample_weights, test_size=0.2,
-        stratify=yarr, random_state=42,
-    )
+    # -- 2. Day-disjoint calibration split ------------------------------------
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    tr_idx, cal_idx = next(gss.split(X_fit, y_fit, g_fit))
+    X_tr, y_tr, w_tr = X_fit[tr_idx], y_fit[tr_idx], w_fit[tr_idx]
+    X_cal, y_cal = X_fit[cal_idx], y_fit[cal_idx]
 
-    # ── 5-fold CV (with class weights) on the training portion only ─────
-    # Manual loop because cross_val_score doesn't pass sample_weight
-    # through Pipeline steps when using clf__sample_weight.
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    cv_aucs = []
-    for tr_idx, te_idx in cv.split(X_tr, y_tr):
-        m = clone(base)
-        m.fit(X_tr[tr_idx], y_tr[tr_idx], clf__sample_weight=w_tr[tr_idx])
-        p = m.predict_proba(X_tr[te_idx])[:, 1]
-        cv_aucs.append(roc_auc_score(y_tr[te_idx], p))
-    print(f"\n5-fold CV ROC-AUC (class-balanced): "
-          f"{np.mean(cv_aucs):.3f} ± {np.std(cv_aucs):.3f}")
+    # -- 3. Grouped CV on the training portion only ---------------------------
+    g_tr = g_fit[tr_idx]
+    n_days_tr = len(set(g_tr.tolist()))
+    if n_days_tr >= 3 and len(set(y_tr.tolist())) == 2:
+        cv_aucs = []
+        for a, b in GroupKFold(n_splits=min(5, n_days_tr)).split(X_tr, y_tr, g_tr):
+            if len(set(y_tr[b].tolist())) < 2:
+                continue
+            m = clone(base)
+            m.fit(X_tr[a], y_tr[a], clf__sample_weight=w_tr[a])
+            cv_aucs.append(roc_auc_score(y_tr[b], m.predict_proba(X_tr[b])[:, 1]))
+        if cv_aucs:
+            metrics["cv_auc_mean"] = float(np.mean(cv_aucs))
+            metrics["cv_auc_std"] = float(np.std(cv_aucs))
+            print(f"\nGroupKFold CV ROC-AUC (day-disjoint): "
+                  f"{np.mean(cv_aucs):.3f} +/- {np.std(cv_aucs):.3f}")
 
-    # ── Fit final base estimator on the full training portion ──────────
     base.fit(X_tr, y_tr, clf__sample_weight=w_tr)
 
-    # ── Probability calibration on the held-out set ────────────────────
-    p_uncal = base.predict_proba(X_cal)[:, 1]
-    auc_uncal = roc_auc_score(y_cal, p_uncal)
-    brier_uncal = brier_score_loss(y_cal, p_uncal)
-
-    # sklearn ≥ 1.6 replaced cv='prefit' with FrozenEstimator wrapping.
-    # Fall back to the deprecated API for older sklearn.
-    try:
-        from sklearn.frozen import FrozenEstimator
-        calibrated = CalibratedClassifierCV(
-            FrozenEstimator(base), method="isotonic",
-        )
-    except ImportError:
-        calibrated = CalibratedClassifierCV(
-            base, method="isotonic", cv="prefit",
-        )
-    calibrated.fit(X_cal, y_cal)
-
-    p_cal = calibrated.predict_proba(X_cal)[:, 1]
-    auc_cal = roc_auc_score(y_cal, p_cal)
-    brier_cal = brier_score_loss(y_cal, p_cal)
-
-    print(f"\nCalibration evaluation (held-out 20%, lower Brier = better):")
-    print(f"  Uncalibrated:  AUC={auc_uncal:.3f}  Brier={brier_uncal:.4f}")
-    print(f"  Calibrated:    AUC={auc_cal:.3f}  Brier={brier_cal:.4f}")
-    if brier_cal < brier_uncal:
-        print(f"  → Calibration improved Brier by {brier_uncal - brier_cal:.4f}")
+    # -- Probability calibration on the day-disjoint calibration set ----------
+    if len(set(y_cal.tolist())) == 2:
+        try:
+            from sklearn.frozen import FrozenEstimator
+            calibrated = CalibratedClassifierCV(FrozenEstimator(base), method="isotonic")
+        except ImportError:
+            calibrated = CalibratedClassifierCV(base, method="isotonic", cv="prefit")
+        calibrated.fit(X_cal, y_cal)
+        metrics["calibrated"] = True
     else:
-        print("  → Calibration did not help; consider 'sigmoid' or skip")
+        print("  calibration set is single-class - shipping the uncalibrated model")
+        calibrated = base
+        metrics["calibrated"] = False
 
-    # ── In-sample classification report (using calibrated probs) ────────
-    y_pred_prob = calibrated.predict_proba(Xarr)[:, 1]
-    y_pred = (y_pred_prob >= DECISION_THRESHOLD).astype(int)
-    print("\nIn-sample (training set) classification report:")
-    print(classification_report(yarr, y_pred, target_names=["no-meso", "meso"]))
-    print("Confusion matrix (rows=actual, cols=predicted):")
-    print(confusion_matrix(yarr, y_pred))
-    print(f"ROC-AUC: {roc_auc_score(yarr, y_pred_prob):.3f}")
+    # -- Honest scoring on the untouched holdout ------------------------------
+    hold = evaluate(calibrated, X_hold, y_hold, label=metrics["holdout_kind"])
+    metrics["holdout"] = hold
+    print("\nHeld-out performance (never seen during fitting or calibration):")
+    if hold.get("degenerate"):
+        print("  holdout is single-class - no usable score")
+    else:
+        print(f"  ROC-AUC {hold['auc']:.3f}   AP {hold['ap']:.3f}   "
+              f"Brier {hold['brier']:.4f}")
+        print(f"  @{DECISION_THRESHOLD} (fixed):  precision {hold['precision']:.3f}  "
+              f"recall {hold['recall']:.3f}  "
+              f"(tp={hold['tp']} fp={hold['fp']} fn={hold['fn']})")
+        print(f"  @{hold.get('op_threshold', 0):.3f} (best F1): precision "
+              f"{hold.get('op_precision', 0):.3f}  recall {hold.get('op_recall', 0):.3f}  "
+              f"(tp={hold.get('op_tp')} fp={hold.get('op_fp')} fn={hold.get('op_fn')})")
 
-    # ── Feature importances from the underlying GBM ─────────────────────
-    clf = base.named_steps["clf"]
-    importances = sorted(
-        zip(FEATURE_NAMES, clf.feature_importances_),
-        key=lambda t: t[1], reverse=True,
-    )
-    print("\nFeature importances (top 10):")
-    for name, imp in importances[:10]:
-        bar = "#" * int(imp * 200)
-        print(f"  {name:<28}  {imp:.4f}  {bar}")
+    # -- Feature importance, by permutation on the holdout --------------------
+    # HistGB exposes no impurity importances, and that is no loss: impurity
+    # importance is computed on training data and inflates high-cardinality
+    # features.  Permutation importance measures the drop in held-out average
+    # precision when one column is shuffled, which is the question actually
+    # worth asking ("does this feature earn its place?").  The holdout is small,
+    # so this stays cheap.
+    if not hold.get("degenerate"):
+        from sklearn.inspection import permutation_importance
+        try:
+            r = permutation_importance(
+                calibrated, X_hold, y_hold, n_repeats=5,
+                random_state=42, scoring="average_precision", n_jobs=1,
+            )
+            importances = sorted(zip(FEATURE_NAMES, r.importances_mean),
+                                 key=lambda t: t[1], reverse=True)
+            metrics["feature_importance"] = {k: float(v) for k, v in importances}
+            print("\nPermutation importance (drop in held-out AP, top 10):")
+            for name, imp in importances[:10]:
+                bar = "#" * max(0, int(imp * 200))
+                print(f"  {name:<28}  {imp:+.4f}  {bar}")
+        except Exception as e:
+            print(f"  (permutation importance unavailable: {e})")
 
-    # Save the CALIBRATED model — this is what production loads
-    joblib.dump(calibrated, MODEL_OUT)
-    print(f"\nModel saved to {MODEL_OUT}")
-    return calibrated
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(calibrated, out_path)
+    metrics_path = out_path.with_suffix(".metrics.json")
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    print(f"\nModel saved to {out_path}")
+    print(f"Metrics saved to {metrics_path}")
+    return calibrated, metrics
 
 
 # ── Inference helpers (imported by storm_tracking_service) ────────────────────
@@ -355,6 +634,65 @@ def label_stats(path: Path):
     print(f"  Positives: {pos}  Negatives: {neg}")
 
 
+# ── Callable entry point (used by the in-process retrain) ────────────────────
+
+def run_training(data_path, out_path, target: str = "rotation",
+                 holdout_days: int = HOLDOUT_DAYS,
+                 min_rows: int = 20) -> dict:
+    """Train one target and return a result dict. Never calls sys.exit.
+
+    This is what the backend's retrain loop calls when it cannot spawn a
+    subprocess. `main()` below is a thin argv wrapper over the same work, so the
+    CLI and the in-process path cannot drift apart.
+
+    Returns {"ok": bool, ...}; on success it carries "metrics" (the same dict
+    written to the .metrics.json sidecar) so the caller need not re-read the
+    file it just wrote.
+    """
+    data_path = Path(data_path)
+    out_path = Path(out_path)
+    if not data_path.exists():
+        return {"ok": False, "error": f"no training data at {data_path}"}
+
+    try:
+        import sklearn  # noqa: F401
+    except ImportError:
+        return {"ok": False, "error": "scikit-learn is not installed"}
+
+    try:
+        X, y, groups, times = load_labeled_records(data_path, target=target)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"could not read training data: {e}"}
+
+    if len(X) < min_rows:
+        return {"ok": False,
+                "error": f"only {len(X)} labeled rows for target={target!r}, "
+                         f"need {min_rows}"}
+    if len(set(y)) < 2:
+        # One-class data fits happily and scores meaninglessly.
+        return {"ok": False,
+                "error": f"target={target!r} has only one class in {len(y)} rows"}
+
+    try:
+        train(X, y, groups=groups, times=times, out_path=out_path,
+              holdout_days=holdout_days)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"training failed: {type(e).__name__}: {e}"}
+
+    metrics = None
+    mp = out_path.with_suffix(".metrics.json")
+    if mp.exists():
+        try:
+            metrics = json.loads(mp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metrics = None
+    if metrics is None:
+        return {"ok": False, "error": "trainer wrote no metrics sidecar"}
+    return {"ok": True, "target": target, "rows": len(X),
+            "positives": int(sum(y)), "metrics": metrics,
+            "out": str(out_path)}
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -364,6 +702,17 @@ def main():
                         help="Path to training_data.jsonl")
     parser.add_argument("--stats", action="store_true",
                         help="Print labeling stats and exit")
+    parser.add_argument("--out", default=None,
+                        help="Where to write the model. Defaults to the production "
+                             "path; the auto-retrain loop points this at a candidate "
+                             "file so a bad train never clobbers what is live.")
+    parser.add_argument("--target", choices=TARGETS, default="rotation",
+                        help="Which question to train: 'rotation' (tornado "
+                             "warning, SVR-only rows excluded) or 'severe' "
+                             "(any warning). Needs a NON-strict labelling pass "
+                             "for 'severe' to see any SV.W positives.")
+    parser.add_argument("--holdout-days", type=int, default=HOLDOUT_DAYS,
+                        help="Most recent N convective days withheld from fitting.")
     args = parser.parse_args()
 
     data_path = Path(args.data)
@@ -377,19 +726,20 @@ def main():
         label_stats(data_path)
         return
 
-    X, y = load_labeled_records(data_path)
+    X, y, groups, times = load_labeled_records(data_path, target=args.target)
     if len(X) < 20:
         print(f"Only {len(X)} labeled records — need at least 20 to train.")
         print("Collect more data with live_qa.py --log and label it.")
         sys.exit(0)
 
     try:
-        import sklearn
+        import sklearn  # noqa: F401
     except ImportError:
         print("scikit-learn is not installed. Run:  pip install scikit-learn joblib")
         sys.exit(1)
 
-    train(X, y)
+    train(X, y, groups=groups, times=times, out_path=args.out,
+          holdout_days=args.holdout_days)
 
 
 if __name__ == "__main__":

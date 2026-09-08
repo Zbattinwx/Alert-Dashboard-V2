@@ -16,6 +16,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Absent-not-zero sentinel for features where 0.0 is a physically
+# meaningful value (see _cell_to_feature_vector).
+_NAN = float("nan")
+
 
 # ---------------------------------------------------------------------------
 # Severity thresholds
@@ -323,6 +327,19 @@ class TrackedStormCell:
     rij_detected: bool = False                       # Rear-Inflow Jet inside a bow echo
 
     # ── Phase 3: Enhanced dual-pol ───────────────────────────────────────────
+    # Whole-cell CC/ZDR stats, computed on the detection by _analyze_dual_pol
+    # and carried across in _update_tracked_cell.
+    #
+    # These were declared ONLY on _InternalCell.  The hail test read them from
+    # the detection, so hail detection worked, but nothing ever reached the
+    # TrackedStormCell — and `asdict()` only walks declared fields, so assigning
+    # them dynamically would still not have reached `to_dict()`.  Result:
+    # mean_cc / min_cc / mean_zdr were 0.0 in 100% of collected training rows in
+    # every month of the archive, and three of the classifier's 27 features
+    # carried no information whatsoever.
+    mean_cc: Optional[float] = None      # Mean copolar correlation over the cell
+    min_cc: Optional[float] = None       # Minimum CC (debris / mixed-phase signal)
+    mean_zdr: Optional[float] = None     # Mean differential reflectivity (dB)
     tbss_detected: bool = False          # Three-Body Scatter Spike confirmed behind hail core
     tds_tilt_count: int = 0             # Number of low tilts confirming TDS (≥2 = genuine)
 
@@ -331,8 +348,18 @@ class TrackedStormCell:
     bwer_overhang_dbz: Optional[float] = None  # Peak Z above the weak region
     mesh_mm: Optional[float] = None       # Maximum Estimated Size of Hail (mm)
     shi_value: Optional[float] = None     # Raw Severe Hail Index integral
-    # ML rotation classifier output (None if no model loaded or features unavailable)
+    # ML classifier outputs (None if no model loaded or the features were
+    # unavailable). DECLARED fields, deliberately: to_dict() is asdict(), which
+    # walks declared fields only -- a dynamically-assigned probability would be
+    # computed and then silently dropped before the frontend ever saw it.
+    #
+    # Two stages of one storm: p_severe_model is "does this cell warrant a
+    # warning at all" (trained on TO.W + SV.W), p_rotation_model is "will it be
+    # tornado-warned" (TO.W only, SVR-only cells excluded as ambiguous). Severe
+    # runs ~13x more common, so the two are read together -- severe rising then
+    # rotation following is the escalation worth seeing.
     p_rotation_model: Optional[float] = None
+    p_severe_model: Optional[float] = None
 
     # ── Internal scan-history for trend computation (not sent to frontend) ──
     # Stores the last TREND_HISTORY_MAX snapshots of key numeric fields.
@@ -429,6 +456,8 @@ class StormTrackingService:
         # model exists at data/rotation_model.joblib).  Inert until trained.
         self._rotation_model = None
         self._rotation_model_features: list[str] = []
+        # Same feature vector, different question -- see p_severe_model.
+        self._severe_model = None
 
         # GLM lightning service reference (optional)
         self._glm_service = None
@@ -465,29 +494,84 @@ class StormTrackingService:
         try:
             from pathlib import Path
             import sys
+            # scripts/ is not a package inside the frozen bundle unless the spec
+            # collects it; keep the sys.path insert for the from-source case.
             project_root = Path(__file__).resolve().parents[2]
             if str(project_root) not in sys.path:
                 sys.path.insert(0, str(project_root))
-            from scripts.train_rotation_model import (
-                load_rotation_model as _load,
-                FEATURE_NAMES,
-            )
-            model = _load() if model_path is None else None
-            if model_path is not None:
-                import joblib
-                model = joblib.load(model_path)
-            if model is None:
-                logger.info("No rotation ML model found — running pure physics")
+            from scripts.train_rotation_model import FEATURE_NAMES
+            from .model_paths import find_model
+
+            import joblib
+            # Resolve through model_paths, NOT the trainer's module-level
+            # MODEL_OUT: that is <repo>/data, which inside a frozen bundle
+            # points at the unpacked _internal tree instead of anywhere a
+            # retrain could have written.
+            path = Path(model_path) if model_path else find_model("rotation_model.joblib")
+            if path is None or not Path(path).exists():
+                logger.info("No rotation ML model found - running pure physics")
                 return False
+            model = joblib.load(path)
+            if model is None:
+                logger.info("No rotation ML model found - running pure physics")
+                return False
+            logger.info(f"Loading rotation model from {path}")
             self._rotation_model = model
             self._rotation_model_features = list(FEATURE_NAMES)
             logger.info(
                 f"Loaded ML rotation model with {len(FEATURE_NAMES)} features"
             )
             return True
+        except ImportError as e:
+            # Distinct from "no model on disk". This is the frozen-bundle
+            # failure: scripts/ missing from the exe made every Hub install run
+            # physics-only while logging something that looked like a normal
+            # untrained state. Say plainly that it is a packaging fault.
+            logger.error(
+                "ML model support is MISSING FROM THIS BUILD (%s). The tracker "
+                "will run pure physics and p_rotation_model/p_severe_model will "
+                "be null for every cell. This is a packaging bug, not an "
+                "untrained model.", e)
+            return False
         except Exception as e:
             logger.warning(f"Could not load ML rotation model: {e}")
             return False
+
+    def load_severe_model(self, model_path: Optional[str] = None) -> bool:
+        """Load the severe-thunderstorm classifier. Independent of rotation.
+
+        Shares `_rotation_model_features` because both models are trained on the
+        same FEATURE_NAMES vector; only the target differs.
+        """
+        try:
+            from pathlib import Path as _P
+            import sys
+            project_root = _P(__file__).resolve().parents[2]
+            if str(project_root) not in sys.path:
+                sys.path.insert(0, str(project_root))
+            from scripts.train_rotation_model import FEATURE_NAMES
+
+            import joblib
+            from .model_paths import find_model
+            path = _P(model_path) if model_path else find_model("severe_model.joblib")
+            if path is None or not _P(path).exists():
+                logger.info("No severe ML model found - severe probability stays None")
+                return False
+            self._severe_model = joblib.load(path)
+            if not self._rotation_model_features:
+                self._rotation_model_features = list(FEATURE_NAMES)
+            logger.info(f"Loaded ML severe model from {path.name}")
+            return True
+        except Exception as e:
+            logger.warning(f"Could not load ML severe model: {e}")
+            return False
+
+    def load_models(self) -> dict:
+        """Load both classifiers. One failing must not stop the other."""
+        return {
+            "rotation": self.load_rotation_model(),
+            "severe": self.load_severe_model(),
+        }
 
     @staticmethod
     def _cell_to_feature_vector(
@@ -532,9 +616,21 @@ class StormTrackingService:
             "depth_km":             float(cell.depth_km or 0),
             "max_ref_height_km":    float(cell.max_ref_height_km or 0),
             "centroid_height_km":   float(cell.centroid_height_km or 0),
-            "mean_cc":              0.0,  # not currently stored on the cell
-            "min_cc":               0.0,
-            "mean_zdr":             0.0,
+            # These must read the cell, not a constant.  They were hardcoded to
+            # 0.0 with a "not currently stored on the cell" comment that stopped
+            # being true once _analyze_dual_pol landed.  The training-side
+            # builder (live_qa_service.extract_features) reads the real values,
+            # so once the cell carries them a constant here would mean the model
+            # is trained on one distribution and served another.
+            #
+            # ABSENT is NaN, not 0.0.  CC for a weather target is 0.8-1.0; CC at
+            # zero is the debris signature, so reporting "not computed" as 0.0
+            # tells the model this cell looks like a debris ball.  The trainer
+            # (train_rotation_model.feature_row) maps the same sentinel to NaN,
+            # and these two must stay in lockstep.
+            "mean_cc":              float(cell.mean_cc) if cell.mean_cc else _NAN,
+            "min_cc":               float(cell.min_cc) if cell.mean_cc else _NAN,
+            "mean_zdr":             float(cell.mean_zdr) if cell.mean_cc else _NAN,
             "rot_velocity_ms":      float(cell.rotation_velocity_ms or 0),
             "llsd_max_shear":       float(cell.llsd_max_shear or 0),
             "llsd_elevation_deg":   float(cell.llsd_elevation_deg or 0),
@@ -556,32 +652,67 @@ class StormTrackingService:
         }
         return [feat.get(name, 0.0) for name in feature_names]
 
-    def _apply_rotation_model(self, cells: list["TrackedStormCell"]) -> None:
-        """Run the loaded ML classifier on each cell and store probabilities.
+    # Set the first time the rotation model fails to score, so the warning is
+    # emitted once per process rather than once per cell per scan.
+    _scoring_failure_logged = False
 
-        Probability is exposed as `p_rotation_model` for downstream consumers.
+    def _apply_ml_models(self, cells: list["TrackedStormCell"]) -> None:
+        """Run the loaded ML classifiers on each cell and store probabilities.
+
+        Exposed as `p_rotation_model` and `p_severe_model`. The feature vector
+        is identical for both models, so it is built ONCE per cell and scored
+        twice rather than recomputed.
         Score adjustment: scales with how strongly the model disagrees with
         the physics detectors.  Calibrated for the current ROC-AUC ~0.81
         ensemble vote rather than transformative classification — the model
         learns severe-storm proxies (VIL, area, dBZ) more than rotation
         per se, so impact is intentionally small.
         """
-        if self._rotation_model is None or not self._rotation_model_features:
+        if not self._rotation_model_features:
+            return
+        if self._rotation_model is None and self._severe_model is None:
             return
         import numpy as np
         for cell in cells:
             if cell.scan_count < 0:
                 cell.p_rotation_model = None
+                cell.p_severe_model = None
                 continue
             try:
                 row = np.array(
                     self._cell_to_feature_vector(cell, self._rotation_model_features),
                     dtype=float,
                 ).reshape(1, -1)
-                p = float(self._rotation_model.predict_proba(row)[0, 1])
-                cell.p_rotation_model = round(p, 3)
-            except Exception:
+                # Absent model => explicit None, never a leftover. Cells are
+                # tracked across scans, so a probability from an earlier scan
+                # would otherwise persist after a model is unloaded and keep
+                # driving the ensemble vote below with a stale number.
+                if self._rotation_model is not None:
+                    p = float(self._rotation_model.predict_proba(row)[0, 1])
+                    cell.p_rotation_model = round(p, 3)
+                else:
+                    cell.p_rotation_model = None
+                if self._severe_model is not None:
+                    ps = float(self._severe_model.predict_proba(row)[0, 1])
+                    cell.p_severe_model = round(ps, 3)
+                else:
+                    cell.p_severe_model = None
+            except Exception as e:
+                # Once per process. A systematic failure (an estimator that
+                # cannot take the NaN the feature vector deliberately emits for
+                # absent dual-pol, say) affects most cells of most scans, and
+                # logging per cell would bury it as surely as swallowing it.
+                if not StormTrackingService._scoring_failure_logged:
+                    StormTrackingService._scoring_failure_logged = True
+                    logger.warning(
+                        "rotation model could not score a cell (%s: %s) - "
+                        "p_rotation_model will be None for every cell that hits "
+                        "this. If the model predates HistGradientBoosting it "
+                        "cannot accept the NaN used for absent dual-pol.",
+                        type(e).__name__, e,
+                    )
                 cell.p_rotation_model = None
+                cell.p_severe_model = None
                 continue
 
             # Conservative ensemble vote — only highly-confident model
@@ -590,6 +721,9 @@ class StormTrackingService:
             # primary signal.  At AUC 0.81 the model is most useful as a
             # corroboration signal, not as a co-equal classifier.
             adj = 0
+            if cell.p_rotation_model is None:
+                # Severe-only load-out: nothing to vote with.
+                continue
             if cell.p_rotation_model >= 0.80 and not cell.rotation_detected:
                 adj = 2
             elif cell.p_rotation_model < 0.10 and cell.rotation_detected:
@@ -734,7 +868,7 @@ class StormTrackingService:
             self._score_cells(matched, timestamp)
 
             # Step 5b: ML rotation classifier ensemble vote (inert if no model)
-            self._apply_rotation_model(matched)
+            self._apply_ml_models(matched)
 
             # Step 6: Classify linear systems (MCS/QLCS/bow echo)
             systems = self._detect_mcs_systems(matched, timestamp)
@@ -1406,6 +1540,12 @@ class StormTrackingService:
                     debris_signature=False,
                     vil_kg_m2=None,
                     cell_top_km=None,
+                    # Dual-pol is already computed on the detection by
+                    # _analyze_dual_pol; carry it or a brand-new cell reports
+                    # no CC/ZDR on its first scan.
+                    mean_cc=new_cell.mean_cc,
+                    min_cc=new_cell.min_cc,
+                    mean_zdr=new_cell.mean_zdr,
                     track_history=[{"lat": new_cell.lat, "lon": new_cell.lon, "timestamp": now}],
                     forecast_track=[],
                     score_breakdown={},
@@ -1534,6 +1674,19 @@ class StormTrackingService:
         old.last_updated = timestamp
         old.trend = trend
         old.scan_count = max(old.scan_count, 0) + 1
+
+        # Carry the dual-pol stats onto the tracked cell.  `_analyze_dual_pol`
+        # computes these on the _InternalCell and the hail test above reads them
+        # from `new`, but nothing ever copied them across — so TrackedStormCell
+        # kept its None defaults, `mean_cc` / `min_cc` / `mean_zdr` were 0.0 in
+        # 100% of collected training rows in every month of the archive, and
+        # three of the classifier's 27 features carried no information at all.
+        if new.mean_cc is not None:
+            old.mean_cc = new.mean_cc
+        if new.min_cc is not None:
+            old.min_cc = new.min_cc
+        if new.mean_zdr is not None:
+            old.mean_zdr = new.mean_zdr
 
         return old
 
@@ -3920,11 +4073,11 @@ async def start_storm_tracking_service() -> bool:
 
     _service = StormTrackingService()
     _service._running = True
-    # Best-effort load of trained ML rotation model — inert if not present.
+    # Best-effort load of both trained ML models - inert if not present.
     try:
-        _service.load_rotation_model()
+        _service.load_models()
     except Exception as e:
-        logger.warning(f"Rotation model loader raised: {e}")
+        logger.warning(f"ML model loader raised: {e}")
     logger.info("Storm tracking service started")
     return True
 

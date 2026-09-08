@@ -304,8 +304,14 @@ class NexradService:
 
         default_site = settings.nexrad_default_site.upper()
         self._active_sites: list[str] = [default_site]
+        # When a client last chose the site. None means "never" -- the server has
+        # been on its configured home site the whole time, so there is nothing
+        # to revert.
+        self._site_set_by_client_at = None
         self._poll_interval: int = settings.nexrad_poll_interval
         self._history_count: int = settings.nexrad_history_count
+        # Display frames are optional; ingestion and tracking are not.
+        self._serve_frames: bool = getattr(settings, 'nexrad_serve_frames', True)
         self._grid_resolution_km: float = settings.nexrad_grid_resolution_km
         self._max_range_km: int = settings.nexrad_max_range_km
 
@@ -844,6 +850,12 @@ class NexradService:
             except Exception:
                 pass
 
+        # Display only. The storm tracker (and therefore the Escalation Index)
+        # reads the GRIDDED volume via on_volume_ready and never touches these
+        # frames, so skipping them costs nothing analytically.
+        if not self._serve_frames:
+            return [], volume
+
         frames = []
         for product_name, product_config in RADAR_PRODUCTS.items():
             frame = self._render_from_polar(
@@ -908,8 +920,45 @@ class NexradService:
         if self.on_status_change:
             await self.on_status_change(self._status)
 
-    async def set_active_site(self, site_id: str):
-        """Replace all active sites with just this one (backward compat / WS handler)."""
+    async def _maybe_revert_site(self) -> None:
+        """Return an unattended server to its home site.
+
+        Called from the poll loop rather than on a timer so it cannot fire while
+        the process is idle or suspended. Silent when no client ever set the
+        site, when the idle window has not elapsed, or when we are already home.
+        """
+        if self._site_set_by_client_at is None:
+            return
+        from datetime import datetime as _dt, timezone as _tz
+        from backend.config.settings import get_settings
+        st = get_settings()
+        minutes = float(getattr(st, "nexrad_idle_revert_minutes", 0) or 0)
+        if minutes <= 0:
+            return          # disabled: hold whatever the last client asked for
+        idle = (_dt.now(_tz.utc) - self._site_set_by_client_at).total_seconds() / 60.0
+        if idle < minutes:
+            return
+        home = st.nexrad_default_site.upper()
+        self._site_set_by_client_at = None       # clear first: a failure below
+                                                 # must not retry every poll
+        if self._active_sites == [home]:
+            return
+        logger.info(
+            "No client has set the radar site for %.0f min - reverting %s -> %s "
+            "so unattended collection stays on the home site",
+            idle, self._active_sites, home)
+        try:
+            await self.set_active_site(home, from_client=False)
+        except Exception as e:  # noqa: BLE001 - never kill the poll loop
+            logger.warning("Idle site revert failed: %s", e)
+
+    async def set_active_site(self, site_id: str, *, from_client: bool = True):
+        """Replace all active sites with just this one (backward compat / WS handler).
+
+        `from_client` marks the change as session-driven, which starts the idle
+        clock in `_maybe_revert_site`. Internal callers (the revert itself) pass
+        False so they cannot restart their own timer.
+        """
         site_id = site_id.upper()
         from backend.services.nexrad_sites import NEXRAD_SITES
         if site_id not in NEXRAD_SITES:
@@ -932,6 +981,9 @@ class NexradService:
                 self._last_grid_scan_dt.pop(old, None)
 
         self._active_sites = [site_id]
+        if from_client:
+            from datetime import datetime as _dt, timezone as _tz
+            self._site_set_by_client_at = _dt.now(_tz.utc)
         if site_id not in self._frames:
             self._frames[site_id] = {p: [] for p in RADAR_PRODUCTS}
         self._last_scan_key[site_id] = None
@@ -1063,6 +1115,7 @@ class NexradService:
         """
         interval = max(5, int(self._poll_interval))
         while self._running:
+            await self._maybe_revert_site()
             try:
                 await asyncio.sleep(interval)
                 await self._fetch_and_process()
@@ -1751,11 +1804,42 @@ class NexradService:
         except Exception as e:
             logger.warning(f"Velocity dealiasing failed: {e}")
 
-    def _create_grid(self, radar, site_lat: float, site_lon: float):
-        """Create a cartesian grid from polar radar data."""
+    # The only grid fields any consumer reads (storm_tracking_service):
+    # reflectivity, cross_correlation_ratio, differential_reflectivity, and
+    # whichever velocity is present.  Gridding the rest — spectrum_width,
+    # differential_phase, clutter_filter_power_removed — is pure cost: Barnes2
+    # is ~31% of the per-volume time and it was interpolating 9 fields to serve
+    # 4.  Passing this to `_create_grid` is measurably faster and provably
+    # changes nothing, but it is OPT-IN so the live path keeps its current
+    # behaviour unless someone deliberately opts in.
+    TRACKING_GRID_FIELDS = (
+        "reflectivity",
+        "velocity",
+        "velocity_dealiased",
+        "cross_correlation_ratio",
+        "differential_reflectivity",
+    )
+
+    def _create_grid(self, radar, site_lat: float, site_lon: float,
+                     fields: Optional[tuple] = None):
+        """Create a cartesian grid from polar radar data.
+
+        `fields` restricts what gets interpolated.  Default (None) grids
+        everything the radar carries, which is what the live path has always
+        done.  Pass `TRACKING_GRID_FIELDS` to grid only what is actually read.
+        """
         range_m = self._max_range_km * 1000
         res_m = self._grid_resolution_km * 1000
         grid_shape = int(2 * range_m / res_m)
+
+        if fields is None:
+            names = list(radar.fields.keys())
+        else:
+            # Intersect, preserving whatever the file actually has: a missing
+            # field is not an error, and pyart would raise on an unknown name.
+            names = [f for f in fields if f in radar.fields]
+            if not names:
+                names = list(radar.fields.keys())
 
         grid = pyart.map.grid_from_radars(
             (radar,),
@@ -1765,7 +1849,7 @@ class NexradService:
                 (-range_m, range_m),
                 (-range_m, range_m),
             ),
-            fields=list(radar.fields.keys()),
+            fields=names,
             weighting_function="Barnes2",
             grid_origin=(site_lat, site_lon),
         )

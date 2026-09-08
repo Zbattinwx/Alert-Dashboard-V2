@@ -4870,3 +4870,268 @@ body {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
 }
+
+/* ── Model & Training Data ─────────────────────────────────────────────────
+   Uses the existing token vocabulary so it reskins with the rest of the app.
+   The verdict badges and the "DEAD" feature state are the point of the page:
+   a model that looks fine and is noise, and a feature column that is silently
+   all zeros, are both invisible unless something says so out loud. */
+
+.model-section { max-width: 1100px; }
+
+.model-msg {
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--spacing-md);
+  font-size: 0.875rem;
+  border-left: 3px solid var(--accent-blue);
+  background: var(--bg-tertiary);
+}
+.model-msg.err { border-left-color: var(--accent-red); }
+.model-msg.ok  { border-left-color: var(--accent-green); }
+
+.model-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+}
+.model-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--spacing-md); margin-bottom: var(--spacing-sm);
+}
+.model-card-head h3 { font-size: 1rem; font-weight: 600; color: var(--text-primary); }
+
+.model-badge {
+  font-size: 0.75rem; font-weight: 600; padding: 3px 10px;
+  border-radius: 999px; white-space: nowrap;
+}
+.model-badge.good { background: rgba(16,185,129,.15); color: var(--accent-green); }
+.model-badge.warn { background: rgba(245,158,11,.15); color: var(--accent-yellow); }
+.model-badge.bad  { background: rgba(239,68,68,.15);  color: var(--accent-red); }
+
+.model-hint {
+  font-size: 0.8125rem; color: var(--text-secondary);
+  margin: var(--spacing-sm) 0; line-height: 1.5;
+}
+.model-hint.inline { margin: 0; flex: 1; min-width: 200px; }
+
+.model-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--spacing-sm); margin: var(--spacing-sm) 0;
+}
+.model-stat {
+  background: var(--bg-tertiary); border-radius: var(--radius-md);
+  padding: var(--spacing-sm); display: flex; flex-direction: column; gap: 2px;
+}
+.model-stat-label { font-size: 0.6875rem; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--text-muted); }
+.model-stat-value { font-size: 1.25rem; font-weight: 600; color: var(--text-primary);
+  font-variant-numeric: tabular-nums; }
+.model-stat-sub { font-size: 0.6875rem; color: var(--text-muted); }
+
+.model-actions {
+  display: flex; align-items: center; gap: var(--spacing-sm);
+  flex-wrap: wrap; margin-top: var(--spacing-sm);
+}
+.model-section .btn {
+  background: var(--bg-tertiary); color: var(--text-primary);
+  border: 1px solid var(--border-color); border-radius: var(--radius-md);
+  padding: 7px 14px; font-size: 0.8125rem; font-weight: 500; cursor: pointer;
+}
+.model-section .btn:hover:not(:disabled) { border-color: var(--accent-blue); }
+.model-section .btn:disabled { opacity: .45; cursor: not-allowed; }
+.model-section .btn-primary { background: var(--accent-blue); color: #04121a; border-color: transparent; }
+.model-section .btn-danger  { background: var(--accent-red); color: #fff; border-color: transparent; }
+.model-section .btn-ghost   { background: transparent; }
+.model-section .btn-sm      { padding: 4px 10px; font-size: 0.75rem; }
+
+.model-table { width: 100%; border-collapse: collapse; margin-top: var(--spacing-sm);
+  font-size: 0.8125rem; }
+.model-table th {
+  text-align: left; font-size: 0.6875rem; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--text-muted); font-weight: 600;
+  padding: 6px 8px; border-bottom: 1px solid var(--border-color);
+}
+.model-table td { padding: 6px 8px; border-bottom: 1px solid var(--border-light);
+  color: var(--text-primary); }
+.model-table tr.picked { background: rgba(0,206,209,.06); }
+.model-table .muted { color: var(--text-secondary); }
+
+.pill { font-size: 0.6875rem; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+  background: var(--bg-tertiary); color: var(--text-secondary); }
+.pill.promoted { background: rgba(16,185,129,.15); color: var(--accent-green); }
+.pill.rejected { background: rgba(245,158,11,.15); color: var(--accent-yellow); }
+.pill.failed   { background: rgba(239,68,68,.15);  color: var(--accent-red); }
+
+/* Feature population bars */
+.feat-bars { display: flex; flex-direction: column; gap: 4px; margin-top: var(--spacing-sm); }
+.feat-row { display: grid; grid-template-columns: 190px 1fr 52px; align-items: center; gap: 8px; }
+.feat-name { font-size: 0.75rem; color: var(--text-secondary);
+  font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; }
+.feat-track { height: 7px; background: var(--bg-tertiary); border-radius: 999px; overflow: hidden; }
+.feat-fill { display: block; height: 100%; background: var(--accent-blue); border-radius: 999px; }
+.feat-pct { font-size: 0.6875rem; color: var(--text-muted); text-align: right;
+  font-variant-numeric: tabular-nums; }
+.feat-row.dead .feat-name { color: var(--accent-red); }
+.feat-row.dead .feat-pct  { color: var(--accent-red); font-weight: 700; }
+
+/* Backfill */
+.bf-form { display: flex; flex-wrap: wrap; gap: var(--spacing-md); margin-bottom: var(--spacing-sm); }
+.bf-form label { display: flex; flex-direction: column; gap: 4px;
+  font-size: 0.6875rem; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--text-muted); }
+.bf-form input {
+  background: var(--bg-tertiary); border: 1px solid var(--border-color);
+  border-radius: var(--radius-md); padding: 6px 10px; color: var(--text-primary);
+  font-size: 0.8125rem;
+}
+.bf-sites { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: var(--spacing-sm); }
+.chip {
+  background: var(--bg-tertiary); border: 1px solid var(--border-color);
+  color: var(--text-secondary); border-radius: 999px; padding: 4px 12px;
+  font-size: 0.75rem; cursor: pointer; font-family: ui-monospace, monospace;
+}
+.chip.on { background: rgba(0,206,209,.15); border-color: var(--accent-blue);
+  color: var(--accent-blue); }
+
+.bf-progress { margin: var(--spacing-sm) 0; }
+.bf-bar { height: 8px; background: var(--bg-tertiary); border-radius: 999px; overflow: hidden; }
+.bf-fill { display: block; height: 100%; background: var(--accent-blue);
+  border-radius: 999px; transition: width .4s ease; }
+.bf-meta { display: flex; flex-wrap: wrap; gap: var(--spacing-md); margin-top: 6px;
+  font-size: 0.75rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.bf-meta .bad { color: var(--accent-red); }
+.bf-log {
+  margin-top: var(--spacing-sm); padding: var(--spacing-sm);
+  background: var(--bg-primary); border: 1px solid var(--border-color);
+  border-radius: var(--radius-md); font-size: 0.6875rem; line-height: 1.5;
+  color: var(--text-secondary); max-height: 200px; overflow: auto;
+  white-space: pre-wrap; word-break: break-all;
+}
+
+/* ── Escalation Index: system health ──────────────────────────────────────
+   A status surface, so form carries state as well as number: a load light is
+   readable as up/down before any text is read, and the one figure that signals
+   the original silent failure (never-scored cells) can turn red on its own.
+
+   First use of the glass treatment in the dashboard — layered translucency
+   over the existing dark ground rather than another flat card, so the panel
+   reads as instrumentation sitting above the page. Kept to this panel until
+   the direction is agreed. */
+.health-card {
+  background: linear-gradient(158deg, rgba(255,255,255,.055), rgba(255,255,255,.022));
+  border: 1px solid rgba(255,255,255,.10);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 10px 30px rgba(0,0,0,.28);
+}
+
+.health-loadrow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 14px 0 4px;
+}
+.health-light {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.07);
+}
+.health-light .hl-dot {
+  width: 9px; height: 9px; border-radius: 50%; margin-top: 5px;
+  flex: none;
+}
+.health-light.up   .hl-dot { background: var(--accent-green); box-shadow: 0 0 9px var(--accent-green); }
+.health-light.down .hl-dot { background: var(--accent-red);   box-shadow: 0 0 9px var(--accent-red); }
+.health-light.neutral .hl-dot { background: var(--text-muted); }
+/* A failed load is not a neutral state — give the whole tile the tone. */
+.health-light.down {
+  background: rgba(239,68,68,.10);
+  border-color: rgba(239,68,68,.30);
+}
+.hl-text { display: flex; flex-direction: column; min-width: 0; }
+.hl-label { font-size: .82rem; font-weight: 600; color: var(--text-primary); }
+.hl-detail {
+  font-size: .72rem; color: var(--text-secondary); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.health-sub {
+  display: flex; align-items: baseline; gap: 12px;
+  margin: 22px 0 2px; padding-top: 16px;
+  border-top: 1px solid rgba(255,255,255,.07);
+}
+.health-sub h4 {
+  margin: 0; font-size: .95rem; font-weight: 600; color: var(--text-primary);
+}
+.health-window { margin-left: auto; display: flex; gap: 6px; }
+.health-window .chip {
+  font-size: .72rem; padding: 3px 10px; border-radius: 999px;
+  background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.10);
+  color: var(--text-secondary); cursor: pointer;
+}
+.health-window .chip:hover:not(:disabled) { color: var(--text-primary); }
+.health-window .chip.on {
+  background: rgba(0,206,209,.14);
+  border-color: rgba(0,206,209,.45);
+  color: var(--accent-blue);
+}
+.health-window .chip:disabled { opacity: .5; cursor: default; }
+.health-window .chip:focus-visible {
+  outline: 2px solid var(--accent-blue); outline-offset: 2px;
+}
+
+.health-targets {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px; margin-top: 12px;
+}
+.health-target {
+  padding: 13px; border-radius: 10px;
+  background: rgba(255,255,255,.035);
+  border: 1px solid rgba(255,255,255,.08);
+  border-left-width: 3px;
+}
+.health-target.good { border-left-color: var(--accent-green); }
+.health-target.warn { border-left-color: var(--accent-yellow); }
+.health-target.bad  { border-left-color: var(--accent-red); }
+.health-target.empty { border-left-color: var(--text-muted); }
+.ht-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.ht-name { font-size: .9rem; font-weight: 600; color: var(--text-primary); }
+.ht-head .model-badge { margin-left: auto; }
+.ht-empty { font-size: .78rem; color: var(--text-muted); }
+.health-target.empty { display: flex; align-items: center; gap: 10px; }
+.ht-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px;
+}
+
+.health-coverage {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px; margin-top: 14px; padding-top: 14px;
+  border-top: 1px solid rgba(255,255,255,.07);
+}
+.model-stat-value.is-bad { color: var(--accent-red); }
+
+.model-hint.warnline { color: var(--accent-yellow); }
+.model-hint.badline  { color: var(--accent-red); }
+.model-hint code {
+  font-size: .95em; padding: 1px 5px; border-radius: 4px;
+  background: rgba(255,255,255,.07);
+}
+
+.health-verdict {
+  margin: 14px 0 0; padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.07);
+  font-size: .82rem; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .health-light .hl-dot { box-shadow: none; }
+}

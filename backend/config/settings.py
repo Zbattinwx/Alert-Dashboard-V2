@@ -334,8 +334,10 @@ class Settings(BaseSettings):
 
     # NEXRAD Level 2 Radar
     nexrad_enabled: bool = Field(default=False, description="Enable Level 2 NEXRAD radar processing")
+    nexrad_idle_revert_minutes: float = Field(default=90.0, description="Return to nexrad_default_site this many minutes after the last client set the radar site, so an unattended server keeps collecting the home region instead of wherever the last browser session happened to look. 0 disables.")
     nexrad_default_site: str = Field(default="KILN", description="Default NEXRAD site ICAO code (e.g., KILN for Wilmington OH)")
     nexrad_poll_interval: int = Field(default=10, description="Seconds between checking for new volume scans (most polls are a single S3 LIST and key compare, so a tight interval is cheap)")
+    nexrad_serve_frames: bool = Field(default=True, description="Render and broadcast radar frames for display in the dashboard UI. Turn OFF on a headless server: the radar app decodes Level 2 itself, so nothing consumes these, and skipping them avoids 4 renders per volume plus nexrad_history_count frames retained per product per site. Storm-cell tracking and the Escalation Index are unaffected - they read the gridded volume, not these frames.")
     nexrad_history_count: int = Field(default=10, description="Number of past volume scans to keep in memory")
     nexrad_grid_resolution_km: float = Field(default=1.0, description="Grid resolution in km (increase for lower-power hardware)")
     nexrad_max_range_km: int = Field(default=230, description="Maximum radar range in km for rendering")
@@ -355,9 +357,22 @@ class Settings(BaseSettings):
     # Live QA reporter — in-process per-scan storm cell QA logging.  Runs as
     # an additional callback on the storm tracking service when NEXRAD is on.
     live_qa_enabled: bool = Field(default=True, description="Run the in-process live QA reporter alongside the storm tracking service")
-    live_qa_log_training_data: bool = Field(default=False, description="Append every cell to data/training_data.jsonl for ML training")
+    live_qa_log_training_data: bool = Field(default=True, description="Append every tracked cell to data/training_data.jsonl for ML training. On by default: the archive only grows while this runs, and rows are cheap (~1 KB/cell) next to the value of never having to backfill a storm day again.")
     live_qa_min_score: int = Field(default=30, description="Suppress cells below this severity score from QA log output (flagged cells always print)")
     live_qa_verbose: bool = Field(default=False, description="Show detailed rotation/structure block for every notable cell")
+    live_qa_log_min_dbz: float = Field(default=40.0, description="Only log cells at or above this reflectivity for training (flagged and high-scoring cells are always logged). Below this the rotation features are not computed, so the rows teach nothing and swamp the real convection.")
+
+    # Automated retraining of the rotation classifier.  Labels new cells from
+    # NWS warning polygons, trains a candidate, and promotes it only if it beats
+    # the live model on held-out days neither has seen.
+    auto_retrain_enabled: bool = Field(default=False, description="Periodically label new training data, retrain the rotation classifier, and promote it if it beats the live model")
+    auto_retrain_interval_hours: float = Field(default=24.0, description="Hours between retraining cycles")
+    auto_retrain_label_days: int = Field(default=10, description="Trailing days of NWS warnings to fetch when labelling new rows")
+    auto_retrain_min_new_labels: int = Field(default=500, description="Skip the cycle unless at least this many newly labelled rows exist since the last training run")
+    auto_retrain_in_process: bool = Field(default=False, description="Train inside the backend process instead of a subprocess. Forced on in a packaged build, where sys.executable is the backend itself and spawning it would launch a second server. Costs ~1-2 GB of the backend's own memory during the fit.")
+    auto_retrain_min_free_ram_gb: float = Field(default=3.0, description="Skip an in-process retrain when less physical memory than this is free, rather than pushing the machine into swap while it is ingesting radar")
+    auto_retrain_targets: list[str] = Field(default=["rotation", "severe"], description="Which prediction targets a retrain cycle rebuilds")
+    auto_retrain_min_improvement: float = Field(default=0.005, description="Average-precision margin a candidate must beat the incumbent by before it is promoted")
 
     @field_validator("filter_states", mode="before")
     @classmethod

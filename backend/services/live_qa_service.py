@@ -133,6 +133,41 @@ def extract_features(cell: dict) -> dict:
     }
 
 
+# A cell the scorer already rates this highly is worth a row regardless of how
+# weak its reflectivity looks.
+LOG_MIN_SCORE = 20.0
+
+
+def should_log_cell(cell: dict, min_dbz: float) -> bool:
+    """Is this cell worth a training row?
+
+    The log used to take EVERY tracked cell, and `live_qa_min_score` gated only
+    the console display.  The consequence, measured on the archive: September
+    2026 collected 301,715 rows in seven days against 12,422 for all of August,
+    and the new rows were ordinary rain — `llsd_max_shear` was non-zero in 5% of
+    them (69% in August), `vil_kg_m2` in 20% (92%).  Those rows cannot teach a
+    rotation classifier anything, because the rotation features are not even
+    computed for cells that weak, and they swamped the real convection.
+
+    What a useful negative looks like here is a REAL storm that is not rotating,
+    not drizzle.  So: keep anything the physics already flagged, anything the
+    scorer considers non-trivial, and otherwise require convective reflectivity.
+
+    The flag check comes first and is deliberately generous — a tornado-warned
+    QLCS cell can sit below the dBZ floor, and losing a positive costs far more
+    than keeping a marginal negative.
+    """
+    for flag in ("rotation_detected", "low_level_meso_detected",
+                 "mid_level_meso_detected", "tvs_detected",
+                 "qlcs_meso_detected", "llsd_rotation_detected",
+                 "debris_signature", "hail_indicated", "bwer_detected"):
+        if cell.get(flag):
+            return True
+    if float(cell.get("severity_score") or 0) >= LOG_MIN_SCORE:
+        return True
+    return float(cell.get("max_reflectivity_dbz") or 0) >= min_dbz
+
+
 def build_training_record(cell: dict, scan_ts: str) -> dict:
     return {
         "ts":       scan_ts,
@@ -154,7 +189,15 @@ def build_training_record(cell: dict, scan_ts: str) -> dict:
         },
         "mesh_mm":           cell.get("mesh_mm"),
         "shi_value":         cell.get("shi_value"),
+        # BOTH model outputs, recorded at the moment of the scan. These are what
+        # make the live scorecard possible: once the labeller fills in `label`
+        # from the warnings that actually followed, each row carries the
+        # prediction AND the truth, so live precision/recall needs no separate
+        # prediction store. None means the tracker could not score the cell --
+        # distinct from a low probability, and the scorecard must skip it rather
+        # than count it as a confident miss.
         "p_rotation_model":  cell.get("p_rotation_model"),
+        "p_severe_model":    cell.get("p_severe_model"),
         "label": None,
     }
 
@@ -172,11 +215,15 @@ class LiveQAReporter:
         log_file: Optional[Path] = None,
         min_score: int = 30,
         verbose: bool = False,
+        log_min_dbz: float = 40.0,
     ):
         self.log_file = log_file
         self.min_score = min_score
         self.verbose = verbose
+        self.log_min_dbz = log_min_dbz
         self._scan_count = 0
+        self._logged = 0
+        self._seen = 0
         if self.log_file is not None:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
             logger.info(f"Live QA logging training data to {self.log_file}")
@@ -217,8 +264,11 @@ class LiveQAReporter:
                 self._display_cell(cell)
 
             if self.log_file is not None:
+                keep = [c for c in cell_dicts if should_log_cell(c, self.log_min_dbz)]
+                self._logged += len(keep)
+                self._seen += len(cell_dicts)
                 with self.log_file.open("a", encoding="utf-8") as f:
-                    for cell in cell_dicts:
+                    for cell in keep:
                         rec = build_training_record(cell, scan_ts)
                         f.write(json.dumps(rec) + "\n")
         except Exception as e:
@@ -353,9 +403,11 @@ def create_live_qa_reporter(
     log_file: Optional[Path] = None,
     min_score: int = 30,
     verbose: bool = False,
+    log_min_dbz: float = 40.0,
 ) -> LiveQAReporter:
     global _reporter
     _reporter = LiveQAReporter(
-        log_file=log_file, min_score=min_score, verbose=verbose
+        log_file=log_file, min_score=min_score, verbose=verbose,
+        log_min_dbz=log_min_dbz,
     )
     return _reporter

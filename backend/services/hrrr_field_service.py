@@ -18,6 +18,7 @@ Requires `eccodes` + `scipy` (both already bundled for MRMS/soundings).
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
 import struct
@@ -121,6 +122,31 @@ HRRR_FIELDS: dict[str, dict] = {
     "wspd300":  {"derive": ("mag", ":UGRD:300 mb:", ":VGRD:300 mb:"), "label": "300 mb Jet", "conv": "ms2kt", "vmin": 0.0, "vmax": 160.0, "units": "kt", "lut": "wind_upper", "group": "Dynamics"},
 
     # ── Winter ──
+    # ── Precipitation / QPF ────────────────────────────────────────────────
+    # Each accumulation is published TWICE: a run-total (`0-6 hour acc fcst`)
+    # and a bucket (`5-6 hour acc fcst`). Both must name their window exactly,
+    # because the two records' ORDER in the .idx is not consistent between
+    # models — HRRR lists the run-total first, RRFS lists the bucket first, so a
+    # plain `:APCP:surface:` substring silently serves a 1-hour bucket labelled
+    # "Total Precip (run)" on RRFS. `idx_fh` pins the window instead of trusting
+    # position. Verified live against HRRR, RRFS, GFS and NAM .idx files.
+    "qpf":     {"idx": ":APCP:surface:", "idx_fh": ":APCP:surface:0-{f} hour acc fcst:",
+                "label": "Total Precip (run)", "conv": "mm2in",
+                "vmin": 0.0, "vmax": 6.0, "units": "in", "lut": "qpf", "group": "Precip",
+                "nodata_below": 0.01, "zero_at_f0": True},
+    "qpf_1h":  {"idx": ":APCP:surface:", "idx_fh": ":APCP:surface:{f0}-{f} hour acc fcst:",
+                "acc_hours": 1, "label": "Precip (1 h)", "conv": "mm2in",
+                "vmin": 0.0, "vmax": 2.0, "units": "in", "lut": "qpf", "group": "Precip",
+                "nodata_below": 0.01, "zero_at_f0": True},
+    "weasd":   {"idx": ":WEASD:surface:", "idx_fh": ":WEASD:surface:0-{f} hour acc fcst:",
+                "label": "Snow Water Equiv (run)", "conv": "mm2in",
+                "vmin": 0.0, "vmax": 3.0, "units": "in", "lut": "qpf", "group": "Precip",
+                "nodata_below": 0.01, "zero_at_f0": True},
+    "frozr":   {"idx": ":FROZR:surface:", "idx_fh": ":FROZR:surface:0-{f} hour acc fcst:",
+                "label": "Frozen Precip (run)", "conv": "mm2in",
+                "vmin": 0.0, "vmax": 2.0, "units": "in", "lut": "qpf", "group": "Precip",
+                "nodata_below": 0.01, "zero_at_f0": True},
+
     "snod":  {"idx": ":SNOD:surface:",  "label": "Snow Depth",        "conv": "m2in", "vmin": 0.0, "vmax": 24.0, "units": "in", "lut": "snow", "group": "Winter", "nodata_below": 0.1},
     "asnow": {"idx": ":ASNOW:surface:", "label": "Accumulated Snow",  "conv": "m2in", "vmin": 0.0, "vmax": 18.0, "units": "in", "lut": "snow", "group": "Winter", "nodata_below": 0.1},
     "ptype": {"derive": ("ptype", ":CRAIN:surface:", ":CSNOW:surface:", ":CICEP:surface:", ":CFRZR:surface:"), "label": "Precip Type", "conv": None, "vmin": 0.0, "vmax": 4.0, "units": "", "lut": "ptype", "group": "Winter", "nodata_below": 0.5},
@@ -154,6 +180,9 @@ def _rrfs_fields() -> dict[str, dict]:
         s = dict(v)
         s["file"] = "prslev" if s.get("file") == "prs" else "2dfld"
         out[k] = s
+    # RRFS publishes APCP and FROZR but NO surface WEASD (verified live in
+    # rrfs.tXXz.2dfld f006) — drop it rather than shipping a field that 404s.
+    out.pop("weasd", None)
     out["omega700"] = {"idx": ":DZDT:700 mb:", "label": "700 mb Vertical Velocity",
                        "conv": None, "vmin": -3.0, "vmax": 3.0, "units": "m/s",
                        "lut": "omega_up", "group": "Dynamics", "file": "prslev"}
@@ -186,14 +215,130 @@ _GFS_KEEP = (
     "snod", "ptype",
 )
 GFS_FIELDS: dict[str, dict] = {k: dict(HRRR_FIELDS[k]) for k in _GFS_KEEP}
+# GFS does carry a run-total APCP (`APCP:surface:0-6 hour acc fcst`, verified
+# live). Ranges are wider than HRRR's because GFS runs to 240+ h, where a
+# run-total accumulation is a season's worth rather than an afternoon's.
+GFS_FIELDS["qpf"] = {
+    "idx": ":APCP:surface:", "idx_fh": ":APCP:surface:0-{f} hour acc fcst:",
+    "label": "Total Precip (run)", "conv": "mm2in",
+    "vmin": 0.0, "vmax": 12.0, "units": "in", "lut": "qpf", "group": "Precip",
+    "nodata_below": 0.01, "zero_at_f0": True,
+}
 
 # ── NAM-NEST registry (3 km CONUS nest; Lambert-Conformal) ──────────────────
 # The 3 km CONUS nest carries nearly the full HRRR field set in one file
 # (surface + pressure levels together, incl. updraft helicity) — only ASNOW and
 # the smoke fields are absent. Single file → `key` ignores the token.
+# Precip is the exception to "nearly the full HRRR field set": the NAM nest
+# publishes ONE accumulation record, a 3-hour bucket (`APCP:surface:3-6 hour acc
+# fcst` at f06 — verified live), with no run-total and no WEASD/FROZR at the
+# surface. Inheriting HRRR's precip entries would have labelled that 3-hour
+# bucket "Total Precip (run)" and added three fields whose idx never matches.
 NAM_FIELDS: dict[str, dict] = {
-    k: dict(v) for k, v in HRRR_FIELDS.items() if k not in ("asnow", "smoke_sfc", "smoke_col")
+    k: dict(v) for k, v in HRRR_FIELDS.items()
+    if k not in ("asnow", "smoke_sfc", "smoke_col",
+                 "qpf", "qpf_1h", "weasd", "frozr")
 }
+NAM_FIELDS["qpf_3h"] = {
+    "idx": ":APCP:surface:", "idx_fh": ":APCP:surface:{f0}-{f} hour acc fcst:",
+    "acc_hours": 3, "label": "Precip (3 h)", "conv": "mm2in",
+    "vmin": 0.0, "vmax": 3.0, "units": "in", "lut": "qpf", "group": "Precip",
+    "nodata_below": 0.01, "zero_at_f0": True,
+}
+
+# ── ECMWF IFS registry (0.25° global open data) ─────────────────────────────
+# ECMWF's open data is a different shape from every NCEP model here:
+#   * the index is `.index`, JSON lines, matched on {param, levtype, levelist}
+#     rather than a `:VAR:level:` substring (see _idx_range);
+#   * parameters use ECMWF short names (`2t`, `msl`, `tp`) — there is no
+#     GRIB-name overlap with the NCEP tables, so nothing can be inherited;
+#   * accumulations (`tp`, `sf`) are RUN-TOTALS in METRES, not mm.
+# 0.25° regular lat/lon, so the generic KDTree regrid handles it like GFS.
+# Verified live: 184 index entries per step, steps 3-hourly to 144 h then
+# 6-hourly to 240 h, runs 00/06/12/18Z.
+ECMWF_FIELDS: dict[str, dict] = {
+    # Surface
+    "t2m":   {"idx": {"param": "2t", "levtype": "sfc"},  "label": "2 m Temperature", "conv": "k2f",
+              "vmin": -30.0, "vmax": 120.0, "units": "°F", "lut": "hrrr_temp", "group": "Surface"},
+    "td2m":  {"idx": {"param": "2d", "levtype": "sfc"},  "label": "2 m Dew Point", "conv": "k2f",
+              "vmin": -30.0, "vmax": 90.0, "units": "°F", "lut": "hrrr_dewpoint", "group": "Surface"},
+    "mslp":  {"idx": {"param": "msl", "levtype": "sfc"}, "label": "Mean Sea Level Pressure", "conv": "pa2mb",
+              "vmin": 960.0, "vmax": 1050.0, "units": "hPa", "lut": "height", "group": "Surface"},
+    "gust":  {"idx": {"param": "10fg", "levtype": "sfc"}, "label": "Wind Gust", "conv": "ms2mph",
+              "vmin": 0.0, "vmax": 110.0, "units": "mph", "lut": "wind_upper", "group": "Surface"},
+    "wind10": {"derive": ("mag", {"param": "10u", "levtype": "sfc"}, {"param": "10v", "levtype": "sfc"}),
+               "label": "10 m Wind", "conv": "ms2kt",
+               "vmin": 0.0, "vmax": 90.0, "units": "kt", "lut": "wind_upper", "group": "Surface"},
+    "tcc":   {"idx": {"param": "tcc", "levtype": "sfc"}, "label": "Total Cloud Cover", "conv": "frac2pct",
+              "vmin": 0.0, "vmax": 100.0, "units": "%", "lut": "rh", "group": "Surface"},
+
+    # Precip — `tp` and `sf` are run-total accumulations in METRES.
+    "qpf":   {"idx": {"param": "tp", "levtype": "sfc"}, "label": "Total Precip (run)", "conv": "m2in",
+              "vmin": 0.0, "vmax": 12.0, "units": "in", "lut": "qpf", "group": "Precip",
+              "nodata_below": 0.01, "zero_at_f0": True},
+    "sf":    {"idx": {"param": "sf", "levtype": "sfc"}, "label": "Snowfall (run, water eq)", "conv": "m2in",
+              "vmin": 0.0, "vmax": 6.0, "units": "in", "lut": "qpf", "group": "Precip",
+              "nodata_below": 0.01, "zero_at_f0": True},
+    "snod":  {"idx": {"param": "sd", "levtype": "sfc"}, "label": "Snow Depth", "conv": "m2in",
+              "vmin": 0.0, "vmax": 24.0, "units": "in", "lut": "snow", "group": "Winter",
+              "nodata_below": 0.1},
+
+    # Severe
+    "mucape": {"idx": {"param": "mucape", "levtype": "sfc"}, "label": "MU CAPE", "conv": None,
+               "vmin": 0.0, "vmax": 8000.0, "units": "J/kg", "lut": "cape", "group": "Severe",
+               "nodata_below": 100.0},
+    "pwat":   {"idx": {"param": "tcwv", "levtype": "sfc"}, "label": "Precipitable Water", "conv": "mm2in",
+               "vmin": 0.0, "vmax": 2.5, "units": "in", "lut": "pwat", "group": "Severe"},
+
+    # Upper air — ECMWF publishes geopotential height as `gh` in metres.
+    "t850":   {"idx": {"param": "t", "levtype": "pl", "levelist": "850"}, "label": "850 mb Temp",
+               "conv": "k2c", "vmin": -30.0, "vmax": 30.0, "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
+    "rh850":  {"idx": {"param": "r", "levtype": "pl", "levelist": "850"}, "label": "850 mb RH",
+               "conv": None, "vmin": 0.0, "vmax": 100.0, "units": "%", "lut": "rh", "group": "Upper Air"},
+    "wspd850": {"derive": ("mag", {"param": "u", "levtype": "pl", "levelist": "850"},
+                                   {"param": "v", "levtype": "pl", "levelist": "850"}),
+                "label": "850 mb Wind", "conv": "ms2kt",
+                "vmin": 0.0, "vmax": 80.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air"},
+    "t700":   {"idx": {"param": "t", "levtype": "pl", "levelist": "700"}, "label": "700 mb Temp",
+               "conv": "k2c", "vmin": -40.0, "vmax": 20.0, "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
+    "rh700":  {"idx": {"param": "r", "levtype": "pl", "levelist": "700"}, "label": "700 mb RH",
+               "conv": None, "vmin": 0.0, "vmax": 100.0, "units": "%", "lut": "rh", "group": "Upper Air"},
+    "z500":   {"idx": {"param": "gh", "levtype": "pl", "levelist": "500"}, "label": "500 mb Height",
+               "conv": None, "vmin": 5160.0, "vmax": 6000.0, "units": "m", "lut": "height", "group": "Upper Air"},
+    "t500":   {"idx": {"param": "t", "levtype": "pl", "levelist": "500"}, "label": "500 mb Temp",
+               "conv": "k2c", "vmin": -45.0, "vmax": 0.0, "units": "°C", "lut": "temp_upper", "group": "Upper Air"},
+    "wspd500": {"derive": ("mag", {"param": "u", "levtype": "pl", "levelist": "500"},
+                                   {"param": "v", "levtype": "pl", "levelist": "500"}),
+                "label": "500 mb Wind", "conv": "ms2kt",
+                "vmin": 0.0, "vmax": 120.0, "units": "kt", "lut": "wind_upper", "group": "Upper Air"},
+    "z300":   {"idx": {"param": "gh", "levtype": "pl", "levelist": "300"}, "label": "300 mb Height",
+               "conv": None, "vmin": 8640.0, "vmax": 9960.0, "units": "m", "lut": "height", "group": "Upper Air"},
+    "wspd250": {"derive": ("mag", {"param": "u", "levtype": "pl", "levelist": "250"},
+                                   {"param": "v", "levtype": "pl", "levelist": "250"}),
+                "label": "250 mb Wind", "conv": "ms2kt",
+                "vmin": 0.0, "vmax": 160.0, "units": "kt", "lut": "wind_upper", "group": "Dynamics"},
+    "vort500": {"idx": {"param": "vo", "levtype": "pl", "levelist": "500"}, "label": "500 mb Abs Vorticity",
+                "conv": "x1e5", "vmin": 0.0, "vmax": 50.0, "units": "×10⁻⁵ s⁻¹", "lut": "vort", "group": "Dynamics"},
+}
+
+# ── ECMWF AIFS registry (their AI model, same open-data plumbing) ───────────
+# AIFS ships a SUBSET of IFS: verified live against the f006 index, it has no
+# `10fg` (gust), no `mucape`, no `sd` (snow depth), no `tcwv` (it carries `tcw`
+# instead), no `r` (relative humidity) and no `vo` (vorticity). Deriving by
+# exclusion rather than copying keeps the two in step when IFS gains a field,
+# and keeps AIFS from advertising six entries whose index lookup would miss.
+_AIFS_DROP = ("gust", "mucape", "pwat", "snod", "rh850", "rh700", "vort500")
+AIFS_FIELDS: dict[str, dict] = {
+    k: dict(v) for k, v in ECMWF_FIELDS.items() if k not in _AIFS_DROP
+}
+# AIFS accumulations are kg m**-2 (mm) while IFS's are METRES — same `tp`/`sf`
+# parameter names, same bucket, units 25.4x apart. Read straight off the GRIB
+# `units` key, not assumed: inheriting IFS's m2in rendered a 6-hour global max
+# of 1954 inches, which is obviously wrong, but a 25.4x error on a modest field
+# would have looked perfectly plausible.
+for _k in ("qpf", "sf"):
+    if _k in AIFS_FIELDS:
+        AIFS_FIELDS[_k] = dict(AIFS_FIELDS[_k], conv="mm2in")
 
 # ── RAP registry (13 km CONUS grid 130; RAP runs until RRFSv2, not RRFSv1) ──
 # awp130pgrb carries surface + pressure levels together (verified live idx), so
@@ -310,6 +455,34 @@ MODELS: dict[str, dict] = {
         "default_file": "", "mslp": (":PRMSL:mean sea level:", ""),  # single file → token unused
         "key": (lambda date, hh, f, tok: f"gfs.{date}/{hh:02d}/atmos/gfs.t{hh:02d}z.pgrb2.0p25.f{f:03d}"),
     },
+    "ecmwf": {
+        # ECMWF IFS open data. `fhour_step` 3 because the archive is 3-hourly to
+        # 144 h (then 6-hourly to 240 — the app's axis is a FILE INDEX, so the
+        # exposed range stops at the uniform part rather than changing stride
+        # mid-axis, which the hrrrFhour axis has no way to express).
+        "label": "ECMWF", "bucket": "ecmwf-forecasts", "fields": ECMWF_FIELDS,
+        "run_hours": (0, 6, 12, 18), "fhour_offset": 0, "fhour_step": 3,
+        "max_fhour": (lambda hh: 48),   # index 48 x 3 h = 144 h
+        # `.index` REPLACES `.grib2`, it does not append to it.
+        "idx_key": (lambda key: key[:-len(".grib2")] + ".index"
+                    if key.endswith(".grib2") else key + ".index"),
+        "default_file": "",
+        "mslp": ({"param": "msl", "levtype": "sfc"}, ""),
+        "key": (lambda date, hh, f, tok:
+                f"{date}/{hh:02d}z/ifs/0p25/oper/{date}{hh:02d}0000-{f * 3}h-oper-fc.grib2"),
+    },
+    "aifs": {
+        # Same bucket, same JSON index, different product path.
+        "label": "ECMWF AIFS", "bucket": "ecmwf-forecasts", "fields": AIFS_FIELDS,
+        "run_hours": (0, 6, 12, 18), "fhour_offset": 0, "fhour_step": 6,
+        "max_fhour": (lambda hh: 40),   # index 40 x 6 h = 240 h
+        "idx_key": (lambda key: key[:-len(".grib2")] + ".index"
+                    if key.endswith(".grib2") else key + ".index"),
+        "default_file": "",
+        "mslp": ({"param": "msl", "levtype": "sfc"}, ""),
+        "key": (lambda date, hh, f, tok:
+                f"{date}/{hh:02d}z/aifs-single/0p25/oper/{date}{hh:02d}0000-{f * 6}h-oper-fc.grib2"),
+    },
     "nam": {
         "label": "NAM-NEST", "bucket": "noaa-nam-pds", "fields": NAM_FIELDS,
         "run_hours": (0, 6, 12, 18), "fhour_offset": 0,
@@ -363,6 +536,41 @@ def _check_deps() -> bool:
     return _eccodes_ok
 
 
+def _idx_key(model: str, key: str) -> str:
+    """Object key of the index that describes `key`.
+
+    NCEP appends: `...f06.grib2` -> `...f06.grib2.idx`.
+    ECMWF REPLACES the extension: `...-6h-oper-fc.grib2` -> `...-6h-oper-fc.index`.
+    Appending there yields `...fc.grib2.index`, which is a NoSuchKey — the same
+    shape of near-miss as a wrong base path, and just as invisible until it 404s.
+    """
+    m = MODELS[model]
+    fn = m.get("idx_key")
+    if fn:
+        return fn(key)
+    return key + m.get("idx_suffix", ".idx")
+
+
+def _idx_for(spec: dict, fhour: int):
+    """The .idx matcher for this field at this forecast hour.
+
+    Most fields are a fixed substring. ACCUMULATION fields are not: their idx
+    line carries the accumulation window, so a bucket record reads
+    `:APCP:surface:5-6 hour acc fcst:` at f06 and `:APCP:surface:11-12 hour acc
+    fcst:` at f12 — a fixed substring can never match both.
+
+    `idx_fh` is a format string over `{f}` (this forecast hour) and `{f0}` (the
+    start of the window). Run-TOTAL accumulations do not need it: their window
+    always starts at 0, and since the run-total record is listed before the
+    bucket record in every .idx we checked, the plain `:APCP:surface:` substring
+    already lands on it.
+    """
+    fmt = spec.get("idx_fh")
+    if fmt:
+        return fmt.format(f=fhour, f0=max(0, fhour - int(spec.get("acc_hours", 1))))
+    return spec["idx"]
+
+
 def _conv(name: Optional[str], v: np.ndarray) -> np.ndarray:
     if name == "k2f":   return (v - 273.15) * 9.0 / 5.0 + 32.0   # Kelvin → °F
     if name == "k2c":   return v - 273.15                        # Kelvin → °C
@@ -376,6 +584,7 @@ def _conv(name: Optional[str], v: np.ndarray) -> np.ndarray:
     if name == "x1e9":  return v * 1e9                           # kg/m³ → µg/m³ (smoke)
     if name == "x1e6":  return v * 1e6                           # kg/m² → mg/m² (column smoke)
     if name == "pa2mb": return v / 100.0                     # Pa -> hPa (MSLP)
+    if name == "frac2pct": return v * 100.0                  # 0-1 fraction -> % (ECMWF cloud)
     return v
 
 
@@ -501,7 +710,8 @@ class HRRRFieldService:
 
     def _exists(self, model: str, key: str) -> bool:
         try:
-            self._get_s3().head_object(Bucket=MODELS[model]["bucket"], Key=key + ".idx")
+            self._get_s3().head_object(
+                Bucket=MODELS[model]["bucket"], Key=_idx_key(model, key))
             return True
         except Exception:
             return False
@@ -659,7 +869,7 @@ class HRRRFieldService:
             else:
                 raise ValueError(f"unknown derive kind {kind}")
         else:
-            grib = self._range_get(model, key, lines, spec["idx"])
+            grib = self._range_get(model, key, lines, _idx_for(spec, fhour))
             if grib is None:
                 return self._zero_or_none(spec, fhour)
             values, lats, lons, _, _ = self._decode(grib)
@@ -805,7 +1015,11 @@ class HRRRFieldService:
                 self._idx_cache.move_to_end(ck)
                 return ent[1]
         s3 = self._get_s3()
-        idx = s3.get_object(Bucket=MODELS[model]["bucket"], Key=key + ".idx")["Body"].read().decode("utf-8", "replace")
+        # ECMWF names its index `.index` and writes JSON lines rather than the
+        # NCEP `n:offset:d=...:VAR:level:` format — see _idx_range.
+        idx = s3.get_object(
+            Bucket=MODELS[model]["bucket"],
+            Key=_idx_key(model, key))["Body"].read().decode("utf-8", "replace")
         lines = idx.splitlines()
         with self._lock:
             self._idx_cache[ck] = (time.time(), lines)
@@ -823,6 +1037,24 @@ class HRRRFieldService:
         this offset — some models (NAM) pack u & v as `n.1`/`n.2` at one offset,
         so a naive next-line `end` would be empty/backwards and S3 would serve
         the whole file. None end → open-ended (last record)."""
+        # ECMWF-style JSON index: the matcher is a dict whose keys must all
+        # equal the entry's, and the entry carries its OWN byte length, so the
+        # "offset of the next record" trick below is neither needed nor correct
+        # (ECMWF entries are not guaranteed contiguous).
+        if isinstance(idx_match, dict):
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = _json.loads(line)
+                except ValueError:
+                    continue
+                if all(str(e.get(k)) == str(v) for k, v in idx_match.items()):
+                    off = int(e["_offset"])
+                    return off, off + int(e["_length"])
+            return None, None
+
         parts = idx_match if isinstance(idx_match, tuple) else (idx_match,)
         start = None
         idx = -1
