@@ -308,7 +308,17 @@ def feature_row(feats: dict) -> list:
 # ── Prediction targets ────────────────────────────────────────────────────────
 # Both are derived from ONE non-strict labelling pass; see the module docstring
 # for why SV.W is excluded from the rotation target rather than counted negative.
-TARGETS = ("rotation", "severe")
+# Warning-based targets answer "would a forecaster act on this storm".
+# Report-based targets answer "what did this storm actually do", which is the
+# only way to get a hazard-specific answer: a severe thunderstorm warning does
+# not record whether it was issued for hail or for wind.
+TARGETS = ("rotation", "severe", "hail_1in", "hail_2in", "wind_severe", "wind_sig")
+
+# The report-based ones, labelled by scripts/label_from_lsr_hazards.py into
+# `hazard_labels`. Read the bias note in that module before trusting these as
+# absolute frequencies: storm reports need someone present to make them, so a
+# model trained on them learns "severe AND observed".
+HAZARD_TARGETS = ("hail_1in", "hail_2in", "wind_severe", "wind_sig")
 
 
 def target_label(rec: dict, target: str):
@@ -318,6 +328,16 @@ def target_label(rec: dict, target: str):
     must DROP severe-thunderstorm-only rows. Calling them negative would teach
     the model that a rotating storm a forecaster warned on is a non-event.
     """
+    if target in HAZARD_TARGETS:
+        # A row is scored only if the hazard labeller actually ran over its
+        # day. Absent means we never fetched reports for that date, which is
+        # not the same as "no hail fell" -- calling it 0 would fill the
+        # negative class with days we simply never looked at.
+        haz = rec.get("hazard_labels")
+        if not isinstance(haz, dict) or target not in haz:
+            return None
+        return int(haz[target])
+
     lab = rec.get("label")
     if lab is None:
         return None
@@ -336,6 +356,33 @@ def target_label(rec: dict, target: str):
     return None      # SV.W-only: ambiguous, exclude
 
 
+def _lead_meta(rec: dict, ts: str) -> dict:
+    """Which warning this row belongs to, and how far it precedes issuance.
+
+    Lead time is the only metric that says whether a PRE-warning detector
+    works, and it cannot be computed from the feature vector -- it needs the
+    warning's identity and issue time. `minutes_before_warning` is written by
+    the current labeller; for rows labelled before that existed it is
+    reconstructed from label_issued, so the whole archive stays measurable.
+
+    The warning id is (issue time, product). Two different offices issuing in
+    the same second would collide, which is rare and would merge two storms in
+    one median -- acceptable next to having no lead-time measurement at all.
+    """
+    issued = rec.get("label_issued")
+    if not issued or not rec.get("label"):
+        return {}
+    lead = rec.get("minutes_before_warning")
+    if lead is None:
+        try:
+            from datetime import datetime as _d
+            lead = (_d.fromisoformat(issued) - _d.fromisoformat(ts)).total_seconds() / 60.0
+        except (ValueError, TypeError):
+            return {}
+    return {"warning_id": f"{issued}|{rec.get('label_source') or ''}",
+            "lead_min": float(lead)}
+
+
 def load_labeled_records(path: Path, target: str = "rotation"):
     """Return (X_rows, y_labels, groups, times) for all labeled records.
 
@@ -349,7 +396,7 @@ def load_labeled_records(path: Path, target: str = "rotation"):
     rows at random puts scan N in train and scan N+1 in validation and reports
     an AUC that measures memorisation, not skill.
     """
-    X, y, groups, times = [], [], [], []
+    X, y, groups, times, meta = [], [], [], [], []
     skipped = 0
     blanked: dict[str, int] = {}
     with path.open(encoding="utf-8") as f:
@@ -381,6 +428,7 @@ def load_labeled_records(path: Path, target: str = "rotation"):
             ts = rec.get("ts") or ""
             groups.append(convective_day(ts))
             times.append(ts)
+            meta.append(_lead_meta(rec, ts))
 
     print(f"Loaded {len(X)} labeled records for target={target!r} "
           f"({skipped} skipped / unlabeled / excluded)")
@@ -389,10 +437,17 @@ def load_labeled_records(path: Path, target: str = "rotation"):
             print(f"  blanked {n:,} pre-{CONTAMINATED_BEFORE[name]} values of "
                   f"{name} (measured with the broken kernel)")
     pos = sum(y)
-    kind = "tornado-warned" if target == "rotation" else "warned (SVR or TOR)"
+    kind = {
+        "rotation": "tornado-warned",
+        "severe": "warned (SVR or TOR)",
+        "hail_1in": 'hail >= 1" reported',
+        "hail_2in": 'hail >= 2" reported',
+        "wind_severe": "wind >= 50 kt reported",
+        "wind_sig": "wind >= 65 kt reported",
+    }.get(target, target)
     print(f"  Positives ({kind}): {pos}  Negatives: {len(y)-pos}")
     print(f"  Convective days: {len(set(groups))}")
-    return X, y, groups, times
+    return X, y, groups, times, meta
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
@@ -462,7 +517,8 @@ def evaluate(model, X, y, label="holdout") -> dict:
 
 
 def train(X, y, groups=None, times=None, out_path=None,
-          holdout_days: int = HOLDOUT_DAYS, target: str = "rotation"):
+          holdout_days: int = HOLDOUT_DAYS, target: str = "rotation",
+          meta=None):
     """Train a class-balanced, probability-calibrated rotation classifier.
 
     Every split here is grouped by CONVECTIVE DAY.  That is the whole point: a
@@ -625,6 +681,30 @@ def train(X, y, groups=None, times=None, out_path=None,
 
     # -- Honest scoring on the untouched holdout ------------------------------
     hold = evaluate(calibrated, X_hold, y_hold, label=metrics["holdout_kind"])
+
+    # ── Lead time on the holdout ──────────────────────────────────────────
+    # AUC and AP are computed over every row, and about two thirds of the
+    # positive rows are storms ALREADY under a warning -- easy to recognise and
+    # not the job. A model can improve its AP while its lead time gets worse,
+    # and until this was measured nobody could have seen that happen.
+    if meta is not None and len(meta) == len(yarr):
+        try:
+            from backend.services.lead_time import lead_time_report, format_lead_report
+            m_hold = [m for m, keep in zip(meta, hold_mask) if keep]
+            p_hold = calibrated.predict_proba(X_hold)[:, 1]
+            thr = hold.get("op_threshold") or DECISION_THRESHOLD
+            rows = [
+                {"warning_id": m.get("warning_id"),
+                 "lead_min": m.get("lead_min"),
+                 "p": float(pp)}
+                for m, pp in zip(m_hold, p_hold) if m.get("warning_id")
+            ]
+            rep = lead_time_report(rows, threshold=float(thr))
+            metrics["lead_time"] = rep
+            print()
+            print(format_lead_report(rep))
+        except Exception as e:                              # noqa: BLE001
+            print(f"  (lead-time report unavailable: {e})")
     metrics["holdout"] = hold
     print("\nHeld-out performance (never seen during fitting or calibration):")
     if hold.get("degenerate"):
@@ -771,7 +851,7 @@ def run_training(data_path, out_path, target: str = "rotation",
         return {"ok": False, "error": "scikit-learn is not installed"}
 
     try:
-        X, y, groups, times = load_labeled_records(data_path, target=target)
+        X, y, groups, times, meta = load_labeled_records(data_path, target=target)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"could not read training data: {e}"}
 
@@ -786,7 +866,7 @@ def run_training(data_path, out_path, target: str = "rotation",
 
     try:
         train(X, y, groups=groups, times=times, out_path=out_path, target=target,
-              holdout_days=holdout_days)
+              holdout_days=holdout_days, meta=meta)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"training failed: {type(e).__name__}: {e}"}
 
@@ -837,7 +917,7 @@ def main():
         label_stats(data_path)
         return
 
-    X, y, groups, times = load_labeled_records(data_path, target=args.target)
+    X, y, groups, times, meta = load_labeled_records(data_path, target=args.target)
     if len(X) < 20:
         print(f"Only {len(X)} labeled records — need at least 20 to train.")
         print("Collect more data with live_qa.py --log and label it.")
@@ -850,7 +930,7 @@ def main():
         sys.exit(1)
 
     train(X, y, groups=groups, times=times, out_path=args.out, target=args.target,
-          holdout_days=args.holdout_days)
+          holdout_days=args.holdout_days, meta=meta)
 
 
 if __name__ == "__main__":

@@ -172,6 +172,33 @@ def hazards_for(reports: list[dict]) -> dict[str, int]:
     }
 
 
+def archive_days(path: Path) -> list:
+    """The distinct CONVECTIVE days present in a training archive.
+
+    A convective day runs 12Z to 12Z, and SPC names its report files that way,
+    so a scan at 03Z belongs to the PREVIOUS day's file. Deriving the day list
+    from the data means one request per day that can actually match something.
+    """
+    from datetime import date
+    seen = set()
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            i = line.find('"ts"')
+            if i < 0:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = rec.get("ts") or ""
+            try:
+                dt = datetime.fromisoformat(ts)
+            except ValueError:
+                continue
+            seen.add((dt - timedelta(hours=12)).date())
+    return sorted(seen)
+
+
 def label_file(path: Path, reports: list[dict], dry_run: bool) -> dict:
     """Attach hazard labels in place. Returns counts."""
     if not reports:
@@ -231,6 +258,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--from-archive", action="store_true",
+                    help="Fetch reports only for the CONVECTIVE DAYS the archive "
+                         "actually contains, instead of every day back from "
+                         "today. The archive spans 2019-2026 but holds only a "
+                         "few hundred days; --days 2660 would be 2660 requests "
+                         "for a couple of hundred useful files.")
     ap.add_argument("--data", default=str(TRAINING_DATA))
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -240,12 +273,19 @@ def main() -> int:
         print(f"No training archive at {path}")
         return 1
 
-    today = datetime.now(timezone.utc)
+    if args.from_archive:
+        days = archive_days(path)
+        print(f"{len(days)} convective days present in the archive")
+    else:
+        today = datetime.now(timezone.utc)
+        days = [(today - timedelta(days=i)).date() for i in range(args.days)]
+
     reports: list[dict] = []
-    for i in range(args.days):
-        day = today - timedelta(days=i)
+    for i, d in enumerate(days, 1):
+        day = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
         got = fetch_reports(day)
-        print(f"{day:%Y-%m-%d}: {len(got)} hail/wind reports")
+        if got or not args.from_archive:
+            print(f"[{i}/{len(days)}] {day:%Y-%m-%d}: {len(got)} hail/wind reports")
         reports.extend(got)
 
     if not reports:
