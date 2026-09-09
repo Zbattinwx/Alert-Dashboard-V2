@@ -50,7 +50,44 @@ from .hrrr_field_service import MODELS, T_N, T_NI, T_NJ, T_RES, T_W, get_hrrr_fi
 logger = logging.getLogger(__name__)
 
 MODEL = "rap"
-FHOUR = 0  # f00 = the analysis
+FHOUR = 0  # legacy default, used only when a caller passes a bare cycle string
+
+# ── Where the analysis background comes from ───────────────────────────────
+# THE SHORT VERSION: we do not wait for an F00.
+#
+# SPC's mesoanalysis is on screen at :15 past the hour and ours was ~90 minutes
+# old, and the reason is architectural rather than a bug.  SPC does not use a
+# model analysis at all: it uses the PREVIOUS cycle's short-range RAP FORECAST
+# valid at the hour as a first guess, then objectively analyses surface
+# observations onto it (Bothwell, Hart & Thompson 2002; Thompson et al. 2012
+# restate it: "The RUC analyses at the lowest model level are used as a
+# first-guess field in an objective analysis of the hourly surface
+# observations").  A forecast valid at the top of the hour exists BEFORE the
+# hour, so SPC never waits on a file.
+#
+# Measured on AWS, four consecutive cycles, 2026-09-08:
+#   RAP F00 posts ~HH:49, valid HH:00  ->  age 49-109 min, mean ~79
+#   RAP F01 posts ~HH:48, valid HH+1:00 -> age  0-60 min,  mean ~30
+# The F01 of a cycle lands about twelve minutes BEFORE its own valid time.
+# That single fact is the whole freshness fix.
+#
+# Not RRFS: measured the same day, its F00 posts ~75 min after valid AND the
+# operational AWS bucket publishes a CONUS F00 only at 00/03/06/09/12/15/18/21Z
+# -- 8 a day against RAP's 24 -- so the mean age of the newest RRFS analysis is
+# ~165 min.  It would roughly double the staleness it was meant to fix.  Worth
+# re-measuring after the 2026-10-06 operational implementation.
+#
+# Not HRRR (yet): HRRR F01 posts ~6 min before valid and would work just as
+# well on freshness, but 8 of the fields below (mlcin, cape03, efhl, ship,
+# mllcl, lapse75, mslp, thetae) are registered only for RAP in
+# hrrr_field_service.  Seven of their idx strings match live HRRR exactly and
+# only `thetae` (EPOT:surface) is genuinely absent -- but registering them in
+# HRRR_FIELDS also adds 8 entries to the app's HRRR field picker, and at
+# STRIDE=4 the assessment grid is ~15 km, so 3 km resolution buys this
+# calculation nothing.  Left as a deliberate follow-up, not an oversight.
+#
+# Order is preference.  Every entry is (model, forecast hour).
+MESO_SOURCES: tuple[tuple[str, int], ...] = (("rap", 1), ("rap", 0))
 
 # Subsample the 0.035° display grid to ~0.14° for the assessment. The threat math
 # is an area-overlap question, not a rendering one — at full resolution it is 28×
@@ -63,7 +100,49 @@ MESO_FIELDS = (
     "srh01", "srh03", "efhl", "shear06",
     "stp", "scp", "ship", "mllcl", "lapse75",
     "pwat", "t2m", "td2m", "mslp", "thetae", "lftx4", "wspd850",
+    # Simulated composite reflectivity — the initiation term. See _initiation.
+    "refc",
 )
+
+# ── Initiation gate ────────────────────────────────────────────────────────
+# THE MINNESOTA BUG, AND WHY IT WAS NEVER A THRESHOLD PROBLEM.
+#
+# STP, SCP, SHIP and EHI are CONDITIONAL discriminators. Every one of them was
+# derived from a storm-only sample: Thompson et al. 2003 fitted STP to 413
+# proximity soundings of which all 413 were storms (54 significantly tornadic,
+# 144 weakly tornadic, 215 nontornadic supercells, 75 nonsupercell storms), and
+# Thompson et al. 2012 used 22,901 severe events and say plainly that "the
+# exclusion of these weaker events precludes a complete assessment of null
+# cases". A parameter fitted to separate storm A from storm B can only answer
+# "GIVEN a storm, which kind" — it carries no information about whether a storm
+# exists. SPC says so on its own help page: "The majority of the parameters
+# displayed have not been tested as prognostic tools."
+#
+# So grading a storm-free grid box on STP is not a tuning error, it is asking a
+# question the parameter cannot answer, and it will happily return HIGH over
+# clear skies. Craven/Brooks/Hart's climatology — the one that DOES include
+# nulls, 60,090 soundings of which 45,508 had no thunder — found 39% of the
+# no-thunder soundings still had non-zero CAPE. Ingredients without a trigger
+# are the normal state of a warm-sector afternoon, not a severe threat.
+#
+# Johns & Doswell 1992 name the missing term: deep convection needs moisture, a
+# steep enough lapse rate, AND "sufficient lifting of a parcel from the moist
+# layer to allow it to reach its level of free convection". CAPE folds the
+# first two into one number and omits the third entirely.
+#
+# The gate below supplies it. Storm presence comes from simulated composite
+# reflectivity in the same GRIB file we already read — at F01 from a
+# radar-assimilating model that is a genuine short-range storm field, not a
+# guess. Everything else is only ever reported as conditional.
+MUCAPE_FLOOR = 100.0        # SPC effective-inflow base needs CAPE >= 100 J/kg
+MUCAPE_REFC_FLOOR = 50.0    # SPC's HREF screens reflectivity on MUCAPE > 50
+EFFECTIVE_CIN_LIMIT = -250.0  # effective inflow layer: CIN > -250 J/kg
+MLCIN_HARD_CAP = -200.0     # STP's own zero point for its MLCIN term
+MLCIN_WEAK_CAP = -50.0      # STP's MLCIN term is 1.0 above this
+REFC_STORM_DBZ = 40.0       # SPC HREF probability threshold
+# SPC computes neighbourhood reflectivity probabilities on a 40 km radius. The
+# assessment grid is ~0.14 deg (~15 km) after STRIDE, so +/-2 cells is ~40 km.
+REFC_NEIGHBORHOOD_CELLS = 2
 # Without these the assessment is meaningless — a cycle missing any of them is
 # treated as unavailable and the caller falls back a cycle.
 CORE_FIELDS = ("sbcape", "mlcape", "shear06", "srh01", "stp")
@@ -167,6 +246,17 @@ THREAT_AREA_THRESHOLDS = {
     "moderate": 0.0012,
     "high": 0.0009,
     "extreme": 0.0006,
+}
+
+# Plain-language names for the internal level keys.  Deliberately describing
+# how FAVOURABLE the environment is, because that is the only thing these
+# parameters measure — not how likely severe weather is at a point, which is
+# what SPC's outlook categories mean and what our old wording implied.
+LEVEL_LABELS = {
+    "marginal": "Marginally favorable",
+    "moderate": "Favorable",
+    "high": "Very favorable",
+    "extreme": "Extremely favorable",
 }
 
 THREAT_MESSAGES = {
@@ -348,20 +438,72 @@ class MesoanalysisService:
         return float(np.sum(w * mask)) / denom if denom > 0 else 0.0
 
     # ── Cycles ─────────────────────────────────────────────────────────────
+    @staticmethod
+    def _parse_run(token: str) -> tuple[str, str, int]:
+        """Split an analysis token into (model, cycle, forecast hour).
+
+        A token is "<model>:<YYYYMMDDHH>:<fhour>".  A bare 10-digit cycle is
+        still accepted so an existing ?run= link, or anything stored before
+        this change, keeps resolving.
+        """
+        parts = token.split(":")
+        if len(parts) == 3:
+            return parts[0], parts[1], int(parts[2])
+        return MODEL, token, FHOUR
+
+    @classmethod
+    def _run_token(cls, model: str, cycle: str, fhour: int) -> str:
+        return f"{model}:{cycle}:{fhour}"
+
     def latest_runs(self, limit: int = 4) -> list[str]:
-        """Newest RAP cycles that have an analysis available (short TTL cache)."""
+        """Newest available analyses, freshest valid time first.
+
+        Candidates come from every source in MESO_SOURCES; when two sources
+        offer the same valid time the earlier (preferred) one wins.
+
+        The `<= now` filter is not incidental.  An F01 is published about
+        twelve minutes BEFORE its valid time, and presenting a field labelled
+        with a future hour as the current analysis would be wrong on air --
+        it is a forecast until the clock reaches it.  Holding it until then is
+        exactly what yields the 0-60 minute age band.
+        """
         now = time.time()
         if now - self._runs_cache[0] < 120 and self._runs_cache[1]:
             return self._runs_cache[1][:limit]
         svc = get_hrrr_field_service()
-        runs = [r["run"] for r in svc.list_runs(MODEL, limit=max(limit, 4))]
+        now_dt = datetime.now(timezone.utc)
+
+        by_valid: dict[str, str] = {}
+        for model, fhour in MESO_SOURCES:
+            try:
+                cycles = [r["run"] for r in svc.list_runs(model, limit=max(limit, 4) + 2)]
+            except Exception as e:
+                logger.debug("meso: cannot list %s runs (%s)", model, e)
+                continue
+            for cycle in cycles:
+                token = self._run_token(model, cycle, fhour)
+                try:
+                    iso = self._run_iso(token)
+                except Exception:
+                    continue
+                if datetime.fromisoformat(iso) > now_dt:
+                    continue  # valid in the future — not an analysis yet
+                by_valid.setdefault(iso, token)
+
+        runs = [by_valid[k] for k in sorted(by_valid, reverse=True)]
         self._runs_cache = (now, runs)
         return runs[:limit]
 
     @staticmethod
     def _run_iso(run: str) -> str:
-        dt = datetime(int(run[:4]), int(run[4:6]), int(run[6:8]), int(run[8:10]),
-                      tzinfo=timezone.utc)
+        """VALID time of an analysis token — the cycle plus its forecast hour.
+
+        Everything user-facing is labelled from this, not from the cycle: a
+        22Z F01 is valid at 23Z and saying "22Z" would misreport it by an hour.
+        """
+        model, cycle, fhour = MesoanalysisService._parse_run(run)
+        dt = datetime(int(cycle[:4]), int(cycle[4:6]), int(cycle[6:8]), int(cycle[8:10]),
+                      tzinfo=timezone.utc) + timedelta(hours=fhour)
         return dt.isoformat()
 
     # ── Parameter grids ────────────────────────────────────────────────────
@@ -371,13 +513,14 @@ class MesoanalysisService:
             if run in self._grids:
                 return self._grids[run]
         svc = get_hrrr_field_service()
+        model, cycle, fhour = self._parse_run(run)
         # One cheap up-front check: a cycle that is still uploading has no .idx,
         # and without this every one of the fields below would separately fail
         # with NoSuchKey before we gave up on the cycle.
         try:
-            key = svc._key(MODEL, run[:8], int(run[8:10]), FHOUR,
-                           MODELS[MODEL]["default_file"])
-            svc._read_idx(MODEL, key)
+            key = svc._key(model, cycle[:8], int(cycle[8:10]), fhour,
+                           MODELS[model]["default_file"])
+            svc._read_idx(model, key)
         except Exception as e:
             logger.debug("meso: cycle %s not available yet (%s)", run, e)
             return None
@@ -385,7 +528,7 @@ class MesoanalysisService:
         out: dict[str, np.ndarray] = {}
         for fid in MESO_FIELDS:
             try:
-                g = svc._field_grid(MODEL, run, fid, FHOUR)
+                g = svc._field_grid(model, cycle, fid, fhour)
             except Exception as e:
                 logger.warning("meso: %s %s failed (%s)", run, fid, e)
                 continue
@@ -509,8 +652,76 @@ class MesoanalysisService:
         out.sort(key=lambda c: c["cells"], reverse=True)
         return out[:max_clusters]
 
+    def _initiation(self, params: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Where storms are, and where the atmosphere could support them.
+
+        Returns two masks:
+          `capable` — enough buoyancy, and not sealed by a cap.  Necessary, but
+                      on its own it is only "if something sets it off".
+          `storms`  — capable AND convection actually present in the model's
+                      reflectivity field within a ~40 km neighbourhood.
+
+        Nothing is rated outside `capable`, and nothing is rated as an ACTIVE
+        threat outside `storms`.  See the constants above for why.
+        """
+        shape = next((g.shape for g in params.values() if g is not None), None)
+        if shape is None:
+            return {}
+
+        def grid(name):
+            g = params.get(name)
+            return g if g is not None and np.shape(g) == shape else None
+
+        mucape = grid("mucape")
+        if mucape is None:
+            mucape = grid("mlcape")
+        mlcin = grid("mlcin")
+        if mlcin is None:
+            mlcin = grid("sbcin")
+
+        capable = np.ones(shape, dtype=bool)
+        if mucape is not None:
+            capable &= np.isfinite(mucape) & (mucape >= MUCAPE_FLOOR)
+        if mlcin is not None:
+            # CIN is negative. A cap stronger than STP's own zero point seals
+            # surface-based convection; NaN means unknown, not uncapped, but
+            # treating unknown as capped would erase real threats when the
+            # field simply failed to download, so it stays permissive.
+            capable &= ~(np.isfinite(mlcin) & (mlcin < MLCIN_HARD_CAP))
+        land = self.land_mask
+        if land is not None and np.shape(land) == shape:
+            capable &= land
+
+        storms = np.zeros(shape, dtype=bool)
+        refc = grid("refc")
+        if refc is not None:
+            hit = np.isfinite(refc) & (refc >= REFC_STORM_DBZ)
+            if mucape is not None:
+                hit &= np.isfinite(mucape) & (mucape > MUCAPE_REFC_FLOOR)
+            try:
+                from scipy import ndimage
+                n = REFC_NEIGHBORHOOD_CELLS * 2 + 1
+                hit = ndimage.maximum_filter(hit, size=n, mode="constant", cval=False)
+            except Exception as e:
+                logger.debug("meso: reflectivity neighbourhood unavailable (%s)", e)
+            storms = hit & capable
+
+        # Weakly inhibited and buoyant, but nothing going yet: reportable only
+        # as conditional.
+        conditional = capable & ~storms
+        if mlcin is not None:
+            conditional &= ~(np.isfinite(mlcin) & (mlcin < MLCIN_WEAK_CAP))
+
+        return {"capable": capable, "storms": storms, "conditional": conditional}
+
     def _assess(self, p: dict[str, np.ndarray]) -> tuple[dict, dict[str, np.ndarray]]:
         params = self._resolve(p)
+        gate = self._initiation(params)
+        storms = gate.get("storms")
+        capable = gate.get("capable")
+        conditional = gate.get("conditional")
+        have_refc = params.get("refc") is not None
+
         # Strong surface-based inhibition is a brick wall for SURFACE-BASED
         # convection only. Elevated storms — nocturnal hail producers, training
         # flash-flood convection — routinely thrive over large SBCIN, so gating
@@ -538,6 +749,45 @@ class MesoanalysisService:
                                 "details": "Threat suppressed by strong surface-based "
                                            "convective inhibition (CIN)."})
                     mask = None
+
+            # ── Initiation gate ────────────────────────────────────────────
+            # A parameter space is a statement about what storms WOULD do here.
+            # Whether any storm exists is a separate question, and answering it
+            # is what stops a warm, sheared, storm-free afternoon from being
+            # rendered as a severe threat.
+            res["basis"] = "environment"
+            res["conditional"] = True
+            if res["level"] != "none" and mask is not None and capable is not None:
+                mask = mask & capable
+                active = mask & storms if storms is not None else None
+                if active is not None and self._frac(active) >= floor:
+                    # Storms present: rate on the area that actually has them.
+                    mask = active
+                    res["basis"] = "storms" if have_refc else "environment"
+                    res["conditional"] = not have_refc
+                else:
+                    # No convection in the model field — the parameters still
+                    # describe what would happen IF storms formed, so keep the
+                    # threat but label it as conditional rather than active.
+                    if conditional is not None:
+                        mask = mask & conditional
+                    res["basis"] = "conditional"
+                    res["conditional"] = True
+                frac = self._frac(mask)
+                res["coverage"] = round(frac, 5)
+                if frac < floor:
+                    res.update({
+                        "level": "none", "mode": None, "modes": [],
+                        "basis": "none", "conditional": True,
+                        "details": "Ingredients present but no convection and no "
+                                   "trigger — nothing to be severe.",
+                    })
+                    mask = None
+
+            res["label"] = self._level_label(res["level"], res.get("conditional", True))
+            if res["level"] != "none":
+                res["details"] = self._threat_details(t, res)
+
             if res["level"] != "none" and mask is not None:
                 res["centers"] = self._clusters(mask)
                 masks[t] = mask
@@ -559,6 +809,37 @@ class MesoanalysisService:
         return threats, masks
 
     @staticmethod
+    def _level_label(level: str, conditional: bool) -> str:
+        """Plain-language wording for a threat level.
+
+        The level KEYS stay as they are — map layers and saved views are keyed
+        on them — but nothing user-facing should say MARGINAL / MODERATE /
+        HIGH again.  Those are the names of SPC's categorical outlook
+        categories, defined by specific probabilities of severe weather within
+        25 miles of a point.  Printing one of them over a storm-free Minnesota
+        does not just overstate our own confidence, it reads as though SPC had
+        issued that outlook.  On air that is a misrepresentation of an official
+        product, which is a different and worse problem than being wrong.
+        """
+        if level == "none":
+            return "No threat"
+        base = LEVEL_LABELS.get(level, level.title())
+        return f"{base} if storms form" if conditional else base
+
+    @staticmethod
+    def _threat_details(threat: str, res: dict) -> str:
+        """One sentence saying what this means, and on what basis.
+
+        Every composite here answers "given a storm, which kind" — so the
+        wording says "given a storm" whenever that is what we actually know.
+        """
+        level = res.get("level", "none")
+        msg = THREAT_MESSAGES.get(threat, {}).get(level, "Threat detected.")
+        if res.get("basis") == "storms":
+            return f"Storms present. {msg}"
+        return f"No convection in the analysis — conditional on storms forming. {msg}"
+
+    @staticmethod
     def _summary(threats: dict, params: dict, zone: Optional[np.ndarray]) -> str:
         active = []
         for name, d in threats.items():
@@ -566,7 +847,8 @@ class MesoanalysisService:
                 continue
             label = name.replace("_", " ").title()
             ml = MODE_LABELS.get(d.get("mode"), "")
-            active.append(f"{label}: {d['level'].upper()}" + (f" ({ml})" if ml else ""))
+            wording = d.get("label") or d["level"].title()
+            active.append(f"{label}: {wording}" + (f" ({ml})" if ml else ""))
         if not active:
             return "No significant severe weather threats detected in the analysis domain."
 

@@ -16,32 +16,46 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from . import rotation_criteria as rc
+
 logger = logging.getLogger("LiveQA")
 
-# ── Thresholds (mirror storm_tracking_service constants) ──────────────────
-MESO_VELOCITY_THRESHOLD_MS = 15.0
+# ── Thresholds for the QA LOG'S OWN LABELS ────────────────────────────────
+# These render human-readable strings in the QA log. They are NOT the
+# detection thresholds: the tracker ranks rotation against a RANGE-AWARE MDA
+# threshold (rotation_criteria), because a flat number means different things
+# at 30 km and 200 km. The velocity values below are kept only so a log line
+# reads sensibly at a glance — never treat them as the decision.
+MESO_VELOCITY_THRESHOLD_MS = rc.MDA_RANK_VROT_MS[rc.MDA_MIN_MESO_RANK]  # 15
 TVS_VELOCITY_THRESHOLD_MS  = 25.0
 TDS_MIN_ROTATION_MS        = 20.0
 DEBRIS_CC_THRESHOLD        = 0.80
 MAX_PLAUSIBLE_SPEED_KPH    = 175.0
-LLSD_WEAK_SHEAR            = 0.005
-LLSD_MESO_SHEAR            = 0.010
+LLSD_WEAK_SHEAR            = rc.LLSD_NOISE_FLOOR      # 0.006
+LLSD_MESO_SHEAR            = rc.LLSD_SIGNIFICANT      # 0.010
 LLSD_STRONG_SHEAR          = 0.020
-LLSD_TORNADIC_SHEAR        = 0.025
+LLSD_EXTREME_SHEAR         = rc.LLSD_EXTREME          # 0.050
 
 
 def _shear_label(shear):
+    """Azimuthal shear, described honestly.
+
+    There is no published azimuthal-shear value that diagnoses a tornado, so
+    the old top band -- 0.025 /s labelled TORNADIC -- was asserting something
+    nobody has demonstrated, in a log used to sanity-check the tracker. Shear
+    RANKS rotation; the tornado question is the gate-to-gate dV test.
+    """
     if shear is None:
         return "n/a"
-    if shear >= LLSD_TORNADIC_SHEAR:
-        return f"{shear:.4f}/s TORNADIC"
+    if shear >= LLSD_EXTREME_SHEAR:
+        return f"{shear:.4f}/s EXTREME"
     if shear >= LLSD_STRONG_SHEAR:
         return f"{shear:.4f}/s STRONG"
     if shear >= LLSD_MESO_SHEAR:
-        return f"{shear:.4f}/s MESO-CLASS"
+        return f"{shear:.4f}/s SIGNIFICANT"
     if shear >= LLSD_WEAK_SHEAR:
         return f"{shear:.4f}/s weak"
-    return f"{shear:.4f}/s sub-threshold"
+    return f"{shear:.4f}/s below noise floor"
 
 
 def _speed_label(speed_kph):

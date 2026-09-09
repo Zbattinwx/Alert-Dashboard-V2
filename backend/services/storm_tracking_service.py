@@ -8,6 +8,7 @@ import asyncio
 import logging
 
 from .failure_log import note_failure
+from . import rotation_criteria as rc
 import math
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -120,10 +121,19 @@ RNI_BULGE_KM = 25.0           # Rear-inflow notch: bow bulge ≥ this
 # Units: /s (inverse seconds). Derived from ∂V/∂azimuth over a small kernel.
 LLSD_KERNEL_RAYS = 2           # Half-width in rays for shear stencil (±2 rays ≈ 2°)
 LLSD_KERNEL_GATES = 3          # Half-width in gates for local max search
+# Shear magnitudes, /s.  These are MRMS's ranking bands and they are only
+# meaningful because the kernel is now a fixed 2500 m (see rotation_criteria).
+# NOTE the deliberate absence of a "tornadic" band: there is no published
+# azimuthal-shear threshold that diagnoses a tornado.  Shear RANKS rotation;
+# the tornado question is the TDA's gate-to-gate ΔV test, which lives in
+# rotation_criteria.is_tvs.  The old constant named LLSD_TORNADIC_SHEAR
+# implied otherwise and drove a 100/100 score on 0.025 /s — which, under the
+# old fixed-ray kernel, a 2 m/s noise fluctuation could reach at 10 km.
 LLSD_WEAK_SHEAR = 0.005        # /s — noticeable shear
 LLSD_MESO_SHEAR = 0.010        # /s — weak meso-class rotation
 LLSD_STRONG_SHEAR = 0.020      # /s — strong low-level rotation
-LLSD_TORNADIC_SHEAR = 0.025    # /s — tornadic-class shear
+LLSD_EXTREME_SHEAR = 0.050     # /s — MRMS "extreme"; the top of the scale,
+                               # not a tornado diagnosis
 LLSD_MAX_ELEVATION_DEG = 1.2   # Only consider sweeps at or below this tilt for LLSD
 LLSD_CELL_SEARCH_KM = 4.0      # Half-width of the window around each cell
 # Multi-tilt rotation profile — run the same shear analysis at every tilt to
@@ -297,6 +307,23 @@ class TrackedStormCell:
     rotation_profile: list = field(default_factory=list)  # [{height_km, shear, rot_ms}]
     rotation_depth_km: Optional[float] = None    # Vertical extent of rotation ≥ meso threshold
     rotation_base_km: Optional[float] = None     # Lowest tilt with ≥ meso-class rotation
+    # MDA-style ranking.  `meso_rank` is 0–9 on Stumpf et al. 1998's scale
+    # (5 = minimal mesocyclone), computed against the range-relaxed threshold,
+    # so it means the same thing at 30 km and at 200 km — which a bare Vrot
+    # does not.  `rotation_volumes` counts CONSECUTIVE volumes with a
+    # qualifying couplet: the MDA calls a single-volume detection a couplet and
+    # only promotes it to a mesocyclone on the second, which is a distinction
+    # worth keeping rather than either suppressing or overstating a first hit.
+    meso_rank: int = 0
+    vrot_range_km: Optional[float] = None
+    # Peak GATE-TO-GATE |ΔV| (m/s) near the cell on the base Doppler sweep.
+    # This — not Vrot — is what the TDA thresholds for a TVS.
+    gate_to_gate_dv_ms: Optional[float] = None
+    gate_to_gate_dv_aloft_ms: Optional[float] = None
+    rotation_tilt_count: int = 0
+    rotation_volumes: int = 0
+    rotation_class: Optional[str] = None   # None | "couplet" | "mesocyclone" | "tvs"
+    rotation_reason: Optional[str] = None  # Why it is not the next class up
     # Operational altitude classification — set in _reconcile_rotation_flags.
     # `low_level_meso_detected` is the primary tornado precursor; mid-level
     # alone is just a supercell signature.  A deep meso can be both.
@@ -864,7 +891,7 @@ class StormTrackingService:
             #   3. Grid-based couplet (Barnes2-blurred, used only when polar unavailable)
             # The grid-based detection sets the initial flag but the polar signals
             # override it here, after they have run.
-            self._reconcile_rotation_flags(matched)
+            self._reconcile_rotation_flags(matched, radar)
 
             # Step 5: Score each cell (uses both rotation + qlcs_meso flags)
             self._score_cells(matched, timestamp)
@@ -1804,8 +1831,48 @@ class StormTrackingService:
                 )
                 continue
 
+            # Range to the cell drives both the threshold and the near-radar
+            # mask.  Vrot is a wind speed, so it does NOT need a range
+            # correction for noise — the MDA's mild relaxation with range is a
+            # RESOLUTION correction (the beam broadens, so a real couplet's
+            # measured peak weakens).  The old flat 13 m/s was wrong in both
+            # directions: too permissive inside 100 km, too strict beyond 150.
+            cell_range_km = None
+            if rad_lat is not None:
+                try:
+                    cell_range_km, _ = self._latlon_to_polar(
+                        rad_lat, rad_lon, cell.lat, cell.lon
+                    )
+                except Exception as _e:
+                    note_failure("rotation.range",
+                                 "Cell range from the radar could not be computed", _e)
+            if cell_range_km is not None and cell_range_km < rc.LLSD_MIN_RANGE_KM:
+                # Inside the near-radar mask nothing here is trustworthy: the
+                # beam is narrow, ground clutter dominates, and the Barnes
+                # analysis smears a handful of contaminated gates across
+                # several grid cells.
+                cell.rotation_detected = False
+                cell.rotation_velocity_ms = None
+                continue
+
+            meso_threshold = (
+                rc.mda_vrot_threshold(rc.MDA_MIN_MESO_RANK, cell_range_km)
+                if cell_range_km is not None
+                else rc.MDA_RANK_VROT_MS[rc.MDA_MIN_MESO_RANK]
+            )
+
+            # Rotation has to be co-located with a storm.  MRMS masks azimuthal
+            # shear to within 5 km of ≥ 20 dBZ; clear-air circulations are not
+            # storm signatures whatever the velocity field says.
+            if refl_data is not None:
+                region_refl = refl_data[y_min:y_max, x_min:x_max]
+                if not np.any(region_refl >= rc.MIN_REFLECTIVITY_DBZ):
+                    cell.rotation_detected = False
+                    cell.rotation_velocity_ms = None
+                    continue
+
             # Check couplet diameter (distance between max inbound and outbound)
-            if rot_velocity >= MESO_VELOCITY_THRESHOLD_MS:
+            if rot_velocity >= meso_threshold:
                 outbound_pos = np.unravel_index(
                     np.nanargmax(smoothed_vel), smoothed_vel.shape
                 )
@@ -1843,13 +1910,59 @@ class StormTrackingService:
                     )
                     continue
 
+                # Rotation vs divergence.  A vortex puts its inbound and
+                # outbound peaks on either side of the beam — the couplet
+                # vector is AZIMUTHAL.  A max/min pair separated along the
+                # beam is divergence or convergence (outflow, a gust front, a
+                # downburst), which is a different thing entirely and was
+                # previously flagged as rotation.  45° is the natural split
+                # between the two, not a published threshold.
+                if cell_range_km is not None:
+                    try:
+                        rad_y, rad_x = self._latlon_to_grid(rad_lat, rad_lon)
+                        beam_dy = float(cy - rad_y)
+                        beam_dx = float(cx - rad_x)
+                        beam_len = math.hypot(beam_dy, beam_dx)
+                        cpl_dy = float(outbound_pos[0] - inbound_pos[0])
+                        cpl_dx = float(outbound_pos[1] - inbound_pos[1])
+                        if beam_len > 1e-6 and couplet_dist_px > 1e-6:
+                            radial_frac = abs(
+                                (cpl_dy * beam_dy + cpl_dx * beam_dx)
+                                / (beam_len * couplet_dist_px)
+                            )
+                            if radial_frac > math.cos(math.radians(45.0)):
+                                logger.debug(
+                                    f"Couplet rejected for {cell.cell_id}: extrema "
+                                    f"separated ALONG the beam "
+                                    f"(radial fraction {radial_frac:.2f}) — "
+                                    "divergence/convergence, not rotation"
+                                )
+                                cell.rotation_detected = False
+                                cell.rotation_velocity_ms = None
+                                continue
+                    except Exception as _e:
+                        note_failure(
+                            "rotation.axis",
+                            "Couplet orientation could not be tested against the beam",
+                            _e,
+                        )
+
                 if couplet_dist_km <= MESO_MAX_DIAMETER_KM:
                     cell.rotation_detected = True
                     cell.rotation_velocity_ms = round(rot_velocity, 1)
+                    cell.vrot_range_km = round(cell_range_km, 1) if cell_range_km else None
+                    cell.meso_rank = rc.meso_rank(
+                        rot_velocity, cell_range_km if cell_range_km else 100.0
+                    )
 
-                    # TVS check
-                    if rot_velocity >= TVS_VELOCITY_THRESHOLD_MS:
-                        cell.tvs_detected = True
+                    # NO TVS HERE.  A TVS is a GATE-TO-GATE ΔV signature on
+                    # polar data (TDA: ≥25 m/s at the base AND ≥36 m/s aloft).
+                    # This grid is 1 km Barnes-smoothed Cartesian, so it cannot
+                    # resolve a gate-to-gate anything, and Vrot across a
+                    # kilometre-scale window is not the same quantity as the
+                    # TDA's threshold even though the numbers look comparable.
+                    # Comparing them was a category error.  TVS is set from the
+                    # polar profile in _reconcile_rotation_flags or not at all.
 
                     # Debris signature check — NWS dual-pol TDS criteria:
                     #   1. CC < DEBRIS_CC_THRESHOLD and Z ≥ TDS_MIN_REFL_DBZ, co-located
@@ -2100,34 +2213,88 @@ class StormTrackingService:
         gate_spacing_m = float(ranges_m[1] - ranges_m[0]) if n_gates > 1 else 250.0
 
         # Centred azimuthal gradient: shear[r,g] = (V[r+k,g] - V[r-k,g]) / arc
-        k = LLSD_KERNEL_RAYS
-        # Circular ray indexing (wrap around 360°)
-        up = np.roll(vel, -k, axis=0)
-        dn = np.roll(vel, k, axis=0)
-        dV = up - dn  # m/s
+        #
+        # k VARIES WITH RANGE, and that is the whole point.  A shear is a
+        # velocity over a distance, so the kernel has to have a fixed size IN
+        # METRES — MRMS uses 2500 m — or the denominator collapses toward zero
+        # as the range does and a fixed threshold becomes meaningless.  With
+        # the fixed ±2 rays this used to use, 2 rays at 10 km span 87 m, so the
+        # 0.010 /s "significant" threshold was asking for 0.87 m/s across the
+        # kernel against a ~2 m/s velocity noise floor: it was met by noise
+        # alone, on every cell near the radar, on every scan.  At 130 km the
+        # same threshold asked for a real 11 m/s.  Measured in
+        # test_rotation_criteria: pure noise tripped the old kernel 40/40 times
+        # at 10 km and 0/40 at 150 km.
+        #
+        # The physical kernel spans ~±14 rays at 10 km and ±1 beyond ~130 km,
+        # which keeps the shear denominator constant and the threshold honest
+        # at every range.  Computed per unique k rather than per gate — there
+        # are only a dozen or so distinct values across the range axis.
+        mean_daz_deg = float(np.nanmean(np.abs(
+            (np.roll(azimuths, -1) - azimuths + 540.0) % 360.0 - 180.0
+        )))
+        if not math.isfinite(mean_daz_deg) or mean_daz_deg <= 0:
+            mean_daz_deg = 0.5
+        k_per_gate = np.array(
+            [rc.llsd_kernel_rays(r / 1000.0, mean_daz_deg) for r in ranges_m],
+            dtype=int,
+        )
+        max_k = int(k_per_gate.max())
+        if vel.shape[0] < (2 * max_k + 3):
+            return
 
-        # Aliasing sanity gate: a single folded gate creates |dV| ≈ 2·Nyquist.
-        # When using raw (non-dealiased) velocity, mask gates where |dV| >
-        # 1.5·Nyquist — that's beyond any physically plausible azimuthal
-        # velocity gradient and indicates one side has wrapped.
+        shear = np.full(vel.shape, np.nan, dtype=np.float32)
+        for k in np.unique(k_per_gate):
+            k = int(k)
+            cols = np.flatnonzero(k_per_gate == k)
+            # Circular ray indexing (wrap around 360°)
+            up = np.roll(vel, -k, axis=0)[:, cols]
+            dn = np.roll(vel, k, axis=0)[:, cols]
+            dV = up - dn  # m/s
+
+            # Aliasing sanity gate: a single folded gate creates |dV| ≈
+            # 2·Nyquist.  When using raw (non-dealiased) velocity, mask gates
+            # where |dV| > 1.5·Nyquist — that's beyond any physically
+            # plausible azimuthal velocity gradient and indicates one side has
+            # wrapped.
+            if not is_dealiased:
+                dV = np.where(np.abs(dV) > nyq * 1.5, np.nan, dV)
+
+            # Δaz between the two rays actually differenced, at THIS k
+            az_up = np.roll(azimuths, -k)
+            az_dn = np.roll(azimuths, k)
+            daz_k = (az_up - az_dn + 540.0) % 360.0 - 180.0  # signed, wrapped
+            daz_rad = np.deg2rad(np.abs(daz_k))
+            daz_rad = np.where(daz_rad < 1e-4, 1e-4, daz_rad)
+
+            # Arc length per (ray, gate) = |Δaz| * range
+            arc = daz_rad[:, None] * ranges_m[cols][None, :]  # metres
+            arc = np.where(arc < 1.0, 1.0, arc)  # avoid /0 at range=0
+            s = dV / arc  # /s
+
+            # Invalidate where velocity was missing on either side
+            s[np.isnan(up) | np.isnan(dn)] = np.nan
+            shear[:, cols] = s
+
+        # GATE-TO-GATE ΔV — the quantity the TDA actually thresholds, and a
+        # different measurement from the shear above: adjacent rays at the same
+        # gate, no kernel, no division by distance.  A TVS is a tight
+        # gate-to-gate signature (≥25 m/s at the base per Mitchell et al.
+        # 1998); Vrot measured across a kilometre-scale window is NOT the same
+        # quantity, and comparing one against the other's threshold — which is
+        # what the grid detector used to do — is a category error.
+        gg = np.abs(np.roll(vel, -1, axis=0) - vel)
         if not is_dealiased:
-            dV = np.where(np.abs(dV) > nyq * 1.5, np.nan, dV)
+            gg = np.where(gg > nyq * 1.5, np.nan, gg)
 
-        # Mean Δaz between up/down rays (degrees → radians), per row
-        az_up = np.roll(azimuths, -k)
-        az_dn = np.roll(azimuths, k)
-        daz = (az_up - az_dn + 540.0) % 360.0 - 180.0  # signed, wrapped
-        daz_rad = np.deg2rad(np.abs(daz))  # rays×1
-        daz_rad = np.where(daz_rad < 1e-4, 1e-4, daz_rad)
-
-        # Arc length per (ray, gate) = |Δaz| * range
-        arc = daz_rad[:, None] * ranges_m[None, :]  # metres
-        arc = np.where(arc < 1.0, 1.0, arc)  # avoid /0 at range=0
-        shear = dV / arc  # /s
-
-        # Invalidate where velocity was missing on either side
-        invalid = np.isnan(up) | np.isnan(dn)
-        shear[invalid] = np.nan
+        # Inside the near-radar mask the retrieval is not trustworthy at any
+        # kernel size — the beam is narrow, ground clutter dominates, and
+        # sidelobe returns contaminate the velocity field.
+        near = ranges_m < (rc.LLSD_MIN_RANGE_KM * 1000.0)
+        if near.any():
+            shear[:, near] = np.nan
+            gg[:, near] = np.nan
+        daz = (np.roll(azimuths, -1) - np.roll(azimuths, 1) + 540.0) % 360.0 - 180.0
 
         # For each cell, convert lat/lon → (az, range), then window in shear grid
         for cell in cells:
@@ -2137,8 +2304,11 @@ class StormTrackingService:
                 rad_lat, rad_lon, cell.lat, cell.lon
             )
             dist_m = dist_km * 1000.0
-            if dist_m < 5_000:
-                cell.llsd_diagnostic = f"too close to radar ({dist_km:.0f} km < 5 km)"
+            if dist_km < rc.LLSD_MIN_RANGE_KM:
+                cell.llsd_diagnostic = (
+                    f"too close to radar ({dist_km:.0f} km < "
+                    f"{rc.LLSD_MIN_RANGE_KM:.0f} km near-radar mask)"
+                )
                 continue
             if dist_m > float(ranges_m[-1]):
                 cell.llsd_diagnostic = f"beyond Doppler range ({dist_km:.0f} km > {ranges_m[-1]/1000:.0f} km)"
@@ -2158,18 +2328,21 @@ class StormTrackingService:
 
             # Window size in gates ≈ LLSD_CELL_SEARCH_KM / gate_spacing
             half_g = max(
-                LLSD_KERNEL_GATES,
+                rc.llsd_kernel_gates(gate_spacing_m),
                 int((LLSD_CELL_SEARCH_KM * 1000.0) / gate_spacing_m),
             )
             # Window size in rays: convert LLSD_CELL_SEARCH_KM tangential to
-            # azimuth half-angle at this range.
+            # azimuth half-angle at this range.  The floor is the shear
+            # kernel's own half-width AT THIS RANGE — a search window narrower
+            # than the kernel that produced the field cannot see a whole
+            # couplet, and near the radar that kernel is a dozen rays wide.
+            kernel_rays = rc.llsd_kernel_rays(dist_km, mean_daz_deg)
             if dist_m > 0:
                 half_angle_rad = (LLSD_CELL_SEARCH_KM * 1000.0) / dist_m
                 half_angle_deg = math.degrees(half_angle_rad)
-                mean_daz = float(np.nanmean(np.abs(daz))) or 1.0
-                half_r = max(LLSD_KERNEL_RAYS + 1, int(half_angle_deg / mean_daz))
+                half_r = max(kernel_rays + 1, int(half_angle_deg / mean_daz_deg))
             else:
-                half_r = LLSD_KERNEL_RAYS + 2
+                half_r = kernel_rays + 2
 
             # Slice with ray wrap-around
             ray_indices = [(r_idx + d) % n_rays for d in range(-half_r, half_r + 1)]
@@ -2185,8 +2358,13 @@ class StormTrackingService:
             cell.llsd_max_shear = round(peak, 5)
             cell.llsd_elevation_deg = round(sweep_elev, 2)
             cell.llsd_diagnostic = None  # successful run
-            if peak >= LLSD_MESO_SHEAR:
+            if peak >= rc.LLSD_SIGNIFICANT:
                 cell.llsd_rotation_detected = True
+
+            # Base gate-to-gate ΔV over the same window, for the TVS test.
+            gg_window = gg[np.ix_(ray_indices, np.arange(g_lo, g_hi))]
+            if gg_window.size and not np.all(np.isnan(gg_window)):
+                cell.gate_to_gate_dv_ms = round(float(np.nanmax(gg_window)), 1)
 
     def _compute_rotation_profile(self, radar, cells: list[TrackedStormCell]):
         """
@@ -2311,13 +2489,35 @@ class StormTrackingService:
                     )
                     continue
 
+                # GATE-TO-GATE ΔV at this tilt — adjacent rays, same gate, no
+                # kernel.  This is the TDA's quantity, and having it per tilt
+                # is what lets the TVS test use a REAL aloft number instead of
+                # a proxy: Mitchell et al. 1998 require ≥25 m/s at the base
+                # AND ≥36 m/s aloft, and it is that pairing which separates a
+                # TVS from an ordinary strong low-level couplet.  Rows of
+                # `region` are contiguous in azimuth, so a row difference is a
+                # ray-to-ray difference.
+                dv_tilt = None
+                if region.shape[0] >= 2:
+                    gg_t = np.abs(np.diff(region, axis=0))
+                    if not is_dealiased:
+                        gg_t = np.where(gg_t > nyq * 1.5, np.nan, gg_t)
+                    if np.any(np.isfinite(gg_t)):
+                        dv_tilt = float(np.nanmax(gg_t))
+
                 h_km = beam_height_km(dist_m, elev_deg)
-                profile.append({
+                entry = {
                     "height_km": round(h_km, 2),
                     "elevation_deg": round(elev_deg, 2),
                     "rot_velocity_ms": round(rot_vel, 1),
-                })
-                if rot_vel >= MESO_VELOCITY_THRESHOLD_MS:
+                }
+                if dv_tilt is not None:
+                    entry["dv_ms"] = round(dv_tilt, 1)
+                profile.append(entry)
+                # Range-aware, so a tilt means the same thing at 30 km and
+                # 200 km.  The flat threshold this replaced was too permissive
+                # close in and too strict far out.
+                if rot_vel >= rc.mda_vrot_threshold(rc.MDA_MIN_MESO_RANK, dist_km):
                     meso_heights.append(h_km)
                 if rot_vel > peak_rot:
                     peak_rot = rot_vel
@@ -2333,6 +2533,20 @@ class StormTrackingService:
                 # Lowest tilt with ≥ meso-class rotation — key for low-level
                 # vs mid-level classification.
                 cell.rotation_base_km = round(min(meso_heights), 2)
+
+            # Base vs aloft gate-to-gate ΔV for the TVS test.  "Base" is the
+            # lowest tilt that produced a ΔV; "aloft" is the strongest above
+            # it.  A single tilt gives a base but no aloft, and is therefore
+            # correctly incapable of asserting a TVS on its own.
+            dv_entries = [(e["height_km"], e["dv_ms"]) for e in profile if "dv_ms" in e]
+            if dv_entries:
+                dv_entries.sort()
+                cell.gate_to_gate_dv_ms = dv_entries[0][1]
+                if len(dv_entries) > 1:
+                    cell.gate_to_gate_dv_aloft_ms = max(d for _, d in dv_entries[1:])
+                cell.rotation_tilt_count = sum(
+                    1 for _, d in dv_entries if d >= rc.TDA_TVS_DV_BASE_MS
+                )
 
     def _compute_cell_structure(self, radar, cells: list[TrackedStormCell]):
         """
@@ -2843,92 +3057,139 @@ class StormTrackingService:
             cell.echo_top_trend  = _slope("echo_top")
             cell.dbz_trend       = _slope("dbz")
 
-    def _reconcile_rotation_flags(self, cells: list[TrackedStormCell]):
-        """Promote the best available rotation signal to the primary flags.
+    def _reconcile_rotation_flags(self, cells: list[TrackedStormCell], radar=None):
+        """Decide, from all the detectors, what this cell's rotation actually is.
 
-        The analysis pipeline runs three rotation detectors in order:
-          1. Grid-based couplet  (_detect_rotation)       — noisy, Barnes2-blurred
-          2. LLSD azimuthal shear (_detect_llsd_rotation) — better, polar, lowest tilt
-          3. Multi-tilt profile  (_compute_rotation_profile) — best, polar, all tilts
+        The pipeline runs three detectors:
+          1. Grid couplet        (_detect_rotation)          — Barnes-smoothed Cartesian
+          2. LLSD shear          (_detect_llsd_rotation)     — polar, base tilt
+          3. Multi-tilt profile  (_compute_rotation_profile) — polar, every tilt
 
-        Grid results are set first, but (3) and (2) are more physically accurate.
-        This method runs after all three and uses the strongest reliable signal.
+        Only (3) can see vertical structure, so it is the primary source; the
+        grid is a fallback and LLSD is corroboration.
 
-        Rules:
-        - If multi-tilt profile shows rotation ≥ MESO threshold → confirm rotation
-        - If multi-tilt profile explicitly shows < 80 % of threshold → clear grid flag
-        - LLSD ≥ MESO threshold alone is enough to confirm if profile is absent
-        - TVS is set only when multi-tilt peak or grid couplet (after outlier rejection)
-          meets the TVS threshold
+        THREE THINGS CHANGED HERE, and each was producing false positives:
+
+        * LLSD no longer CREATES a detection.  It used to convert its shear
+          back into a velocity with `approx_vel = shear × 2000 m` and promote
+          that to rotation, and even to a TVS, on its own.  With the old
+          fixed-ray kernel that shear was tripped by noise on every cell near
+          the radar, so this line was the single largest source of phantom
+          mesocyclones and phantom TVSs.  Shear now ranks rotation; it does
+          not diagnose it.
+
+        * Vrot is ranked against a RANGE-AWARE threshold (MDA, Stumpf et al.
+          1998) rather than a flat 13 m/s, which was too permissive inside
+          100 km and too strict beyond 150.
+
+        * A TVS requires the TDA's real criteria — gate-to-gate ΔV ≥25 m/s at
+          the base AND ≥36 m/s aloft — measured on polar data.  It is a
+          different quantity from Vrot, so a strong couplet is no longer
+          silently reclassified as a tornado signature.
+
+        Persistence follows the MDA's own vocabulary: a qualifying couplet on
+        one volume is a COUPLET; it becomes a MESOCYCLONE on the second
+        consecutive volume.  That keeps a first-scan signal visible and
+        honestly labelled instead of either hidden or overstated.
         """
+        rad_lat = rad_lon = None
+        if radar is not None:
+            rad_lat, rad_lon = self._get_radar_latlon(radar)
+
         for cell in cells:
             if cell.scan_count < 0:
                 continue
 
-            # ── Multi-tilt profile (most authoritative) ───────────────────
-            profile_vel = cell.max_rot_velocity_ms  # peak across all tilts
-            if profile_vel is not None and profile_vel > 0:
-                if profile_vel >= MESO_VELOCITY_THRESHOLD_MS:
-                    peak_h  = cell.max_rot_height_km   # km AGL where peak rot occurs
-                    depth   = cell.rotation_depth_km    # km of vertical rotation extent
+            # Only the cell's primary radar advances its persistence count and
+            # arbitrates its flags — every detector above is Voronoi-gated the
+            # same way, so a cell owned by another radar has no measurement
+            # here and must keep that radar's verdict.
+            if rad_lat is not None and not self._is_primary_radar_for_cell(
+                rad_lat, rad_lon, cell
+            ):
+                continue
 
-                    # Height guard: rotation only above 8 km AGL is anvil-level
-                    # divergence or outflow, not a mesocyclone.
-                    too_high = (peak_h is not None and peak_h > MESO_MAX_CONFIRM_HEIGHT_KM)
+            profile_vel = cell.max_rot_velocity_ms   # peak across all tilts
+            grid_vel = cell.rotation_velocity_ms     # this scan's grid couplet
+            vrot = profile_vel if (profile_vel or 0) > 0 else grid_vel
+            range_km = cell.vrot_range_km
+            if range_km is None and rad_lat is not None:
+                try:
+                    range_km, _ = self._latlon_to_polar(
+                        rad_lat, rad_lon, cell.lat, cell.lon
+                    )
+                    cell.vrot_range_km = round(range_km, 1)
+                except Exception as _e:
+                    note_failure("reconcile.range",
+                                 "Cell range from the radar could not be computed", _e)
 
-                    # Depth guard: 0 km means only a single tilt exceeded the
-                    # threshold — not enough vertical extent for a real meso.
-                    # LLSD confirmation can substitute (low-level surface shear).
-                    single_tilt = (depth is None or depth < MESO_MIN_DEPTH_FOR_CONFIRM_KM)
-                    llsd_ok = cell.llsd_rotation_detected
+            peak_h = cell.max_rot_height_km
+            depth = cell.rotation_depth_km
+            base_h = cell.rotation_base_km
 
-                    if too_high:
-                        # Definitively not a mesocyclone — clear without mercy.
-                        if not llsd_ok:
-                            cell.rotation_detected = False
-                            cell.rotation_velocity_ms = None
-                            cell.tvs_detected = False
-                            logger.debug(
-                                f"Rotation cleared for {cell.cell_id}: "
-                                f"peak at {peak_h:.1f} km AGL > "
-                                f"{MESO_MAX_CONFIRM_HEIGHT_KM} km (anvil/outflow)"
-                            )
-                    elif single_tilt and not llsd_ok:
-                        # Single-tilt, low altitude, no LLSD — uncertain.
-                        # Don't promote, but don't clear either; keep grid result.
-                        pass
-                    else:
-                        # Multi-tilt OR LLSD-confirmed AND below height cap → real meso
-                        cell.rotation_detected = True
-                        cell.rotation_velocity_ms = round(profile_vel, 1)
-                        cell.tvs_detected = profile_vel >= TVS_VELOCITY_THRESHOLD_MS
+            # Height guard: rotation only above 8 km AGL is anvil-level
+            # divergence or outflow, not a mesocyclone.
+            too_high = peak_h is not None and peak_h > MESO_MAX_CONFIRM_HEIGHT_KM
 
-                elif profile_vel < MESO_VELOCITY_THRESHOLD_MS * 0.8:
-                    # Profile clearly below threshold — override any grid false positive
-                    # unless LLSD independently confirms it
-                    if not cell.llsd_rotation_detected:
-                        cell.rotation_detected = False
-                        cell.rotation_velocity_ms = None
-                        cell.tvs_detected = False
-                # If profile is in the 80–100 % grey zone, keep whatever the grid said
+            rank = rc.meso_rank(vrot, range_km if range_km is not None else 100.0)
+            cell.meso_rank = rank
+            qualifies = (
+                vrot is not None
+                and rank >= rc.MDA_MIN_MESO_RANK
+                and not too_high
+                and (range_km is None or range_km >= rc.LLSD_MIN_RANGE_KM)
+            )
 
-            # ── LLSD (secondary; better than grid alone) ──────────────────
-            # If the profile didn't find rotation but LLSD at the surface confirms
-            # meso-class shear, trust that over the grid couplet.
-            elif cell.llsd_rotation_detected:
-                # LLSD meso-class shear confirmed; approximate Vrot from shear
-                # using a nominal couplet half-width of 2 km:  Vrot = shear × 2000 m
-                if cell.llsd_max_shear is not None:
-                    approx_vel = cell.llsd_max_shear * 2_000.0  # m/s
-                    if approx_vel >= MESO_VELOCITY_THRESHOLD_MS:
-                        cell.rotation_detected = True
-                        # Only override rotation_velocity_ms if the profile gave nothing
-                        if cell.rotation_velocity_ms is None:
-                            cell.rotation_velocity_ms = round(approx_vel, 1)
-                        cell.tvs_detected = (
-                            cell.tvs_detected
-                            or approx_vel >= TVS_VELOCITY_THRESHOLD_MS
-                        )
+            # Persistence, counted in volumes on this radar.
+            cell.rotation_volumes = cell.rotation_volumes + 1 if qualifies else 0
+
+            is_meso, reason = rc.is_mesocyclone(
+                vrot,
+                range_km if range_km is not None else 100.0,
+                depth_km=depth,
+                base_km=base_h,
+                volumes=cell.rotation_volumes,
+            )
+            if too_high:
+                is_meso = False
+                reason = (
+                    f"peak at {peak_h:.1f} km AGL > "
+                    f"{MESO_MAX_CONFIRM_HEIGHT_KM} km (anvil/outflow)"
+                )
+
+            # TVS — the TDA's test, on gate-to-gate ΔV from polar data.
+            is_tvs_hit, tvs_reason = rc.is_tvs(
+                cell.gate_to_gate_dv_ms,
+                cell.gate_to_gate_dv_aloft_ms,
+                depth_km=depth,
+                tilts=cell.rotation_tilt_count,
+            )
+            cell.tvs_detected = bool(is_tvs_hit and qualifies)
+
+            if is_meso:
+                cell.rotation_detected = True
+                cell.rotation_class = "tvs" if cell.tvs_detected else "mesocyclone"
+                cell.rotation_reason = tvs_reason if not cell.tvs_detected else None
+                if vrot is not None:
+                    cell.rotation_velocity_ms = round(vrot, 1)
+            elif qualifies:
+                # Real, ranked rotation that has not yet met the mesocyclone
+                # criteria — shown as a couplet rather than silently dropped.
+                cell.rotation_detected = True
+                cell.rotation_class = "couplet"
+                cell.rotation_reason = reason
+                if vrot is not None:
+                    cell.rotation_velocity_ms = round(vrot, 1)
+            else:
+                cell.rotation_detected = False
+                cell.rotation_velocity_ms = None
+                cell.rotation_class = None
+                cell.rotation_reason = reason
+                cell.tvs_detected = False
+                if too_high:
+                    logger.debug(
+                        f"Rotation cleared for {cell.cell_id}: {reason}"
+                    )
 
             # ── Altitude classification ───────────────────────────────────
             # Tornadogenesis correlates with rotation reaching the boundary
@@ -3784,11 +4045,11 @@ class StormTrackingService:
             llsd_score = 0
             if cell.llsd_max_shear is not None:
                 s = cell.llsd_max_shear
-                if s >= LLSD_TORNADIC_SHEAR:
+                if s >= LLSD_EXTREME_SHEAR:
                     llsd_score = 100
                 elif s >= LLSD_STRONG_SHEAR:
                     llsd_score = int(80 + (s - LLSD_STRONG_SHEAR)
-                                     / (LLSD_TORNADIC_SHEAR - LLSD_STRONG_SHEAR) * 20)
+                                     / (LLSD_EXTREME_SHEAR - LLSD_STRONG_SHEAR) * 20)
                 elif s >= LLSD_MESO_SHEAR:
                     llsd_score = int(50 + (s - LLSD_MESO_SHEAR)
                                      / (LLSD_STRONG_SHEAR - LLSD_MESO_SHEAR) * 30)
