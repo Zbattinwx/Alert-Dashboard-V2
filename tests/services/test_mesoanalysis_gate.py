@@ -118,7 +118,46 @@ def test_details_state_the_basis(svc):
     active = svc._threat_details("tornado", {"level": "high", "basis": "storms"})
     cond = svc._threat_details("tornado", {"level": "high", "basis": "conditional"})
     assert active.startswith("Storms present")
-    assert "conditional on storms forming" in cond
+    # The conditional case must say that there is no convection. It used to say
+    # "conditional on storms forming" and nothing else; now it also says whether
+    # anything is around to START one, so this asserts the meaning rather than
+    # the sentence.
+    assert "No convection" in cond
+    assert "ingredients only" in cond, "conditional wording stopped saying it is conditional"
+
+
+def test_details_name_the_trigger_when_there_is_one(svc):
+    """The forecast half of the product, in words.
+
+    A loaded warm sector with a front in it and a loaded warm sector with
+    nothing in it used to produce identical text, because the service had no
+    term for lift at all — the ingredient Johns & Doswell 1992 name and CAPE
+    omits.
+    """
+    base = {"level": "high", "basis": "conditional"}
+    nothing = svc._threat_details("tornado", base)
+    front = svc._threat_details("tornado", {**base, "trigger": 0.6,
+                                            "trigger_terms": ["boundary"]})
+    ascent = svc._threat_details("tornado", {**base, "trigger": 0.2,
+                                             "trigger_terms": ["ascent", "height_falls"]})
+    assert nothing != front, "a front made no difference to the wording"
+    assert "surface boundary" in front
+    assert "large-scale ascent" in ascent and "falling heights" in ascent
+    # A clipped corner and a covered area should not read alike.
+    assert front != ascent
+
+
+def test_trigger_changes_the_level_label(svc):
+    plain = svc._level_label("high", True)
+    some = svc._level_label("high", True, 0.2)
+    lots = svc._level_label("high", True, 0.8)
+    assert "if storms form" in plain
+    assert plain != some != lots and plain != lots
+    assert "develop" in some and "develop" in lots
+    # Back-compat: no trigger information at all keeps the original wording.
+    assert svc._level_label("high", True, None) == plain
+    # A trigger must never change a NON-conditional label — storms are already there.
+    assert svc._level_label("high", False, 0.9) == svc._level_label("high", False)
 
 
 # ── The F01 analysis background ────────────────────────────────────────────

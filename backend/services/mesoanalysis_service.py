@@ -102,7 +102,50 @@ MESO_FIELDS = (
     "pwat", "t2m", "td2m", "mslp", "thetae", "lftx4", "wspd850",
     # Simulated composite reflectivity — the initiation term. See _initiation.
     "refc",
+    # The TRIGGER terms. See the block below.
+    "omega700", "z500",
 )
+
+# ── Trigger: the term Johns & Doswell name and CAPE omits ──────────────────
+# The gate above answers "is a storm here". This answers the other half of the
+# same question -- "is anything going to MAKE one" -- and until now nothing did.
+#
+# It is the third ingredient quoted at the top of the initiation block: deep
+# convection needs moisture, a steep enough lapse rate, AND "sufficient lifting
+# of a parcel from the moist layer to allow it to reach its level of free
+# convection" (Johns & Doswell 1992). CAPE folds the first two into one number.
+# Nothing in this service supplied the third, which is why a loaded warm sector
+# with no forcing and a loaded warm sector under a shortwave read identically.
+#
+# SPC's own reasoning is written in these terms. For the 2026-09-09 Slight over
+# northern Ohio: "a fast-moving shortwave trough ... will track eastward", and
+# "the primary baroclinic [zone] ... will move eastward and BE THE FOCUS for
+# scattered afternoon thunderstorms". Neither was represented here at all.
+#
+# Three terms, OR'd, each measured on that case (RAP 18Z F01, valid 19Z; the
+# NE Ohio box is 40.6-42.0N, 83.6-80.8W, where the warned line was):
+#
+#   omega700   large-scale ascent, Pa/s, NEGATIVE is up. The lift itself,
+#              whatever causes it. CONUS p5 -0.34; NE Ohio reached -1.28.
+#   |grad thetae|  the surface baroclinic zone -- a boundary, i.e. a focus,
+#              even where the ascent has not started. CONUS p90 13.0 K/100 km;
+#              NE Ohio reached 37.3, a sharp front exactly where SPC put it.
+#   z500 fall  1-hourly height falls: the shortwave ARRIVING. CONUS p5 -9.98 m.
+#              NE Ohio was only -3.85 at 19Z, which is correct and worth saying:
+#              the trough was still upstream over the Lakes. This term is the
+#              predictive one -- it fires before the other two do.
+#
+# Thresholds are the measured CONUS percentiles, not round numbers, for the
+# same reason the reflectivity gate had to stop being 40 dBZ: a threshold means
+# nothing until you know the distribution of the field you are applying it to.
+# How much of a threat area must have a trigger before the wording changes.
+# Two steps rather than one because "a front clips the corner" and "the whole
+# area is under ascent" are different forecasts and should not read alike.
+TRIGGER_PRESENT_FRAC = 0.15
+TRIGGER_LIKELY_FRAC = 0.50
+OMEGA_ASCENT_PA_S = -0.30          # ~CONUS p5: significant large-scale ascent
+THETAE_GRAD_K_PER_100KM = 12.0     # ~CONUS p90: a frontal-strength gradient
+Z500_FALL_M_PER_HOUR = -10.0       # ~CONUS p5: heights falling, trough inbound
 
 # ── Initiation gate ────────────────────────────────────────────────────────
 # THE MINNESOTA BUG, AND WHY IT WAS NEVER A THRESHOLD PROBLEM.
@@ -130,16 +173,62 @@ MESO_FIELDS = (
 # layer to allow it to reach its level of free convection". CAPE folds the
 # first two into one number and omits the third entirely.
 #
-# The gate below supplies it. Storm presence comes from simulated composite
-# reflectivity in the same GRIB file we already read — at F01 from a
-# radar-assimilating model that is a genuine short-range storm field, not a
-# guess. Everything else is only ever reported as conditional.
+# The gate below supplies it. Storm presence comes from OBSERVED reflectivity
+# (MRMS merged composite, matched to the analysis's own valid time), falling
+# back to the model's simulated field only when no observation is close
+# enough — see the OBS_STORM_DBZ block for why that order is not a
+# preference but a correctness requirement. Everything outside the storm
+# mask is only ever reported as conditional.
 MUCAPE_FLOOR = 100.0        # SPC effective-inflow base needs CAPE >= 100 J/kg
 MUCAPE_REFC_FLOOR = 50.0    # SPC's HREF screens reflectivity on MUCAPE > 50
 EFFECTIVE_CIN_LIMIT = -250.0  # effective inflow layer: CIN > -250 J/kg
 MLCIN_HARD_CAP = -200.0     # STP's own zero point for its MLCIN term
 MLCIN_WEAK_CAP = -50.0      # STP's MLCIN term is 1.0 above this
-REFC_STORM_DBZ = 40.0       # SPC HREF probability threshold
+# ── What answers "are there storms here" ───────────────────────────────────
+# THIS GATE WAS UNSATISFIABLE, AND IT WAS A UNIT TRAP, NOT A TUNING ERROR.
+#
+# The threshold used to be a flat 40 dBZ against the RAP's SIMULATED composite
+# reflectivity, documented as "SPC HREF probability threshold".  HREF is a
+# CONVECTION-ALLOWING 3 km ensemble.  RAP is 13 km with PARAMETERIZED
+# convection and physically cannot represent a convective core.  Measured
+# 2026-09-09 19Z -- a Slight-risk afternoon with a warned line across northern
+# Ohio, 82 tracked cells, 16 severe, 59 dBZ on radar:
+#
+#     RAP  18Z F01   >=30 dBZ  1.196% of grid    max anywhere in CONUS 45.1 dBZ
+#                    >=35 dBZ  0.280%            >=50 dBZ: 0 cells, nationwide
+#                    >=40 dBZ  0.028%  <- the gate
+#     HRRR 18Z F01   >=40 dBZ  0.086%            max anywhere in CONUS 69.4 dBZ
+#
+# Over the warned line the RAP peaked at 39.1 dBZ, so `storms` was EMPTY there
+# and every threat reported "if storms form" while the storms were on screen.
+# The threshold sat near the 99.97th percentile of the model's own
+# distribution.  This is the same error as comparing a km-scale Vrot against
+# the TDA's gate-to-gate dV: a number carried across to an instrument it was
+# not derived on.
+#
+# The fix is a different INSTRUMENT, not a different number.  Whether a storm
+# exists is an observation, and MRMS merged composite reflectivity is already
+# on this dashboard.  Order of preference:
+#
+#   1. MRMS observed reflectivity at the analysis's own valid time.
+#   2. The model's simulated field, at a model-calibrated threshold, when no
+#      observation is close enough to that valid time.
+#
+# 40 dBZ is right for OBSERVED reflectivity -- it is a real convective core and
+# the value SPC's neighbourhood probabilities are calibrated to.
+OBS_STORM_DBZ = 40.0
+# The RAP fallback. Deliberately below the 0.078%-frequency match with HRRR
+# (~38 dBZ on the day measured) because this path only runs when observations
+# are unavailable, and there a false "storms present" merely reports an active
+# threat an hour early, while a false negative reports nothing at all -- which
+# is the failure this whole block exists to end. 35 dBZ caught the Ohio line
+# with margin (206 cells in the box, against 0 at 40).
+MODEL_STORM_DBZ = 35.0
+# How far the MRMS frame may sit from the analysis's valid time. The analysis
+# describes one hour; gating it on radar from a different hour would staple
+# current storms onto a past environment -- the same mistake the near-storm
+# environment lookup had to fix when it learned to resolve its own hour.
+MRMS_MATCH_MIN = 20.0
 # SPC computes neighbourhood reflectivity probabilities on a 40 km radius. The
 # assessment grid is ~0.14 deg (~15 km) after STRIDE, so +/-2 cells is ~40 km.
 REFC_NEIGHBORHOOD_CELLS = 2
@@ -652,7 +741,175 @@ class MesoanalysisService:
         out.sort(key=lambda c: c["cells"], reverse=True)
         return out[:max_clusters]
 
-    def _initiation(self, params: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    def _trigger(self, params: dict[str, np.ndarray],
+                 prev: Optional[dict[str, np.ndarray]] = None) -> dict:
+        """Where something could lift a parcel to its LFC.
+
+        Returns {"mask": bool grid or None, "parts": {name: bool grid}}. The
+        terms are OR'd because they are alternative mechanisms, not a checklist:
+        a storm needs one of them, not all three.
+
+        This is reported ALONGSIDE the threat, never used to shrink it. A
+        destabilising area with no forcing is a real and useful thing to see --
+        it is most of what this product is for on a quiet afternoon -- it just
+        should not read the same as an area with a front sitting on it.
+        """
+        shape = next((np.shape(g) for g in params.values() if g is not None), None)
+        if shape is None:
+            return {"mask": None, "parts": {}}
+
+        def grid(name):
+            g = params.get(name)
+            return g if g is not None and np.shape(g) == shape else None
+
+        parts: dict[str, np.ndarray] = {}
+
+        om = grid("omega700")
+        if om is not None:
+            parts["ascent"] = np.isfinite(om) & (om <= OMEGA_ASCENT_PA_S)
+
+        th = grid("thetae")
+        if th is not None:
+            # |grad theta-e| in K per 100 km. The cell is ~15 km N-S and narrows
+            # with latitude, so the two axes get their own spacing -- using one
+            # for both would report a front in Texas and miss the same front in
+            # Minnesota.
+            lats, _ = analysis_axes()
+            if len(lats) == shape[0]:
+                dy_km = T_RES * STRIDE * 110.57
+                dx_km = (T_RES * STRIDE * 111.32) * np.cos(np.radians(lats))[:, None]
+                with np.errstate(invalid="ignore"):
+                    gy, gx = np.gradient(np.nan_to_num(th, nan=np.nanmean(th)))
+                    mag = np.hypot(gy / dy_km, gx / np.maximum(1e-6, dx_km)) * 100.0
+                parts["boundary"] = np.isfinite(mag) & (mag >= THETAE_GRAD_K_PER_100KM)
+
+        z = grid("z500")
+        zp = prev.get("z500") if prev else None
+        if z is not None and zp is not None and np.shape(zp) == shape:
+            with np.errstate(invalid="ignore"):
+                fall = z - zp
+            parts["height_falls"] = np.isfinite(fall) & (fall <= Z500_FALL_M_PER_HOUR)
+
+        if not parts:
+            return {"mask": None, "parts": {}}
+        mask = np.zeros(shape, dtype=bool)
+        for m in parts.values():
+            mask |= m
+        return {"mask": mask, "parts": parts}
+
+    def _observed_storms(self, valid_iso: Optional[str], shape) -> Optional[np.ndarray]:
+        """Observed convection on the assessment grid, or None if unavailable.
+
+        Boolean: True where MRMS merged composite reflectivity reaches
+        OBS_STORM_DBZ anywhere inside the assessment cell. The MAX over the
+        footprint is the point -- a mean would average a convective core away
+        against the surrounding light echo and reproduce, in the resampling,
+        exactly the smoothing that made the model field unusable.
+
+        The frame is chosen by the analysis's VALID TIME, not by "now", and a
+        frame further than MRMS_MATCH_MIN from it is refused rather than used:
+        an analysis valid at 19Z gated on 20Z radar would be two different
+        moments presented as one. That is also what makes this safe for the
+        older cycles `analysis()` keeps for trends -- they get no observation
+        and fall back to the model, instead of being told about storms that
+        formed after they were valid.
+
+        Reads the service's packed display frame rather than re-decoding GRIB:
+        it is already cached, and at (80 - -20)/255 the quantisation is 0.39 dBZ
+        against a 40 dBZ threshold.
+        """
+        if not valid_iso:
+            return None
+        try:
+            from .mrms_service import get_mrms_service
+            svc = get_mrms_service()
+        except Exception as e:
+            logger.debug("meso: MRMS service unavailable (%s)", e)
+            return None
+        if svc is None or not svc.available():
+            return None
+
+        try:
+            want = datetime.fromisoformat(valid_iso)
+            if want.tzinfo is None:
+                want = want.replace(tzinfo=timezone.utc)
+            frames = svc.get_frame_list() or []
+            best, best_gap = None, None
+            for f in frames:
+                ts = f.get("ts")
+                if not ts:
+                    continue
+                try:
+                    t = datetime.strptime(ts, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                gap = abs((t - want).total_seconds()) / 60.0
+                if best_gap is None or gap < best_gap:
+                    best, best_gap = ts, gap
+            if best is None or best_gap > MRMS_MATCH_MIN:
+                logger.debug("meso: no MRMS frame within %.0f min of %s (best %s)",
+                             MRMS_MATCH_MIN, valid_iso,
+                             f"{best_gap:.0f} min" if best_gap is not None else "none")
+                return None
+            raw = svc.get_frame_binary(best)
+            if not raw:
+                return None
+            grid = self._unpack_mrms(raw, shape)
+            if grid is not None:
+                logger.info("meso: initiation gated on OBSERVED MRMS %s (%.0f min from %s)",
+                            best, best_gap, valid_iso)
+            return grid
+        except Exception as e:
+            logger.warning("meso: observed-reflectivity gate failed (%s) -- "
+                           "falling back to the model field", e)
+            return None
+
+    @staticmethod
+    def _unpack_mrms(raw: bytes, shape) -> Optional[np.ndarray]:
+        """Packed MRMS frame -> boolean storm mask on the assessment grid."""
+        import struct
+
+        if len(raw) < 52 or raw[:4] != b"MRMS":
+            return None
+        ni, nj = struct.unpack_from("<II", raw, 4)
+        north, south, west, east = struct.unpack_from("<dddd", raw, 12)
+        vmin, vmax = struct.unpack_from("<ff", raw, 44)
+        body = np.frombuffer(raw, dtype=np.uint8, count=ni * nj, offset=52)
+        if body.size != ni * nj:
+            return None
+        gate = body.reshape(nj, ni)
+
+        # Threshold in BYTE space: no float conversion of 6M cells needed, and
+        # byte 0 is the no-data sentinel so it can never clear the threshold.
+        span = (float(vmax) - float(vmin)) or 1.0
+        cut = int(round((OBS_STORM_DBZ - float(vmin)) / span * 255.0))
+        hit = gate >= max(1, cut)
+
+        # Max over the assessment cell's footprint, then sample. Nearest-index
+        # sampling of a max-filtered field is a max over the footprint without
+        # building the index ranges by hand.
+        lats, lons = analysis_axes()
+        if (len(lats), len(lons)) != tuple(shape):
+            return None
+        dlat = (north - south) / nj
+        dlon = (east - west) / ni
+        cell_deg = T_RES * STRIDE
+        try:
+            from scipy import ndimage
+            fy = max(1, int(round(cell_deg / max(1e-9, dlat))))
+            fx = max(1, int(round(cell_deg / max(1e-9, dlon))))
+            hit = ndimage.maximum_filter(hit, size=(fy, fx), mode="constant", cval=False)
+        except Exception as e:
+            logger.debug("meso: MRMS footprint max unavailable (%s)", e)
+
+        rows = np.clip(((north - lats) / dlat).astype(int), 0, nj - 1)
+        cols = np.clip(((lons - west) / dlon).astype(int), 0, ni - 1)
+        out = hit[np.ix_(rows, cols)]
+        # Entirely outside the MRMS domain, or an empty frame: not an answer.
+        return out if out.any() else None
+
+    def _initiation(self, params: dict[str, np.ndarray],
+                    valid_iso: Optional[str] = None) -> dict[str, np.ndarray]:
         """Where storms are, and where the atmosphere could support them.
 
         Returns two masks:
@@ -693,11 +950,21 @@ class MesoanalysisService:
             capable &= land
 
         storms = np.zeros(shape, dtype=bool)
-        refc = grid("refc")
-        if refc is not None:
-            hit = np.isfinite(refc) & (refc >= REFC_STORM_DBZ)
+        source = "none"
+        # OBSERVATION FIRST. See the OBS_STORM_DBZ block: the model's simulated
+        # field cannot answer this question on a 13 km parameterized-convection
+        # grid, and it is the wrong instrument rather than the wrong number.
+        hit = self._observed_storms(valid_iso, shape)
+        if hit is not None:
+            source = "observed"
+        else:
+            refc = grid("refc")
+            if refc is not None:
+                hit = np.isfinite(refc) & (refc >= MODEL_STORM_DBZ)
+                source = "model"
+        if hit is not None:
             if mucape is not None:
-                hit &= np.isfinite(mucape) & (mucape > MUCAPE_REFC_FLOOR)
+                hit = hit & np.isfinite(mucape) & (mucape > MUCAPE_REFC_FLOOR)
             try:
                 from scipy import ndimage
                 n = REFC_NEIGHBORHOOD_CELLS * 2 + 1
@@ -712,15 +979,24 @@ class MesoanalysisService:
         if mlcin is not None:
             conditional &= ~(np.isfinite(mlcin) & (mlcin < MLCIN_WEAK_CAP))
 
-        return {"capable": capable, "storms": storms, "conditional": conditional}
+        return {"capable": capable, "storms": storms, "conditional": conditional,
+                "source": source}
 
-    def _assess(self, p: dict[str, np.ndarray]) -> tuple[dict, dict[str, np.ndarray]]:
+    def _assess(self, p: dict[str, np.ndarray], valid_iso: Optional[str] = None,
+                prev: Optional[dict[str, np.ndarray]] = None,
+                ) -> tuple[dict, dict[str, np.ndarray]]:
         params = self._resolve(p)
-        gate = self._initiation(params)
+        gate = self._initiation(params, valid_iso)
+        trig = self._trigger(params, self._resolve(prev) if prev else None)
+        trigger = trig.get("mask")
         storms = gate.get("storms")
         capable = gate.get("capable")
         conditional = gate.get("conditional")
-        have_refc = params.get("refc") is not None
+        # Whether the gate had ANY way to answer "are there storms". Without one
+        # every threat is honestly conditional; with one, "conditional" means
+        # the ingredients are there and the convection is not -- which is the
+        # forecast half of this product and worth being able to say precisely.
+        have_refc = gate.get("source", "none") != "none"
 
         # Strong surface-based inhibition is a brick wall for SURFACE-BASED
         # convection only. Elevated storms — nocturnal hail producers, training
@@ -760,22 +1036,47 @@ class MesoanalysisService:
             if res["level"] != "none" and mask is not None and capable is not None:
                 mask = mask & capable
                 active = mask & storms if storms is not None else None
-                if active is not None and self._frac(active) >= floor:
-                    # Storms present: rate on the area that actually has them.
+                any_storms = active is not None and bool(active.any())
+                if any_storms and self._frac(active) >= floor:
+                    # Storms present over a reportable area: rate on them.
                     mask = active
                     res["basis"] = "storms" if have_refc else "environment"
                     res["conditional"] = not have_refc
+                elif any_storms:
+                    # Storms present but covering less than the area floor —
+                    # an isolated cell, or convection still going up.
+                    #
+                    # This used to fall through to the branch below, which does
+                    # `mask &= conditional`, and `conditional` is
+                    # `capable & ~storms`: it removed precisely the cells that
+                    # had the storms in them and drew the threat on the
+                    # surrounding storm-free air. At ~181 km² per assessment
+                    # cell the marginal floor is 12,120 km² (67 cells), which a
+                    # dilated single storm (4,531) or small cluster (6,525)
+                    # never reaches — so the zone was displaced off the
+                    # convection exactly during initiation, the moment it
+                    # matters most. The floor decides whether a threat is worth
+                    # reporting, never where it is.
+                    mask = active
+                    res["basis"] = "storms" if have_refc else "environment"
+                    res["conditional"] = not have_refc
+                    res["below_area_floor"] = True
                 else:
-                    # No convection in the model field — the parameters still
-                    # describe what would happen IF storms formed, so keep the
-                    # threat but label it as conditional rather than active.
+                    # Nothing going yet. The parameters still describe what
+                    # would happen IF storms formed — the forecast half of this
+                    # product — so keep the threat and label it conditional.
                     if conditional is not None:
                         mask = mask & conditional
                     res["basis"] = "conditional"
                     res["conditional"] = True
                 frac = self._frac(mask)
                 res["coverage"] = round(frac, 5)
-                if frac < floor:
+                # The floor exists so a handful of noisy cells cannot set a
+                # national threat level over an empty map. It must not silence a
+                # threat sitting on OBSERVED convection: one severe storm is a
+                # small share of CONUS and still the thing the operator is
+                # looking at. Suppress on area only when there is no storm.
+                if frac < floor and not res.get("below_area_floor"):
                     res.update({
                         "level": "none", "mode": None, "modes": [],
                         "basis": "none", "conditional": True,
@@ -784,7 +1085,18 @@ class MesoanalysisService:
                     })
                     mask = None
 
-            res["label"] = self._level_label(res["level"], res.get("conditional", True))
+            # How much of this threat's area has something to set it off. Kept
+            # as a FRACTION rather than a boolean because "a front clips the
+            # corner" and "the whole area is under ascent" are different
+            # forecasts, and because a boolean would have to pick a threshold
+            # here as well as in _trigger.
+            if res["level"] != "none" and mask is not None and trigger is not None:
+                n = int(mask.sum())
+                res["trigger"] = round(float((mask & trigger).sum()) / n, 3) if n else 0.0
+                res["trigger_terms"] = sorted(
+                    k for k, m in trig["parts"].items() if bool((mask & m).any()))
+            res["label"] = self._level_label(res["level"], res.get("conditional", True),
+                                             res.get("trigger"))
             if res["level"] != "none":
                 res["details"] = self._threat_details(t, res)
 
@@ -809,7 +1121,8 @@ class MesoanalysisService:
         return threats, masks
 
     @staticmethod
-    def _level_label(level: str, conditional: bool) -> str:
+    def _level_label(level: str, conditional: bool,
+                     trigger: Optional[float] = None) -> str:
         """Plain-language wording for a threat level.
 
         The level KEYS stay as they are — map layers and saved views are keyed
@@ -824,7 +1137,17 @@ class MesoanalysisService:
         if level == "none":
             return "No threat"
         base = LEVEL_LABELS.get(level, level.title())
-        return f"{base} if storms form" if conditional else base
+        if not conditional:
+            return base
+        # "if storms form" is honest but it was the ONLY thing this ever said,
+        # and a phrase that never varies stops being read. When something is
+        # there to set them off, say so — that is the difference between a
+        # warm sector and a warm sector with a front in it.
+        if trigger is not None and trigger >= TRIGGER_LIKELY_FRAC:
+            return f"{base}, storms expected to develop"
+        if trigger is not None and trigger >= TRIGGER_PRESENT_FRAC:
+            return f"{base} where storms develop"
+        return f"{base} if storms form"
 
     @staticmethod
     def _threat_details(threat: str, res: dict) -> str:
@@ -836,8 +1159,22 @@ class MesoanalysisService:
         level = res.get("level", "none")
         msg = THREAT_MESSAGES.get(threat, {}).get(level, "Threat detected.")
         if res.get("basis") == "storms":
-            return f"Storms present. {msg}"
-        return f"No convection in the analysis — conditional on storms forming. {msg}"
+            lead = "Storms present."
+            if res.get("below_area_floor"):
+                lead = "Storms present (isolated)."
+            return f"{lead} {msg}"
+        trig = res.get("trigger")
+        terms = res.get("trigger_terms") or []
+        if trig is not None and trig >= TRIGGER_PRESENT_FRAC and terms:
+            named = {"ascent": "large-scale ascent",
+                     "boundary": "a surface boundary",
+                     "height_falls": "falling heights aloft"}
+            what = ", ".join(named.get(k, k) for k in terms)
+            share = "Most of this area has" if trig >= TRIGGER_LIKELY_FRAC else "Part of this area has"
+            return (f"No convection yet, but {what} — {share.lower()} something to "
+                    f"set storms off. {msg}")
+        return ("No convection, and nothing lifting parcels to their LFC — "
+                f"ingredients only. {msg}")
 
     @staticmethod
     def _summary(threats: dict, params: dict, zone: Optional[np.ndarray]) -> str:
@@ -969,20 +1306,23 @@ class MesoanalysisService:
             if grids is None:
                 continue
             t0 = time.time()
-            threats, masks = self._assess(grids)
-            combined = None
-            for m in masks.values():
-                combined = m if combined is None else (combined | m)
             prev = None
             for pr in runs:
                 if pr < r:
                     prev = self.grids(pr)
                     break
+            threats, masks = self._assess(grids, self._run_iso(r), prev)
+            combined = None
+            for m in masks.values():
+                combined = m if combined is None else (combined | m)
             watch = self._watch(grids)
             result = {
                 "run": r,
                 "valid_time": self._run_iso(r),
-                "model": "RAP analysis (f00)",
+                # The source is the analysis token, not a hardcoded f00: since
+                # MESO_SOURCES learned to prefer the previous cycle's F01 this
+                # is usually an F01, and saying "f00" misreported it.
+                "model": "RAP analysis (f%02d)" % self._parse_run(r)[2],
                 "threats": threats,
                 "trends": self._trends(grids, prev, combined),
                 "watch_coverage": round(self._frac(watch), 5) if watch is not None else 0.0,
