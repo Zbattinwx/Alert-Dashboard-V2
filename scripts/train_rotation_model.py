@@ -928,6 +928,11 @@ def main():
                              "for 'severe' to see any SV.W positives.")
     parser.add_argument("--holdout-days", type=int, default=HOLDOUT_DAYS,
                         help="Most recent N convective days withheld from fitting.")
+    parser.add_argument("--skip-audit", action="store_true",
+                        help="Train even if the feature audit finds a blocking "
+                             "problem. Every defect this project has shipped was "
+                             "found AFTER a long train, so the default is to look "
+                             "first; this flag is for when you already know.")
     args = parser.parse_args()
 
     data_path = Path(args.data)
@@ -952,6 +957,43 @@ def main():
     except ImportError:
         print("scikit-learn is not installed. Run:  pip install scikit-learn joblib")
         sys.exit(1)
+
+    # ── The feature audit, before the expensive part ───────────────────────
+    # A training run costs hours and a re-derivation costs a day, and this
+    # project has repeatedly spent both only to discover afterwards that a
+    # column was empty, or was a measurement of range, or that its missingness
+    # encoded the calendar. Looking takes about a minute. See
+    # scripts/audit_features.py for what each check is for and which real bug
+    # motivated it.
+    if not args.skip_audit:
+        try:
+            from scripts.audit_features import Audit, render, _feature_names, _optional_features
+            audit = Audit(_feature_names(), _optional_features())
+            with data_path.open(encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        audit.add(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            rep = audit.report()
+            blocking = [f for f in rep["findings"] if f["severity"] == "fail"]
+            if blocking:
+                print()
+                print("=" * 72)
+                print("FEATURE AUDIT: this matrix should not be trained on as-is.")
+                print("=" * 72)
+                render(rep)
+                print()
+                print("Refusing to train. Fix the data, or pass --skip-audit if "
+                      "you have already accounted for these.")
+                sys.exit(3)
+            warns = [f for f in rep["findings"] if f["severity"] == "warn"]
+            print(f"feature audit: clean ({len(warns)} non-blocking warning(s))")
+        except ImportError as e:
+            print(f"feature audit unavailable ({e}) - training without it")
 
     train(X, y, groups=groups, times=times, out_path=args.out, target=args.target,
           holdout_days=args.holdout_days, meta=meta)
