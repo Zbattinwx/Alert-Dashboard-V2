@@ -98,12 +98,15 @@ def extract_features(cell: dict, scan_ts: str | None = None) -> dict:
     peak_profile_vel = max((p.get("rot_velocity_ms", 0) for p in profile), default=0.0)
     breakdown = cell.get("score_breakdown") or {}
 
-    # MRMS multi-radar rotation features.  Sampled at the cell's lat/lon from
-    # the latest cached MRMS frame, when the rotation service is running.
-    # Both default to 0.0 when MRMS is unavailable so the model handles
-    # missing data gracefully.
-    mrms_rot = 0.0
-    mrms_azshear = 0.0
+    # MRMS multi-radar rotation, sampled at the cell's lat/lon.
+    #
+    # None WHEN THE SERVICE IS NOT RUNNING, NOT 0.0 -- the same reasoning as the
+    # lightning fields immediately below, and for the same reason: a storm with
+    # no rotation and a storm whose rotation we could not see are different
+    # states, and 0.0 asserts the first when we only know the second. Mirrors
+    # storm_tracking_service.build_training_record.
+    mrms_rot = None
+    mrms_azshear = None
     try:
         from backend.services.mrms_rotation_service import get_mrms_rotation_service
         svc = get_mrms_rotation_service()
@@ -112,11 +115,9 @@ def extract_features(cell: dict, scan_ts: str | None = None) -> dict:
             lon = cell.get("lon")
             if lat is not None and lon is not None:
                 rt = svc.get_rotation_track_at(float(lat), float(lon))
-                if rt is not None:
-                    mrms_rot = float(rt)
+                mrms_rot = float(rt) if rt is not None else 0.0
                 az = svc.get_azshear_at(float(lat), float(lon))
-                if az is not None:
-                    mrms_azshear = float(az)
+                mrms_azshear = float(az) if az is not None else 0.0
     except Exception:
         pass
 

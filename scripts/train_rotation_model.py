@@ -261,7 +261,13 @@ ENV_PREFIX = "env_"          # absent environment is NaN, never 0.0
 
 # Measurements that are legitimately zero AND legitimately absent, so a plain
 # `or 0` would collapse two different states into one. Absent stays NaN.
-OPTIONAL_FEATURES = ("flash_rate_fpm", "flash_rate_trend",
+OPTIONAL_FEATURES = (# No historical MRMS rotation feed exists, so these are
+                     # absent for every archived row and present only live.
+                     # They were previously written as 0.0 in both paths, which
+                     # asserted "no rotation measured here" across 206,896
+                     # re-derived rows including tornado-warned storms.
+                     "mrms_rotation_track_30min", "mrms_azshear_0_2km",
+                     "flash_rate_fpm", "flash_rate_trend",
                      "downburst_delta_v_ms",
                      "marc_convergence_ms",
                      "max_wind_velocity_ms",
@@ -325,7 +331,19 @@ def feature_row(feats: dict) -> list:
             v = feats.get(name)
             row.append(math.nan if v is None else float(v))
         else:
-            row.append(float(feats.get(name, 0.0)))
+            # Absent stays absent HERE TOO. This branch used to be
+            # `float(feats.get(name, 0.0))`, which did two things the
+            # docstring above promises it does not: it crashed on an explicit
+            # None, and it silently turned any missing key into 0.0 -- a real
+            # measurement of zero, invented at the last mile, for a feature
+            # nobody looked at. That is the same fabrication as the MRMS
+            # rotation columns writing 0.0 with no rotation feed running.
+            #
+            # NaN is what a HistGradientBoosting split reads as "no value", and
+            # audit_features.py now reports any column that is absent often
+            # enough to matter, so this can be honest without being blind.
+            v = feats.get(name)
+            row.append(math.nan if v is None else float(v))
     return row
 
 

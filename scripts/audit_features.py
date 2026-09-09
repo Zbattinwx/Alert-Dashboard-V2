@@ -304,6 +304,17 @@ class Audit:
                         low=lo, high=hi, low_month=lo_m, high_month=hi_m)
 
             # Nuisance: range. TWO tests, because they catch different shapes.
+            #
+            # NOT for env_*. For a RADAR feature, distance from the radar means
+            # beam geometry, and a feature that tracks it is measuring the
+            # observation. For the near-storm ENVIRONMENT, distance from KILN
+            # is a proxy for GEOGRAPHY -- CAPE really does differ across a
+            # 200 km domain, and flagging that as a defect is the audit crying
+            # wolf, which is how an audit gets --skip'd. Same for drift: the
+            # archive is walked in date order, so "trend against time" over a
+            # partial run is mostly SEASON, and SRH really is higher in spring.
+            if name.startswith("env_"):
+                continue
             pairs = self.range_pairs[name]
             if len(pairs) >= 30:
                 r = _pearson([p[0] for p in pairs], [p[1] for p in pairs])

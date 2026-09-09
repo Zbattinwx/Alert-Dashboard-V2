@@ -693,21 +693,32 @@ class StormTrackingService:
                 default=0.0,
             )
 
-        # MRMS multi-radar rotation features — sampled at the cell's lat/lon
-        # from the cached MRMS rotation service.  Both default to 0.0 when
-        # MRMS is unavailable so the model handles missing data gracefully.
-        mrms_rot = 0.0
-        mrms_azshear = 0.0
+        # MRMS multi-radar rotation, sampled at the cell's lat/lon.
+        #
+        # NaN WHEN THE SERVICE IS NOT RUNNING, NOT 0.0. These used to default to
+        # zero "so the model handles missing data gracefully", which is exactly
+        # backwards: 0.0 is a MEASUREMENT of no rotation, and writing it where
+        # we simply could not look asserts a fact nobody observed. The
+        # re-derivation wrote 0.0 into all 206,896 rows because there is no
+        # historical MRMS rotation feed at all -- two whole columns of
+        # fabricated "no rotation here", on archived storms that included
+        # tornado-warned ones.
+        #
+        # It is the same mistake this module's own header warns about for the
+        # Pi's cache: "NaN -> 0 ... and 0 is the maximally FAVORABLE value".
+        # Distinguish the two cases: service ABSENT means unknown (NaN);
+        # service present and returning nothing for a point genuinely means
+        # zero rotation was measured there.
+        mrms_rot = _NAN
+        mrms_azshear = _NAN
         try:
             from backend.services.mrms_rotation_service import get_mrms_rotation_service
             svc = get_mrms_rotation_service()
             if svc is not None and svc.available:
                 rt = svc.get_rotation_track_at(float(cell.lat), float(cell.lon))
-                if rt is not None:
-                    mrms_rot = float(rt)
+                mrms_rot = float(rt) if rt is not None else 0.0
                 az = svc.get_azshear_at(float(cell.lat), float(cell.lon))
-                if az is not None:
-                    mrms_azshear = float(az)
+                mrms_azshear = float(az) if az is not None else 0.0
         except Exception:
             pass
 
@@ -3546,6 +3557,65 @@ class StormTrackingService:
     # Phase 2 — Kinematic Wind Signature Detectors
     # =========================================================================
 
+    @staticmethod
+    def _lowest_velocity_sweep(radar, vel_key: str, max_elev: float = 1.5,
+                               who: str = "detector"):
+        """Lowest sweep at or below `max_elev` THAT ACTUALLY CARRIES VELOCITY.
+
+        THE SPLIT CUT. NEXRAD scans its lowest tilts twice: a long-PRT
+        SURVEILLANCE cut carrying reflectivity only, then a short-PRT DOPPLER
+        cut carrying velocity. Both are reported at the same fixed_angle, so
+        `min(candidates, key=elevation)` picks whichever comes first in the
+        file -- and that is the surveillance cut. Measured on
+        KILN20240402_113023_V06:
+
+            sweep 0  0.48 deg  488,964 REF gates        0 VEL gates
+            sweep 1  0.48 deg  431,932 REF gates  414,628 VEL gates
+
+        The downburst and straight-line-wind detectors both took sweep 0, read
+        an entirely masked velocity array, found nothing, and returned. No
+        exception, no failure recorded, the fields left at their reset values.
+        Across 206,896 re-derived rows that produced ZERO downburst detections
+        and a null `max_wind_velocity_ms` in every single row -- so the wind
+        models were once again being trained with the wind withheld, which is
+        the exact defect the re-derivation existed to repair.
+
+        MARC and the rear-inflow jet were unaffected because they work at
+        mid-levels, above the split cuts, which is why only these two were
+        silently dead.
+
+        Returns (sweep_index, elevation) or None. Returning None is REPORTED,
+        because a detector that cannot run should say so rather than look like
+        a detector that ran and found nothing.
+        """
+        try:
+            fixed_angles = radar.fixed_angle["data"]
+            data = radar.fields[vel_key]["data"]
+        except Exception:
+            return None
+
+        best = None
+        for i, a in enumerate(fixed_angles):
+            elev = float(a)
+            if elev > max_elev:
+                continue
+            if best is not None and elev >= best[1]:
+                continue
+            try:
+                s = int(radar.sweep_start_ray_index["data"][i])
+                e = int(radar.sweep_end_ray_index["data"][i])
+                block = data[s:e + 1]
+                if not np.any(~np.ma.getmaskarray(block)):
+                    continue  # surveillance half of a split cut
+            except Exception:
+                continue
+            best = (i, elev)
+        if best is None:
+            note_failure(f"{who}.no_velocity_sweep",
+                         f"{who} is producing nothing (no sweep at or below "
+                         f"{max_elev:.1f} deg carries velocity)")
+        return best
+
     def _detect_downburst_signatures(self, radar, cells: list[TrackedStormCell]):
         """
         Detect microburst / downburst signatures on the lowest radar tilt.
@@ -3586,13 +3656,12 @@ class StormTrackingService:
                 cell.downburst_detected   = False
                 cell.downburst_delta_v_ms = None
 
-        # Lowest tilt ≤ 1.5°
-        candidates = [
-            (i, float(a)) for i, a in enumerate(fixed_angles) if float(a) <= 1.5
-        ]
-        if not candidates:
+        # Lowest tilt ≤ 1.5° THAT HAS VELOCITY — see _lowest_velocity_sweep for
+        # why "lowest" and "lowest with velocity" are different sweeps.
+        picked = self._lowest_velocity_sweep(radar, vel_key, 1.5, "downburst")
+        if picked is None:
             return
-        sweep_idx, sweep_elev = min(candidates, key=lambda x: x[1])
+        sweep_idx, sweep_elev = picked
 
         try:
             s_start = int(radar.sweep_start_ray_index["data"][sweep_idx])
@@ -3821,13 +3890,11 @@ class StormTrackingService:
                 cell.strong_wind_swath_km2        = None
                 cell.max_wind_velocity_ms         = None
 
-        # Lowest tilt ≤ 1.5°
-        candidates = [
-            (i, float(a)) for i, a in enumerate(fixed_angles) if float(a) <= 1.5
-        ]
-        if not candidates:
+        # Lowest tilt ≤ 1.5° THAT HAS VELOCITY — see _lowest_velocity_sweep.
+        picked = self._lowest_velocity_sweep(radar, vel_key, 1.5, "straightline")
+        if picked is None:
             return
-        sweep_idx, _ = min(candidates, key=lambda x: x[1])
+        sweep_idx, _ = picked
 
         try:
             s_start = int(radar.sweep_start_ray_index["data"][sweep_idx])
