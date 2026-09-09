@@ -398,6 +398,17 @@ class TrackedStormCell:
     # rotation following is the escalation worth seeing.
     p_rotation_model: Optional[float] = None
     p_severe_model: Optional[float] = None
+    # P(a hail report of >= 1.00", the NWS severe criterion) for this cell.
+    # Trained on SPC storm reports rather than on warnings, because a severe
+    # thunderstorm warning does not record WHICH hazard it was issued for.
+    # It is a probability of a REPORT, so it inherits that label's bias: hail
+    # over a town is reported and the same hail over a field is not. Read it as
+    # a ranking between cells, not as an absolute frequency.
+    #
+    # The other three hazard heads (2" hail, 50 kt and 65 kt wind) were trained
+    # and are NOT served: on days they had never seen they scored 0.51, 0.57 and
+    # 0.46 held-out AUC -- coin flips. Only this one earned it, at 0.815.
+    p_hail_1in_model: Optional[float] = None
 
     # ── Internal scan-history for trend computation (not sent to frontend) ──
     # Stores the last TREND_HISTORY_MAX snapshots of key numeric fields.
@@ -515,6 +526,8 @@ class StormTrackingService:
         # Each model carries its own feature list (from its bundle). Normally
         # identical; kept apart because the two are retrained independently.
         self._severe_model_features: list[str] = []
+        self._hail_model = None
+        self._hail_model_features: list[str] = []
         # Same feature vector, different question -- see p_severe_model.
         self._severe_model = None
 
@@ -631,11 +644,37 @@ class StormTrackingService:
             logger.warning(f"Could not load ML severe model: {e}")
             return False
 
+    def load_hail_model(self, model_path: Optional[str] = None) -> bool:
+        """Load the >= 1" hail classifier. Independent of the other two."""
+        try:
+            from pathlib import Path as _P
+            import sys
+            project_root = _P(__file__).resolve().parents[2]
+            if str(project_root) not in sys.path:
+                sys.path.insert(0, str(project_root))
+            from scripts.train_rotation_model import FEATURE_NAMES
+            from .model_paths import find_model, load_model_bundle
+
+            path = _P(model_path) if model_path else find_model("hail_1in_model.joblib")
+            if path is None or not _P(path).exists():
+                logger.info("No hail ML model found - hail probability stays None")
+                return False
+            model, feats = load_model_bundle(path, FEATURE_NAMES)
+            self._hail_model = model
+            self._hail_model_features = feats
+            logger.info(f"Loaded ML hail model from {path.name} "
+                        f"with {len(feats)} features")
+            return True
+        except Exception as e:
+            logger.warning(f"Could not load ML hail model: {e}")
+            return False
+
     def load_models(self) -> dict:
-        """Load both classifiers. One failing must not stop the other."""
+        """Load every classifier. One failing must not stop the others."""
         return {
             "rotation": self.load_rotation_model(),
             "severe": self.load_severe_model(),
+            "hail_1in": self.load_hail_model(),
         }
 
     @staticmethod
@@ -717,6 +756,13 @@ class StormTrackingService:
             # NaN when GLM was not running -- mirrors live_qa.extract_features.
             "flash_rate_fpm":   _NAN if cell.flash_rate_fpm is None else float(cell.flash_rate_fpm),
             "flash_rate_trend": _NAN if cell.flash_rate_trend is None else float(cell.flash_rate_trend),
+            "downburst_delta_v_ms": _NAN if cell.downburst_delta_v_ms is None else float(cell.downburst_delta_v_ms),
+            "marc_convergence_ms": _NAN if cell.marc_convergence_ms is None else float(cell.marc_convergence_ms),
+            "max_wind_velocity_ms": _NAN if cell.max_wind_velocity_ms is None else float(cell.max_wind_velocity_ms),
+            "strong_wind_swath_km2": _NAN if cell.strong_wind_swath_km2 is None else float(cell.strong_wind_swath_km2),
+            "downburst_detected": 1.0 if cell.downburst_detected else 0.0,
+            "marc_signature_detected": 1.0 if cell.marc_signature_detected else 0.0,
+            "rij_detected": 1.0 if cell.rij_detected else 0.0,
             # Near-storm environment. Mirrors live_qa.extract_features; absent
             # values stay NaN (see storm_environment) rather than becoming 0.0,
             # which would assert a specific and wrong atmosphere.
@@ -742,13 +788,15 @@ class StormTrackingService:
         """
         if not self._rotation_model_features:
             return
-        if self._rotation_model is None and self._severe_model is None:
+        if (self._rotation_model is None and self._severe_model is None
+                and getattr(self, '_hail_model', None) is None):
             return
         import numpy as np
         for cell in cells:
             if cell.scan_count < 0:
                 cell.p_rotation_model = None
                 cell.p_severe_model = None
+                cell.p_hail_1in_model = None
                 continue
             try:
                 rot_feats = self._rotation_model_features
@@ -783,6 +831,16 @@ class StormTrackingService:
                     cell.p_severe_model = round(ps, 3)
                 else:
                     cell.p_severe_model = None
+                hail_model = getattr(self, "_hail_model", None)
+                if hail_model is not None:
+                    hf = getattr(self, "_hail_model_features", None) or rot_feats
+                    row_hail = row if hf == rot_feats else np.array(
+                        self._cell_to_feature_vector(cell, hf), dtype=float,
+                    ).reshape(1, -1)
+                    cell.p_hail_1in_model = round(
+                        float(hail_model.predict_proba(row_hail)[0, 1]), 3)
+                else:
+                    cell.p_hail_1in_model = None
             except Exception as e:
                 # Once per process. A systematic failure (an estimator that
                 # cannot take the NaN the feature vector deliberately emits for

@@ -30,7 +30,11 @@ cd "$ROOT"
   exit 1
 }
 
-for m in data/rotation_model.joblib data/severe_model.joblib; do
+# Every model the tracker SERVES must appear here AND in the --add-data block
+# below. A model registered in model_paths.MODEL_NAMES but missing from the
+# freeze ships an app that shows a blank column on every fresh install: no
+# error, no log line, the probability is simply always null.
+for m in data/rotation_model.joblib data/severe_model.joblib data/hail_1in_model.joblib; do
   [ -f "$m" ] || { echo "ERROR: $m is missing - train it before freezing"; exit 1; }
 done
 
@@ -104,6 +108,7 @@ $PYI --noconfirm --clean --onedir --name dashboard-backend \
   `# beside the .exe, so shipping these cannot pin anyone to a stale model.` \
   --add-data "$ROOT_WIN/data/rotation_model.joblib;data" \
   --add-data "$ROOT_WIN/data/severe_model.joblib;data" \
+  --add-data "$ROOT_WIN/data/hail_1in_model.joblib;data" \
   --add-data "$ROOT_WIN/backend/data;backend/data" \
   --add-data "$ROOT_WIN/frontend/dist;frontend/dist" \
   `# US state outlines — the mesoanalysis land mask rasterizes these. Shipped` \

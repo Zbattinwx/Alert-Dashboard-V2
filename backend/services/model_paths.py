@@ -39,7 +39,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAMES = ("rotation_model.joblib", "severe_model.joblib")
+MODEL_NAMES = ("rotation_model.joblib", "severe_model.joblib",
+               "hail_1in_model.joblib")
 
 
 def is_frozen() -> bool:

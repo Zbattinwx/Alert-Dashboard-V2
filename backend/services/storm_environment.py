@@ -43,6 +43,7 @@ import logging
 import math
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import numpy as np
@@ -141,6 +142,11 @@ class _EnvCache:
 
 _cache = _EnvCache()
 
+# Small bounded cache of historical cycles, for archive replay.
+_hist: dict = {}
+_hist_lock = threading.Lock()
+_HIST_MAX = 6
+
 
 def _sample(grid: np.ndarray, lats: np.ndarray, lons: np.ndarray,
             lat: float, lon: float) -> float:
@@ -166,8 +172,52 @@ def _sample(grid: np.ndarray, lats: np.ndarray, lons: np.ndarray,
     return v if math.isfinite(v) else float("nan")
 
 
-def environment_at(lat: float, lon: float) -> dict[str, float]:
+def _historical(at: datetime) -> tuple:
+    """Grids valid at a PAST instant, from the archived model cycle.
+
+    Without this, replaying an archived storm day would attach TODAY's
+    atmosphere to a storm from 2024 -- the backfill runs the live pipeline, and
+    the live pipeline asks for the current analysis. That is not a degraded
+    value, it is a fabricated one, and it is exactly the kind of confidently
+    wrong data that is worse than a missing column.
+    """
+    key = at.strftime("%Y%m%d%H")
+    with _hist_lock:
+        if key in _hist:
+            return _hist[key]
+    grids = lats = lons = token = None
+    try:
+        from .mesoanalysis_service import (
+            get_mesoanalysis_service, analysis_axes, MESO_SOURCES,
+        )
+        svc = get_mesoanalysis_service()
+        for model, fhour in MESO_SOURCES:
+            cycle = (at - timedelta(hours=fhour)).strftime("%Y%m%d%H")
+            cand = f"{model}:{cycle}:{fhour}"
+            g = svc.grids(cand)
+            if g:
+                grids = svc._resolve(g) if hasattr(svc, "_resolve") else g
+                lats, lons = analysis_axes()
+                token = cand
+                break
+    except Exception as e:                                  # noqa: BLE001
+        logger.debug("historical environment for %s unavailable (%s)", key, e)
+    val = (grids, lats, lons, token)
+    with _hist_lock:
+        # Bounded: a backfill walks hours in order, so a small window is enough
+        # and a whole season of CONUS grids would not fit in memory.
+        if len(_hist) >= _HIST_MAX:
+            _hist.pop(next(iter(_hist)))
+        _hist[key] = val
+    return val
+
+
+def environment_at(lat: float, lon: float, at: Optional[datetime] = None) -> dict[str, float]:
     """Environment parameters at a point, keyed by ENV_FEATURE_NAMES.
+
+    `at` is the scan time. Omit it for live use (the newest analysis is by
+    definition the right one). PASS IT when replaying history -- the backfill
+    must not be handed the current atmosphere for a storm from last year.
 
     Always returns every key. Missing values are NaN, never 0.0 -- see the
     module docstring for why that distinction is load-bearing.
@@ -175,9 +225,33 @@ def environment_at(lat: float, lon: float) -> dict[str, float]:
     out = {name: float("nan") for name in ENV_FEATURE_NAMES}
     if lat is None or lon is None:
         return out
-    grids, lats, lons, _run, _valid = _cache.get()
+
+    if at is not None:
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - at).total_seconds()
+        if age > MAX_ANALYSIS_AGE_S:
+            # Genuinely historical: resolve that hour's own cycle, or answer
+            # "unknown" -- never the current one.
+            grids, lats, lons, _tok = _historical(at)
+            if not grids:
+                return out
+            for field, name in zip(ENV_FIELDS, ENV_FEATURE_NAMES):
+                out[name] = _sample(grids.get(field), lats, lons, float(lat), float(lon))
+            return out
+
+    grids, lats, lons, _run, valid = _cache.get()
     if not grids:
         return out
+    # Even in the live path, refuse to answer for a scan the cached analysis
+    # does not actually cover.
+    if at is not None and valid:
+        try:
+            skew = abs((datetime.fromisoformat(valid) - at).total_seconds())
+            if skew > MAX_ANALYSIS_AGE_S:
+                return out
+        except (ValueError, TypeError):
+            pass
     for field, name in zip(ENV_FIELDS, ENV_FEATURE_NAMES):
         out[name] = _sample(grids.get(field), lats, lons, float(lat), float(lon))
     return out

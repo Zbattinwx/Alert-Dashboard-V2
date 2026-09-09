@@ -92,7 +92,7 @@ def _opt(v):
     return None if v is None else float(v)
 
 
-def extract_features(cell: dict) -> dict:
+def extract_features(cell: dict, scan_ts: str | None = None) -> dict:
     """Extract the feature vector for ML training (mirrors live_qa CLI)."""
     profile = cell.get("rotation_profile") or []
     peak_profile_vel = max((p.get("rot_velocity_ms", 0) for p in profile), default=0.0)
@@ -156,6 +156,13 @@ def extract_features(cell: dict) -> dict:
         # quiet" across the whole archive.
         "flash_rate_fpm":            _opt(cell.get("flash_rate_fpm")),
         "flash_rate_trend":          _opt(cell.get("flash_rate_trend")),
+        "downburst_delta_v_ms": _opt(cell.get("downburst_delta_v_ms")),
+        "marc_convergence_ms": _opt(cell.get("marc_convergence_ms")),
+        "max_wind_velocity_ms": _opt(cell.get("max_wind_velocity_ms")),
+        "strong_wind_swath_km2": _opt(cell.get("strong_wind_swath_km2")),
+        "downburst_detected": 1.0 if cell.get("downburst_detected") else 0.0,
+        "marc_signature_detected": 1.0 if cell.get("marc_signature_detected") else 0.0,
+        "rij_detected": 1.0 if cell.get("rij_detected") else 0.0,
     }
 
     # Near-storm environment, sampled at this cell's own location. Absent values
@@ -163,7 +170,18 @@ def extract_features(cell: dict) -> dict:
     # reads back as NaN -- 0.0 would claim a specific (and wrong) atmosphere.
     try:
         from .storm_environment import environment_at
-        env = environment_at(cell.get("lat"), cell.get("lon"))
+        at = None
+        if scan_ts:
+            # Passing the scan time is what stops an archive replay from being
+            # handed TODAY's atmosphere for a storm from last year. Live callers
+            # pass it too and it costs nothing -- the newest analysis covers a
+            # live scan by definition.
+            from datetime import datetime as _dt
+            try:
+                at = _dt.fromisoformat(scan_ts)
+            except (ValueError, TypeError):
+                at = None
+        env = environment_at(cell.get("lat"), cell.get("lon"), at=at)
         for k, v in env.items():
             out[k] = None if v is None or v != v else float(v)
     except Exception:
@@ -214,7 +232,7 @@ def build_training_record(cell: dict, scan_ts: str) -> dict:
         "site":     cell.get("site"),
         "lat":      cell.get("lat"),
         "lon":      cell.get("lon"),
-        "features": extract_features(cell),
+        "features": extract_features(cell, scan_ts),
         "flags": {
             "rotation_detected":      cell.get("rotation_detected", False),
             "low_level_meso":         cell.get("low_level_meso_detected", False),

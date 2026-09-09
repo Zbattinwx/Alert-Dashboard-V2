@@ -204,3 +204,78 @@ def _cell_for_trends():
         vil_kg_m2=25, cell_top_km=11, track_history=[], forecast_track=[],
         score_breakdown={}, first_detected="2026-09-09T00:00:00Z",
         last_updated="2026-09-09T00:00:00Z", trend="steady", scan_count=3)
+
+
+# ── Time-aware sampling (archive replay) ───────────────────────────────────
+
+def test_a_historical_scan_never_gets_todays_atmosphere(monkeypatch):
+    """The failure this prevents.
+
+    backfill_training_data replays archived volumes through the LIVE pipeline,
+    and the live pipeline asks for the CURRENT analysis. Without a scan time,
+    a storm from 2024 would be labelled with tonight's CAPE and shear -- not a
+    degraded value but a fabricated one, and one that would look perfectly
+    plausible in the archive forever after.
+    """
+    from datetime import datetime, timezone
+
+    marker = {n: 999.0 for n in se.ENV_FIELDS}
+    lats = np.array([40.0, 39.0]); lons = np.array([-85.0, -84.0])
+    grids = {k: np.full((2, 2), v) for k, v in marker.items()}
+    monkeypatch.setattr(se._cache, "get",
+                        lambda: (grids, lats, lons, "now", "2026-09-09T03:00:00+00:00"))
+    monkeypatch.setattr(se, "_historical", lambda at: (None, None, None, None))
+
+    old = datetime(2024, 5, 18, 21, 0, tzinfo=timezone.utc)
+    env = se.environment_at(39.0, -84.0, at=old)
+    assert all(math.isnan(v) for v in env.values()), (
+        "a historical scan took the live analysis")
+
+
+def test_a_live_scan_still_uses_the_live_analysis(monkeypatch):
+    from datetime import datetime, timezone
+    lats = np.array([40.0, 39.0]); lons = np.array([-85.0, -84.0])
+    grids = {k: np.full((2, 2), 7.0) for k in se.ENV_FIELDS}
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(se._cache, "get",
+                        lambda: (grids, lats, lons, "now", now.isoformat()))
+    env = se.environment_at(39.0, -84.0, at=now)
+    assert env["env_mlcape"] == 7.0
+
+
+def test_a_scan_the_cached_analysis_does_not_cover_is_refused(monkeypatch):
+    """Even live, an analysis hours away from the scan does not describe it."""
+    from datetime import datetime, timedelta, timezone
+    lats = np.array([40.0, 39.0]); lons = np.array([-85.0, -84.0])
+    grids = {k: np.full((2, 2), 7.0) for k in se.ENV_FIELDS}
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(se._cache, "get",
+                        lambda: (grids, lats, lons, "stale",
+                                 (now - timedelta(hours=9)).isoformat()))
+    env = se.environment_at(39.0, -84.0, at=now)
+    assert all(math.isnan(v) for v in env.values())
+
+
+def test_omitting_the_time_keeps_the_live_behaviour(monkeypatch):
+    lats = np.array([40.0, 39.0]); lons = np.array([-85.0, -84.0])
+    grids = {k: np.full((2, 2), 3.0) for k in se.ENV_FIELDS}
+    monkeypatch.setattr(se._cache, "get",
+                        lambda: (grids, lats, lons, "now", None))
+    assert se.environment_at(39.0, -84.0)["env_mlcape"] == 3.0
+
+
+def test_naive_timestamps_are_treated_as_utc():
+    """The archive writes ISO strings; some carry no offset. Guessing local
+    time would shift a storm by hours into a different atmosphere."""
+    from datetime import datetime
+    env = se.environment_at(None, None, at=datetime(2024, 5, 18, 21, 0))
+    assert set(env) == set(se.ENV_FEATURE_NAMES)
+
+
+def test_the_training_record_passes_its_scan_time():
+    """Parity guard: build_training_record must hand the timestamp down, or the
+    whole protection above is dead code during a backfill."""
+    import inspect
+    from backend.services import live_qa_service as lq
+    src = inspect.getsource(lq.build_training_record)
+    assert "extract_features(cell, scan_ts)" in src

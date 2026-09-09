@@ -152,6 +152,26 @@ FEATURE_NAMES = [
     # the rate for its severity score and threw it away.
     "flash_rate_fpm",
     "flash_rate_trend",
+    # ── Kinematic wind signatures ─────────────────────────────────────────
+    # These were computed every scan for the severity score and never given to
+    # the classifier -- the same oversight as the lightning rate. It shows:
+    # trained WITHOUT them, wind_severe reached 0.574 held-out AUC against
+    # hail_1in's 0.815 on MORE positives, because the model was being asked to
+    # predict damaging wind from reflectivity shape and rotation while the
+    # actual wind signatures were withheld. Divergent outflow (downburst dV)
+    # and mid-altitude radial convergence (MARC) are the published precursors,
+    # MARC by 10-20 minutes.
+    #
+    # Magnitudes are NaN when not detected, not 0.0: "no downburst signature"
+    # and "a downburst of 0 m/s" are different statements. The booleans carry
+    # the detected/not answer.
+    "downburst_delta_v_ms",
+    "marc_convergence_ms",
+    "max_wind_velocity_ms",
+    "strong_wind_swath_km2",
+    "downburst_detected",
+    "marc_signature_detected",
+    "rij_detected",
     # ── Near-storm environment (dashboard >= 2026-09-09) ──────────────────
     # Sampled from the hourly mesoanalysis grids at the cell's own lat/lon; see
     # backend/services/storm_environment.py. Until this shipped the classifier
@@ -241,7 +261,11 @@ ENV_PREFIX = "env_"          # absent environment is NaN, never 0.0
 
 # Measurements that are legitimately zero AND legitimately absent, so a plain
 # `or 0` would collapse two different states into one. Absent stays NaN.
-OPTIONAL_FEATURES = ("flash_rate_fpm", "flash_rate_trend")
+OPTIONAL_FEATURES = ("flash_rate_fpm", "flash_rate_trend",
+                     "downburst_delta_v_ms",
+                     "marc_convergence_ms",
+                     "max_wind_velocity_ms",
+                     "strong_wind_swath_km2")
 
 # Features whose MEASUREMENT was wrong before a given date, and whose recorded
 # values are therefore not comparable with what the tracker produces now.
