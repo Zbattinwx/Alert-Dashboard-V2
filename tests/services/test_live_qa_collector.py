@@ -106,12 +106,26 @@ class TestTrainServeParity:
 
         serve = StormTrackingService._cell_to_feature_vector(cell, FEATURE_NAMES)
         train_feats = extract_features(cell.to_dict())
-        train = [float(train_feats.get(n, 0.0)) for n in FEATURE_NAMES]
 
-        mismatched = [
-            (n, t, s) for n, t, s in zip(FEATURE_NAMES, train, serve)
-            if abs(t - s) > 1e-9
-        ]
+        # ABSENT is a third state, not a value. The training side writes None
+        # (which becomes JSON null, read back as NaN); the serving side emits
+        # NaN directly. Both mean "not measured" -- for environment fields with
+        # no analysis loaded, and for lightning with no GLM feed -- and a test
+        # that coerced them to 0.0 would pass while the two sides disagreed
+        # about whether the atmosphere had no CAPE or was simply unknown.
+        def absent(v):
+            return v is None or (isinstance(v, float) and v != v)
+
+        train = [train_feats.get(n) for n in FEATURE_NAMES]
+
+        mismatched = []
+        for n, t, s in zip(FEATURE_NAMES, train, serve):
+            if absent(t) and absent(s):
+                continue
+            if absent(t) != absent(s):
+                mismatched.append((n, t, s))
+            elif abs(float(t) - float(s)) > 1e-9:
+                mismatched.append((n, t, s))
         assert not mismatched, f"train/serve skew: {mismatched}"
 
     def test_the_dual_pol_features_are_not_hardcoded_at_inference(self):

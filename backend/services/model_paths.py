@@ -124,3 +124,73 @@ def describe() -> dict:
             ),
         }
     return out
+
+
+class ModelFeatureMismatch(RuntimeError):
+    """A model on disk wants a different feature vector than this build builds.
+
+    Raised rather than tolerated. The alternative -- letting sklearn throw deep
+    inside per-cell scoring -- turns into every probability silently becoming
+    None, which reads on screen exactly like "the tracker has no opinion" and
+    hid a dead model for months.
+    """
+
+
+def load_model_bundle(path, expected_features=None):
+    """Load a model file and return (estimator, feature_names).
+
+    Two eras of file exist and both must load:
+
+      * bundle (bundle_version >= 1): a dict carrying the estimator AND the
+        feature list it was trained on. The list wins -- a model knows its own
+        columns better than whatever constant this build happens to ship.
+      * legacy: a bare estimator with no feature list. `expected_features` is
+        the only thing available, so it is used and then VERIFIED against the
+        estimator's own `n_features_in_`.
+
+    The verification is the point. `find_model` prefers the runtime data/ copy
+    over the bundled seed, so an update ships new code onto an OLD model file
+    as a matter of course; if the feature set moved, the mismatch has to
+    surface here as a loud, specific error instead of as a silent None on every
+    cell.
+    """
+    import joblib
+
+    obj = joblib.load(path)
+    if isinstance(obj, dict) and "model" in obj:
+        model = obj["model"]
+        feats = list(obj.get("features") or [])
+        if not feats:
+            feats = list(expected_features or [])
+        source = "bundle"
+    else:
+        model = obj
+        feats = list(expected_features or [])
+        source = "legacy"
+
+    n_in = getattr(model, "n_features_in_", None)
+    if n_in is not None and feats and len(feats) != int(n_in):
+        raise ModelFeatureMismatch(
+            f"{getattr(path, 'name', path)} expects {int(n_in)} features but "
+            f"this build supplies {len(feats)} ({source} file). The model and "
+            f"the code that feeds it are from different versions -- retrain, or "
+            f"restore the matching model file. Scoring is disabled rather than "
+            f"run on a mismatched vector."
+        )
+
+    # A matching COUNT is not a matching vector. The caller builds its row by
+    # asking for each name in `feats`, and its builder returns 0.0 for a name it
+    # does not know -- so a model trained with env_mlcape, loaded by a build
+    # that cannot compute it, would score every storm as though the atmosphere
+    # had no CAPE. Right shape, wrong meaning, and completely silent.
+    if expected_features:
+        known = set(expected_features)
+        unknown = [f for f in feats if f not in known]
+        if unknown:
+            raise ModelFeatureMismatch(
+                f"{getattr(path, 'name', path)} was trained on features this "
+                f"build cannot compute: {', '.join(unknown[:6])}"
+                f"{' ...' if len(unknown) > 6 else ''}. They would silently be "
+                f"fed as 0.0. Update the code to match the model, or retrain."
+            )
+    return model, feats

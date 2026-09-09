@@ -144,6 +144,38 @@ FEATURE_NAMES = [
     # is recommended before retraining to actually exploit these.
     "mrms_rotation_track_30min",
     "mrms_azshear_0_2km",
+    # ── Total lightning (GLM) ─────────────────────────────────────────────
+    # The rate says the storm is electrified; the TREND is the lightning jump,
+    # which precedes severe reports by roughly 20 minutes because it tracks the
+    # updraft strengthening rather than the precipitation that results. That is
+    # lead time no reflectivity feature can give. The tracker already computed
+    # the rate for its severity score and threw it away.
+    "flash_rate_fpm",
+    "flash_rate_trend",
+    # ── Near-storm environment (dashboard >= 2026-09-09) ──────────────────
+    # Sampled from the hourly mesoanalysis grids at the cell's own lat/lon; see
+    # backend/services/storm_environment.py. Until this shipped the classifier
+    # was radar-only, so the same 55 dBZ core with the same couplet looked
+    # identical in 0 SRH and in 300 -- and environment plus storm structure is
+    # exactly what the literature says decides mode and tornado potential
+    # (Thompson et al. 2012).
+    #
+    # Every row collected BEFORE this shipped carries NaN here and always will,
+    # so these features earn their place only as new data accumulates. That is
+    # expected, not a bug -- and it is why absent must be NaN, never 0.0: zero
+    # CAPE is a real atmosphere, a missing grid is not.
+    "env_mlcape",
+    "env_mucape",
+    "env_mlcin",
+    "env_shear06",
+    "env_srh01",
+    "env_efhl",
+    "env_mllcl",
+    "env_stp",
+    "env_scp",
+    "env_ship",
+    "env_lapse75",
+    "env_pwat",
 ]
 
 DECISION_THRESHOLD = 0.45
@@ -205,8 +237,47 @@ def convective_day(ts: str) -> str:
 #
 # HistGradientBoostingClassifier handles NaN natively, learning a default branch
 # direction per split, so "unknown" is representable and costs nothing.
+ENV_PREFIX = "env_"          # absent environment is NaN, never 0.0
+
+# Measurements that are legitimately zero AND legitimately absent, so a plain
+# `or 0` would collapse two different states into one. Absent stays NaN.
+OPTIONAL_FEATURES = ("flash_rate_fpm", "flash_rate_trend")
+
+# Features whose MEASUREMENT was wrong before a given date, and whose recorded
+# values are therefore not comparable with what the tracker produces now.
+#
+# Azimuthal shear was computed over a kernel of a fixed RAY COUNT, so its
+# denominator collapsed toward zero near the radar. Measured on the archive,
+# median llsd_max_shear per range band: <10 km 0.0751, 10-25 0.0181,
+# 25-50 0.0054, 50-100 0.0022, 100-150 0.0016, >=150 0.0015 -- a 50x fall, and
+# 100% of rows inside 10 km cleared the "significant rotation" threshold. The
+# column is very nearly a measurement of RANGE. `score_rotation` folds the same
+# quantity into the severity score, and `llsd_trend` is its rate of change.
+#
+# The raw velocity was never stored, so these cannot be recomputed in place --
+# only re-derived by re-running the backfill from Level 2. Until then, the
+# honest value for an untrustworthy measurement is "unknown", not the number
+# the broken instrument produced. NaN is representable to
+# HistGradientBoosting; a wrong number is not.
+#
+# Blanking rather than DELETING the columns is deliberate: the kernel is fixed
+# as of this date, so rows collected from here on carry good values and start
+# contributing immediately, with no second schema change. Measured effect of
+# removing the bad values (ablation, 740,706 rows): rotation held-out AP
+# 0.0713 -> 0.0803, precision 0.136 -> 0.161; severe unchanged.
+CONTAMINATED_BEFORE = {
+    "llsd_max_shear": "2026-09-09",
+    "llsd_trend":     "2026-09-09",
+    "score_rotation": "2026-09-09",
+}
 DUALPOL_FEATURES = ("mean_cc", "min_cc", "mean_zdr")
 DUALPOL_SENTINEL = "mean_cc"   # if this is 0/absent, none of them were computed
+
+# Bumped when the saved bundle's SHAPE changes (not on every retrain).
+# 1 = {"bundle_version", "model", "features", "target", "trained_at"}.
+# Anything older is a bare estimator with no feature list; see
+# model_paths.load_model_bundle for how that is handled.
+BUNDLE_VERSION = 1
 
 
 def feature_row(feats: dict) -> list:
@@ -221,6 +292,14 @@ def feature_row(feats: dict) -> list:
     for name in FEATURE_NAMES:
         if name in DUALPOL_FEATURES and dual_missing:
             row.append(math.nan)
+        elif (name in CONTAMINATED_BEFORE or name in OPTIONAL_FEATURES
+              or name.startswith(ENV_PREFIX)):
+            # An absent environment field is NaN. It is absent for every row
+            # collected before the environment join existed, and 0.0 there
+            # would read as "no CAPE, no shear, no helicity" -- a specific and
+            # wrong atmosphere -- across most of the archive.
+            v = feats.get(name)
+            row.append(math.nan if v is None else float(v))
         else:
             row.append(float(feats.get(name, 0.0)))
     return row
@@ -272,6 +351,7 @@ def load_labeled_records(path: Path, target: str = "rotation"):
     """
     X, y, groups, times = [], [], [], []
     skipped = 0
+    blanked: dict[str, int] = {}
     with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -288,6 +368,14 @@ def load_labeled_records(path: Path, target: str = "rotation"):
                 skipped += 1
                 continue
             feats = rec.get("features") or {}
+            # Blank measurements taken before their instrument was fixed.
+            ts_day = (rec.get("ts") or "")[:10]
+            if ts_day:
+                for name, fixed_on in CONTAMINATED_BEFORE.items():
+                    if ts_day < fixed_on and name in feats:
+                        feats = dict(feats)
+                        feats[name] = None
+                        blanked[name] = blanked.get(name, 0) + 1
             X.append(feature_row(feats))
             y.append(lab)
             ts = rec.get("ts") or ""
@@ -296,6 +384,10 @@ def load_labeled_records(path: Path, target: str = "rotation"):
 
     print(f"Loaded {len(X)} labeled records for target={target!r} "
           f"({skipped} skipped / unlabeled / excluded)")
+    if blanked:
+        for name, n in sorted(blanked.items()):
+            print(f"  blanked {n:,} pre-{CONTAMINATED_BEFORE[name]} values of "
+                  f"{name} (measured with the broken kernel)")
     pos = sum(y)
     kind = "tornado-warned" if target == "rotation" else "warned (SVR or TOR)"
     print(f"  Positives ({kind}): {pos}  Negatives: {len(y)-pos}")
@@ -370,7 +462,7 @@ def evaluate(model, X, y, label="holdout") -> dict:
 
 
 def train(X, y, groups=None, times=None, out_path=None,
-          holdout_days: int = HOLDOUT_DAYS):
+          holdout_days: int = HOLDOUT_DAYS, target: str = "rotation"):
     """Train a class-balanced, probability-calibrated rotation classifier.
 
     Every split here is grouped by CONVECTIVE DAY.  That is the whole point: a
@@ -572,7 +664,26 @@ def train(X, y, groups=None, times=None, out_path=None,
             print(f"  (permutation importance unavailable: {e})")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(calibrated, out_path)
+    # Save a BUNDLE, not a bare estimator: the feature list travels with the
+    # model it was trained on.
+    #
+    # Without this, serving read the feature order from this module's
+    # FEATURE_NAMES constant while `model_paths.find_model` prefers the RUNTIME
+    # data/*.joblib over the bundled seed. So the moment the constant changed,
+    # any deployment that kept its old model file fed an N-column vector to an
+    # M-column estimator -- and the only symptom is every p_*_model quietly
+    # becoming None. A model that cannot say which columns it wants is a model
+    # you can never safely change the feature set of.
+    joblib.dump(
+        {
+            "bundle_version": BUNDLE_VERSION,
+            "model": calibrated,
+            "features": list(FEATURE_NAMES),
+            "target": target,
+            "trained_at": metrics.get("trained_at"),
+        },
+        out_path,
+    )
     metrics_path = out_path.with_suffix(".metrics.json")
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(f"\nModel saved to {out_path}")
@@ -674,7 +785,7 @@ def run_training(data_path, out_path, target: str = "rotation",
                 "error": f"target={target!r} has only one class in {len(y)} rows"}
 
     try:
-        train(X, y, groups=groups, times=times, out_path=out_path,
+        train(X, y, groups=groups, times=times, out_path=out_path, target=target,
               holdout_days=holdout_days)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"training failed: {type(e).__name__}: {e}"}
@@ -738,7 +849,7 @@ def main():
         print("scikit-learn is not installed. Run:  pip install scikit-learn joblib")
         sys.exit(1)
 
-    train(X, y, groups=groups, times=times, out_path=args.out,
+    train(X, y, groups=groups, times=times, out_path=args.out, target=args.target,
           holdout_days=args.holdout_days)
 
 

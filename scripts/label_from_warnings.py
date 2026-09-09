@@ -59,6 +59,30 @@ PRE_WARNING_MIN    = 30.0
 POST_EXPIRY_MIN    = 10.0
 MATCH_WINDOW_MIN   = PRE_WARNING_MIN   # back-compat alias for label_from_lsr.py
 
+# ── The AMBIGUOUS band, and why a fixed window is not enough ───────────────
+# Measured on the archive: of the rows labelled positive, only 35.6% sit BEFORE
+# the warning was issued; 64.4% are already under an active warning. So most of
+# the positive class teaches "recognise a storm a forecaster has already warned
+# on" -- which is easy, and is not the job.
+#
+# Worse, a hard 30-minute front edge makes a supercell that is visibly
+# organising 40 minutes out a NEGATIVE example. That caps learnable lead time at
+# 30 minutes by construction and actively punishes the model for firing early --
+# the exact behaviour the system exists to produce.
+#
+# So the front edge now has two zones. Inside PRE_WARNING_MIN a row is positive.
+# Between there and AMBIGUOUS_PRE_MIN it is left UNLABELLED, which the trainer
+# excludes: the storm may or may not have been identifiable yet, and we do not
+# know, so we decline to teach either answer. Beyond that it is a genuine
+# negative.
+AMBIGUOUS_PRE_MIN  = 90.0
+
+# Every pre-warning row also records how far ahead of issuance it sits, so lead
+# time can be MEASURED rather than assumed. Without this the only available
+# metrics (AUC, AP) are dominated by the already-warned majority and say
+# nothing about the thing being built.
+LEAD_FIELD = "minutes_before_warning"
+
 # Defensive clamp on a single polygon's validity.  A genuine TO.W runs ~30-60
 # min; a multi-day span means we are looking at a mis-typed product, and it
 # must not hold a positive window open over a point for days.
@@ -258,7 +282,7 @@ def auto_label(training_path: Path, warnings: list[dict],
 
     import numpy as np
 
-    pos_changed = neg_changed = skipped = 0
+    pos_changed = neg_changed = skipped = ambiguous = 0
     out_of_window = 0
 
     ws_unix = window_start.timestamp() if window_start else None
@@ -287,7 +311,7 @@ def auto_label(training_path: Path, warnings: list[dict],
         """Label ONE record in place.  A bare `return` means: move to the next
         record.  Every record is written by the caller either way, so an early
         exit here can never drop a row from the archive."""
-        nonlocal pos_changed, neg_changed, skipped, out_of_window
+        nonlocal pos_changed, neg_changed, skipped, out_of_window, ambiguous
 
         rec_ts_str = rec.get("ts") or ""
         rec_lat = rec.get("lat") or 0
@@ -363,6 +387,14 @@ def auto_label(training_path: Path, warnings: list[dict],
             (rec_ts_unix >= w_issued_unix - PRE_WARNING_MIN * 60.0)
             & (rec_ts_unix <= w_expires_unix + POST_EXPIRY_MIN * 60.0)
         )
+        # The ambiguous band sits just outside the positive window: far enough
+        # ahead of issuance that we cannot claim the storm was identifiable,
+        # close enough that calling it a confirmed non-event would be teaching
+        # the model to stay quiet on a storm that was already organising.
+        ambiguous_ok = (
+            (rec_ts_unix >= w_issued_unix - AMBIGUOUS_PRE_MIN * 60.0)
+            & (rec_ts_unix < w_issued_unix - PRE_WARNING_MIN * 60.0)
+        )
         candidate_mask = near_mask & time_ok
         candidate_idx = np.where(candidate_mask)[0]
 
@@ -407,13 +439,27 @@ def auto_label(training_path: Path, warnings: list[dict],
             rec["label"]          = True
             rec["label_strength"] = best_match["label_strength"]
             rec["label_source"]   = f"{best_match['wtype']}.W"
-            rec["label_issued"]   = best_match.get("origin", best_match["issued"]).isoformat()
+            issued_dt = best_match.get("origin", best_match["issued"])
+            rec["label_issued"]   = issued_dt.isoformat()
+            # Minutes the SCAN precedes ISSUANCE. Positive = we saw the storm
+            # before the forecaster acted, which is the only quantity that
+            # measures whether this system does its job; <= 0 means the warning
+            # was already out. Recorded on every positive so lead time can be
+            # reported instead of inferred.
+            rec[LEAD_FIELD] = round(
+                (issued_dt.timestamp() - rec_ts_unix) / 60.0, 1)
             pos_changed += 1
         elif min_dist_to_any > CLEAR_RADIUS_KM:
             rec["label"]          = False
             rec["label_strength"] = LABEL_NEGATIVE
             rec["label_source"]   = "no_warning_in_area"
             neg_changed += 1
+        elif (near_mask & ambiguous_ok).any():
+            # 30-90 minutes ahead of a warning that did get issued nearby.
+            # Neither a confirmed non-event nor something we can claim was
+            # detectable. Left unlabelled so the trainer excludes it rather
+            # than learning to suppress an organising storm.
+            ambiguous += 1
 
     # ── Stream the archive through classify() ──────────────────────────────
     # One record resident at a time, written to a sibling temp file that is

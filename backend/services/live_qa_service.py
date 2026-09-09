@@ -87,6 +87,11 @@ def _rot_label(vel_ms, detected, low_level=False, mid_level=False,
     return f"{vel_ms:.1f} m/s meso"
 
 
+def _opt(v):
+    """Keep a genuinely-absent measurement absent. See flash_rate below."""
+    return None if v is None else float(v)
+
+
 def extract_features(cell: dict) -> dict:
     """Extract the feature vector for ML training (mirrors live_qa CLI)."""
     profile = cell.get("rotation_profile") or []
@@ -115,7 +120,7 @@ def extract_features(cell: dict) -> dict:
     except Exception:
         pass
 
-    return {
+    out = {
         "max_dbz":            float(cell.get("max_reflectivity_dbz") or 0),
         "area_km2":           float(cell.get("area_km2") or 0),
         "vil_kg_m2":          float(cell.get("vil_kg_m2") or 0),
@@ -144,7 +149,27 @@ def extract_features(cell: dict) -> dict:
         "dbz_trend":          float(cell.get("dbz_trend") or 0),
         "mrms_rotation_track_30min": mrms_rot,
         "mrms_azshear_0_2km":        mrms_azshear,
+        # None, not 0.0, when the GLM service was not running: a storm with no
+        # lightning and a storm we could not see the lightning of are different
+        # states, and every row collected before this feature existed is the
+        # second kind. 0.0 there would teach "these storms were electrically
+        # quiet" across the whole archive.
+        "flash_rate_fpm":            _opt(cell.get("flash_rate_fpm")),
+        "flash_rate_trend":          _opt(cell.get("flash_rate_trend")),
     }
+
+    # Near-storm environment, sampled at this cell's own location. Absent values
+    # arrive as NaN and are written as null in the JSONL, which the trainer then
+    # reads back as NaN -- 0.0 would claim a specific (and wrong) atmosphere.
+    try:
+        from .storm_environment import environment_at
+        env = environment_at(cell.get("lat"), cell.get("lon"))
+        for k, v in env.items():
+            out[k] = None if v is None or v != v else float(v)
+    except Exception:
+        pass
+
+    return out
 
 
 # A cell the scorer already rates this highly is worth a row regardless of how

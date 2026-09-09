@@ -343,6 +343,15 @@ class TrackedStormCell:
     vil_trend: Optional[float] = None         # VIL kg/m² per scan
     echo_top_trend: Optional[float] = None    # echo top km per scan
     dbz_trend: Optional[float] = None         # max reflectivity dBZ per scan
+    # GLM total lightning. The RATE says a storm is electrified; the JUMP is
+    # what precedes severe weather -- a rapid increase in flash rate leads
+    # severe reports by roughly 20 minutes (Schultz et al., the "lightning
+    # jump"), which is lead time no reflectivity-based feature can offer
+    # because it happens while the updraft is still strengthening. The tracker
+    # already computed the rate for its severity score and then discarded it;
+    # storing it makes it available to the classifier and to the trend engine.
+    flash_rate_fpm: Optional[float] = None    # GLM flashes/min within 15 km
+    flash_rate_trend: Optional[float] = None  # flashes/min per scan (the jump)
 
     # ── Phase 2: Kinematic wind signatures (set each scan by Phase 2 detectors) ──
     downburst_detected: bool = False
@@ -454,6 +463,24 @@ class _InternalCell:
 # Service
 # ---------------------------------------------------------------------------
 
+def _env_features(cell) -> dict:
+    """Environment parameters at a cell, or NaN for all of them.
+
+    Kept out of _cell_to_feature_vector's body so the failure mode is one
+    place: the environment must never be able to break scoring, and an absent
+    environment must be NaN rather than a plausible-looking zero.
+    """
+    try:
+        from .storm_environment import environment_at, ENV_FEATURE_NAMES
+        return environment_at(getattr(cell, "lat", None), getattr(cell, "lon", None))
+    except Exception:
+        try:
+            from .storm_environment import ENV_FEATURE_NAMES
+            return {n: _NAN for n in ENV_FEATURE_NAMES}
+        except Exception:
+            return {}
+
+
 class StormTrackingService:
     """Identifies, tracks, and scores storm cells from NEXRAD volume scans."""
 
@@ -485,6 +512,9 @@ class StormTrackingService:
         # model exists at data/rotation_model.joblib).  Inert until trained.
         self._rotation_model = None
         self._rotation_model_features: list[str] = []
+        # Each model carries its own feature list (from its bundle). Normally
+        # identical; kept apart because the two are retrained independently.
+        self._severe_model_features: list[str] = []
         # Same feature vector, different question -- see p_severe_model.
         self._severe_model = None
 
@@ -529,9 +559,8 @@ class StormTrackingService:
             if str(project_root) not in sys.path:
                 sys.path.insert(0, str(project_root))
             from scripts.train_rotation_model import FEATURE_NAMES
-            from .model_paths import find_model
+            from .model_paths import find_model, load_model_bundle
 
-            import joblib
             # Resolve through model_paths, NOT the trainer's module-level
             # MODEL_OUT: that is <repo>/data, which inside a frozen bundle
             # points at the unpacked _internal tree instead of anywhere a
@@ -540,15 +569,19 @@ class StormTrackingService:
             if path is None or not Path(path).exists():
                 logger.info("No rotation ML model found - running pure physics")
                 return False
-            model = joblib.load(path)
+            # The bundle carries its own feature list; FEATURE_NAMES is only the
+            # fallback for a legacy bare-estimator file, and a mismatch raises
+            # rather than scoring on the wrong columns.
+            model, feats = load_model_bundle(path, FEATURE_NAMES)
             if model is None:
                 logger.info("No rotation ML model found - running pure physics")
                 return False
             logger.info(f"Loading rotation model from {path}")
             self._rotation_model = model
-            self._rotation_model_features = list(FEATURE_NAMES)
+            self._rotation_model_features = feats
+            extra = "" if list(feats) == list(FEATURE_NAMES) else " (from the model bundle, which differs from this build's list)"
             logger.info(
-                f"Loaded ML rotation model with {len(FEATURE_NAMES)} features"
+                f"Loaded ML rotation model with {len(feats)} features{extra}"
             )
             return True
         except ImportError as e:
@@ -569,8 +602,9 @@ class StormTrackingService:
     def load_severe_model(self, model_path: Optional[str] = None) -> bool:
         """Load the severe-thunderstorm classifier. Independent of rotation.
 
-        Shares `_rotation_model_features` because both models are trained on the
-        same FEATURE_NAMES vector; only the target differs.
+        Normally trained on the same FEATURE_NAMES vector as rotation, but its
+        list is read from its OWN bundle and kept separately -- the two are
+        retrained independently and one can legitimately be a version behind.
         """
         try:
             from pathlib import Path as _P
@@ -580,16 +614,18 @@ class StormTrackingService:
                 sys.path.insert(0, str(project_root))
             from scripts.train_rotation_model import FEATURE_NAMES
 
-            import joblib
-            from .model_paths import find_model
+            from .model_paths import find_model, load_model_bundle
             path = _P(model_path) if model_path else find_model("severe_model.joblib")
             if path is None or not _P(path).exists():
                 logger.info("No severe ML model found - severe probability stays None")
                 return False
-            self._severe_model = joblib.load(path)
+            model, feats = load_model_bundle(path, FEATURE_NAMES)
+            self._severe_model = model
+            self._severe_model_features = feats
             if not self._rotation_model_features:
                 self._rotation_model_features = list(FEATURE_NAMES)
-            logger.info(f"Loaded ML severe model from {path.name}")
+            logger.info(f"Loaded ML severe model from {path.name} "
+                        f"with {len(feats)} features")
             return True
         except Exception as e:
             logger.warning(f"Could not load ML severe model: {e}")
@@ -678,6 +714,13 @@ class StormTrackingService:
             "dbz_trend":            float(cell.dbz_trend or 0),
             "mrms_rotation_track_30min": mrms_rot,
             "mrms_azshear_0_2km":        mrms_azshear,
+            # NaN when GLM was not running -- mirrors live_qa.extract_features.
+            "flash_rate_fpm":   _NAN if cell.flash_rate_fpm is None else float(cell.flash_rate_fpm),
+            "flash_rate_trend": _NAN if cell.flash_rate_trend is None else float(cell.flash_rate_trend),
+            # Near-storm environment. Mirrors live_qa.extract_features; absent
+            # values stay NaN (see storm_environment) rather than becoming 0.0,
+            # which would assert a specific and wrong atmosphere.
+            **_env_features(cell),
         }
         return [feat.get(name, 0.0) for name in feature_names]
 
@@ -708,8 +751,22 @@ class StormTrackingService:
                 cell.p_severe_model = None
                 continue
             try:
+                rot_feats = self._rotation_model_features
+                # getattr, not attribute access: tests (and any partially
+                # constructed instance) can reach this without __init__ having
+                # run, and an AttributeError here is swallowed by the handler
+                # below into "p_rotation_model is None for every cell" -- the
+                # exact silent failure this whole path is meant to prevent.
+                sev_feats = getattr(self, "_severe_model_features", None) or rot_feats
                 row = np.array(
-                    self._cell_to_feature_vector(cell, self._rotation_model_features),
+                    self._cell_to_feature_vector(cell, rot_feats),
+                    dtype=float,
+                ).reshape(1, -1)
+                # Usually the same list, so build once. They can differ when one
+                # model has been retrained on a newer feature set and the other
+                # has not; a shared vector would then feed the wrong columns.
+                row_sev = row if sev_feats == rot_feats else np.array(
+                    self._cell_to_feature_vector(cell, sev_feats),
                     dtype=float,
                 ).reshape(1, -1)
                 # Absent model => explicit None, never a leftover. Cells are
@@ -722,7 +779,7 @@ class StormTrackingService:
                 else:
                     cell.p_rotation_model = None
                 if self._severe_model is not None:
-                    ps = float(self._severe_model.predict_proba(row)[0, 1])
+                    ps = float(self._severe_model.predict_proba(row_sev)[0, 1])
                     cell.p_severe_model = round(ps, 3)
                 else:
                     cell.p_severe_model = None
@@ -3023,6 +3080,7 @@ class StormTrackingService:
                 "echo_top":   cell.cell_top_km,
                 "dbz":        cell.max_reflectivity_dbz,
                 "severity":   cell.severity_score,
+                "flash_rate": cell.flash_rate_fpm,
             }
             cell.feature_history.append(snap)
             if len(cell.feature_history) > TREND_HISTORY_MAX:
@@ -3056,6 +3114,7 @@ class StormTrackingService:
             cell.vil_trend       = _slope("vil")
             cell.echo_top_trend  = _slope("echo_top")
             cell.dbz_trend       = _slope("dbz")
+            cell.flash_rate_trend = _slope("flash_rate")
 
     def _reconcile_rotation_flags(self, cells: list[TrackedStormCell], radar=None):
         """Decide, from all the detectors, what this cell's rotation actually is.
@@ -4184,11 +4243,16 @@ class StormTrackingService:
             # ── 11. Lightning Flash Rate (GLM) ────────────────────────────────
             # Flashes/min within 25 km over the last 5 minutes.
             lightning_score = 0
+            cell.flash_rate_fpm = None
             if self._glm_service is not None:
                 try:
+                    # 15 km, not 25: at 25 km a cell picks up its neighbours'
+                    # flashes, which smears the jump signal exactly when storms
+                    # are clustered -- i.e. on the days that matter.
                     fpm = self._glm_service.flash_rate_near(
-                        cell.lat, cell.lon, radius_km=25.0, window_minutes=5
+                        cell.lat, cell.lon, radius_km=15.0, window_minutes=5
                     )
+                    cell.flash_rate_fpm = round(float(fpm), 2)
                     lightning_score = int(min(100, fpm * 10))
                 except Exception:
                     pass
