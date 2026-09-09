@@ -35,47 +35,74 @@ $repo = 'F:\Apps\tbf\AlertDashboard'
 Set-Location $repo
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$log   = Join-Path $repo "logs\rederive-$stamp.log"
-New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+$logDir = Join-Path $repo 'logs'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$log = Join-Path $logDir "rederive-$stamp.log"
 
 $out = Join-Path $repo 'data\training_data.rederived.jsonl'
 
 function Log($msg) {
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
     Write-Output $line
-    Add-Content -Path $log -Value $line -Encoding utf8
+    # Explicit UTF-8 without BOM. Add-Content and Tee-Object default to UTF-16
+    # here, which makes the log unreadable with every ordinary text tool.
+    [IO.File]::AppendAllText($log, $line + [Environment]::NewLine,
+        (New-Object Text.UTF8Encoding $false))
 }
 
-Log "=== re-derivation start ==="
+# PowerShell 5.1 wraps EVERY stderr line from a native exe in an ErrorRecord
+# ("NativeCommandError") when piped through 2>&1, and sets $? to false even on a
+# clean exit 0. Python's harmless "Using slower stringprep" notice was enough to
+# fill the first run's log with fake failures. Start-Process with explicit
+# redirection keeps the streams as plain text and yields a real exit code.
+function Invoke-Phase {
+    param([string]$Label, [string[]]$PyArgs)
+    Log "=== $Label ==="
+    $o = Join-Path $logDir "rederive-$stamp.$Label.out"
+    $e = Join-Path $logDir "rederive-$stamp.$Label.err"
+    $p = Start-Process -FilePath 'python' -ArgumentList $PyArgs `
+        -WorkingDirectory $repo -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $o -RedirectStandardError $e
+    Log "$Label exit code: $($p.ExitCode)"
+    if (Test-Path $o) { Get-Content $o -Tail 12 | ForEach-Object { Log "  $_" } }
+    return $p.ExitCode
+}
+
+Log '=== re-derivation start ==='
 Log "output: $out"
+
+# backfill_training_data.py keeps its checkpoint at a FIXED path shared by every
+# run, and --resume means "skip any pair ever recorded as done" -- not "resume
+# this run". On the first attempt that silently skipped 76 of 130 in-range
+# pairs, all of them completed by the OLD code, i.e. exactly the work a
+# re-derivation exists to redo. The output looked healthy the whole time.
+#
+# So: the checkpoint must agree with THIS run's output file. Pairs already
+# present in $out stay done (a genuine resume); everything else is redone.
+Invoke-Phase 'phase0-reseed' @(
+    'scripts\reseed_backfill_state.py', $out) | Out-Null
 
 # 2019 is outside the RAP archive window, so those two days would come back with
 # no environment. Everything from 2024-02-27 on is covered.
 $sites = @('KILN', 'KIND', 'KCLE', 'KIWX', 'KPBZ')
 
-Log "phase 1/3: replaying Level 2 (this is the long one)"
-python scripts\backfill_training_data.py `
-    --start 2024-02-27 --end 2026-09-07 `
-    --sites $sites `
-    --out $out --resume 2>&1 | Tee-Object -FilePath $log -Append
-Log "phase 1 exit code: $LASTEXITCODE"
+$rc = Invoke-Phase 'phase1-backfill' (
+    @('scripts\backfill_training_data.py',
+      '--start', '2024-02-27', '--end', '2026-09-07', '--sites') +
+    $sites + @('--out', $out, '--resume'))
 
 if (-not (Test-Path $out)) {
-    Log "no output produced - stopping before the labelling phases"
+    Log 'no output produced - stopping before the labelling phases'
     exit 1
 }
 
-Log "phase 2/3: labelling from warning polygons"
-python scripts\label_from_warnings.py --data $out --all --overwrite 2>&1 |
-    Tee-Object -FilePath $log -Append
-Log "phase 2 exit code: $LASTEXITCODE"
+Invoke-Phase 'phase2-warnings' @(
+    'scripts\label_from_warnings.py', '--data', $out, '--all', '--overwrite') | Out-Null
 
-Log "phase 3/3: labelling hail and wind from storm reports"
-python scripts\label_from_lsr_hazards.py --from-archive --data $out 2>&1 |
-    Tee-Object -FilePath $log -Append
-Log "phase 3 exit code: $LASTEXITCODE"
+Invoke-Phase 'phase3-hazards' @(
+    'scripts\label_from_lsr_hazards.py', '--from-archive', '--data', $out) | Out-Null
 
 $size = (Get-Item $out).Length / 1MB
-Log ("done. {0:N0} MB at {1}" -f $size, $out)
-Log "NOT promoted: train against it and compare before replacing training_merged.jsonl"
-Log "=== re-derivation end ==="
+Log ('done. {0:N0} MB at {1}' -f $size, $out)
+Log 'NOT promoted: train against it and compare before replacing training_merged.jsonl'
+Log '=== re-derivation end ==='
