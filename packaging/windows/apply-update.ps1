@@ -25,6 +25,25 @@ Set-Location -LiteralPath $DeployRoot
 $log = Join-Path $DeployRoot "update.log"
 $flag = Join-Path $DeployRoot ".updating"
 
+# TLS 1.2 MUST be forced. Windows PowerShell 5.1 uses the .NET default, which on
+# a machine without the SchUseStrongCrypto registry keys is SSL 3.0 / TLS 1.0.
+# GitHub dropped TLS 1.0 and 1.1 in 2018, so it simply closes the connection --
+# and .NET reports that as:
+#
+#     "Received an unexpected EOF or 0 bytes from the transport stream"
+#
+# which names neither TLS nor GitHub and reads like a network blip. Observed in
+# production 2026-09-09: every "Update now" click failed here, logged that line,
+# and left the dashboard running (the failure is before the server is stopped),
+# so it looked like the button did nothing at all.
+#
+# The machines this works on are the ones where .NET already defaults to
+# SystemDefault -- which is why it cannot be reproduced on a modern dev box.
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {}
+
 function Log($m) {
   $line = "{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m
   Write-Output $line
@@ -38,6 +57,9 @@ function Log($m) {
 # .updating flag only ever spoke to start-server.bat's own restart loop.
 $script:TaskNames  = @('TBF Dashboard Backend', 'TBF Caddy')
 $script:HeldTasks  = @()
+# Set the instant the server is actually taken down, so a failure BEFORE
+# that point cannot trigger a spurious relaunch.
+$script:ServerStopped = $false
 
 function Stop-ServiceTasks {
   foreach ($t in $script:TaskNames) {
@@ -63,6 +85,14 @@ function Restore-ServiceTasks {
 }
 
 function Start-Server {
+  # If we never stopped the server, do not "start" it: the failure happened
+  # before Stop-ServiceTasks, the backend is still running and healthy, and
+  # launching start-server.bat here only races a second backend at port 3074.
+  # The TLS failure above hit this path on every attempt.
+  if (-not $script:ServerStopped) {
+    Log "server was never stopped - leaving the running instance alone"
+    return
+  }
   # When this deployment runs under the scheduled tasks, THEY are the server --
   # relaunching start-server.bat as well would put a second backend on port 3074.
   if (Restore-ServiceTasks) { return }
@@ -107,6 +137,7 @@ try {
   # 4. Signal the restart loop to stand down, then stop the server
   New-Item -ItemType File -Path $flag -Force | Out-Null
   Log "stopping server"
+  $script:ServerStopped = $true
   Stop-ServiceTasks
   cmd /c "taskkill /f /im dashboard-backend.exe >nul 2>&1"
   cmd /c "taskkill /f /im caddy.exe >nul 2>&1"
