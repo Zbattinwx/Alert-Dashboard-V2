@@ -155,6 +155,30 @@ def _feature_names() -> list[str]:
         return []
 
 
+def _feature_row():
+    """The trainer's own record -> vector mapping, if importable.
+
+    THE AUDIT MUST SEE WHAT THE MODEL SEES. A raw training record is not the
+    feature vector: `feature_row` resolves sentinels on the way through, and
+    auditing the record instead of the vector reports things the model never
+    experiences.
+
+    The case that proved it: `mean_cc == 0` is DUALPOL_SENTINEL. A zero there
+    means cross-correlation, ZDR and min-CC were not computed for that cell at
+    all, and `feature_row` turns all three into NaN. Read raw, those zeros look
+    like a dual-pol field collapsing to zero with range -- 0% zero inside
+    140 km, 56% beyond 200 -- and the audit dutifully reported three FAILs for
+    a mechanism that already works correctly. Read through `feature_row`, the
+    same rows are simply absent at long range, which is true, useful, and not
+    a defect.
+    """
+    try:
+        from scripts.train_rotation_model import feature_row  # type: ignore
+        return feature_row
+    except Exception:
+        return None
+
+
 def _optional_features() -> set[str]:
     try:
         from scripts.train_rotation_model import OPTIONAL_FEATURES  # type: ignore
@@ -168,6 +192,7 @@ class Audit:
         self.declared = declared
         self.optional = optional
         self.sites = _site_coords()
+        self.row_fn = _feature_row()
         self.rows = 0
         self.months: Counter = Counter()
         # per feature
@@ -195,6 +220,16 @@ class Audit:
         if not isinstance(feats, dict):
             return
         self.seen_keys.update(feats.keys())
+        # Resolve the record into the vector the model actually consumes, so
+        # sentinels (DUALPOL_SENTINEL) become the NaN the trainer sees rather
+        # than the 0.0 the file stores. See _feature_row.
+        if self.row_fn is not None and self.declared:
+            try:
+                vec = self.row_fn(feats)
+                if len(vec) == len(self.declared):
+                    feats = dict(zip(self.declared, vec))
+            except Exception:
+                pass
 
         rng = None
         lat, lon = _finite(rec.get("lat")), _finite(rec.get("lon"))
@@ -339,6 +374,26 @@ class Audit:
                 near = sorted(v for _, v in ordered[:q])
                 far = sorted(v for _, v in ordered[-q:])
                 if near and far:
+                    # ZERO-INFLATED FEATURES BREAK THE MEDIAN, and saying so
+                    # wrongly is how an audit loses its authority. Once more
+                    # than half a quintile is 0 the median IS 0 and the fold
+                    # goes infinite, whatever the non-zero values are doing.
+                    # llsd_max_shear reads "the far fifth is entirely zero" on
+                    # a zero rate that only moves 31% -> 49% -- a mild range
+                    # dependence, and evidence the physical-kernel fix WORKED,
+                    # reported as though it were the original 50x collapse.
+                    zn = sum(1 for v in near if v == 0) / len(near)
+                    zf = sum(1 for v in far if v == 0) / len(far)
+                    if (zn > 0.10 or zf > 0.10) and abs(zf - zn) < 0.50:
+                        if abs(zf - zn) >= 0.15:
+                            add("warn", name, "range_zero_rate",
+                                f"zero {zn:.0%} within {ordered[q - 1][0]:.0f} km "
+                                f"-> {zf:.0%} beyond {ordered[-q][0]:.0f} km; the "
+                                "feature thins with range rather than scaling with it",
+                                near_zero=zn, far_zero=zf)
+                        # Judge the magnitudes on the values that exist.
+                        near = [v for v in near if v != 0] or near
+                        far = [v for v in far if v != 0] or far
                     mn = near[len(near) // 2]
                     mf = far[len(far) // 2]
                     near_km = ordered[q - 1][0]

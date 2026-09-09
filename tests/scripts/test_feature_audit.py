@@ -204,3 +204,61 @@ def test_sampled_dates_span_the_range_evenly():
     assert len(ds) == 5
     gaps = [(ds[i + 1] - ds[i]).days for i in range(len(ds) - 1)]
     assert max(gaps) - min(gaps) <= 1, gaps
+
+
+# ── The two ways the audit lied, and must not again ────────────────────────
+
+def test_a_zero_inflated_feature_reports_its_zero_rate_not_an_infinite_fold():
+    """The median breaks on zero-inflation, and saying so wrongly costs trust.
+
+    Once more than half a quintile is 0 the median IS 0 and the fold goes
+    infinite whatever the real values do. llsd_max_shear reported "the far
+    fifth is entirely zero" -- the signature of the original 50x collapse -- on
+    a zero rate that only moves 29% -> 53%, i.e. evidence the physical-kernel
+    fix had WORKED.
+    """
+    import random
+    rnd = random.Random(0)
+    rows = []
+    for i in range(1500):
+        km = 5.0 + (i % 200)
+        # Same magnitude everywhere; only the CHANCE of a detection thins.
+        # The draw must be INDEPENDENT of the index, or it aliases against
+        # `km` and produces the opposite gradient to the one intended.
+        zero = rnd.random() < (0.25 if km < 100 else 0.55)
+        rows.append(row("2024-05-15T18:00:00+00:00", km=km,
+                        llsd_max_shear=0.0 if zero else 0.004))
+    rep = run(rows)
+    zr = findings(rep, "llsd_max_shear", "range_zero_rate")
+    assert zr, [f"{f['check']}: {f['message']}" for f in rep["findings"]]
+    assert zr[0]["severity"] == "warn", "thinning is not the same defect as scaling"
+    assert "entirely zero" not in zr[0]["message"]
+    # And it must NOT also claim the magnitude collapsed: it did not.
+    hard = findings(rep, "llsd_max_shear", "range_median_shift", "fail")
+    assert not hard, hard
+
+
+def test_a_genuine_magnitude_collapse_is_still_fatal():
+    """The guard above must not have disarmed the check it guards."""
+    rows = []
+    for i in range(1500):
+        km = 5.0 + (i % 200)
+        rows.append(row("2024-05-15T18:00:00+00:00", km=km,
+                        llsd_max_shear=0.02 * math.exp(-km / 40.0)))
+    assert findings(run(rows), "llsd_max_shear", "range_median_shift", "fail")
+
+
+def test_the_audit_reads_the_vector_the_model_sees():
+    """mean_cc == 0 is DUALPOL_SENTINEL: the trainer maps all three dual-pol
+    features to NaN. Auditing the raw record instead reported three confident
+    FAILs for a mechanism that already works."""
+    from scripts.audit_features import _feature_row
+    fr = _feature_row()
+    if fr is None:
+        pytest.skip("trainer not importable")
+    from scripts.train_rotation_model import FEATURE_NAMES, DUALPOL_FEATURES
+    vec = fr({"mean_cc": 0.0, "min_cc": 0.0, "mean_zdr": 0.0, "max_dbz": 55.0})
+    got = dict(zip(FEATURE_NAMES, vec))
+    for name in DUALPOL_FEATURES:
+        assert math.isnan(got[name]), f"{name} should be NaN behind the sentinel"
+    assert got["max_dbz"] == 55.0
