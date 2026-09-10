@@ -478,8 +478,10 @@ class GoogleChatService:
             logger.debug(f"Alert {alert.product_id} already sent to Google Chat")
             return False
 
-        # Check if this is an update (CON action)
-        if alert.vtec and alert.vtec.is_update:
+        # Only announce a genuine first issuance. Shares its definition with the
+        # dashboard toast/chime gate (Alert.is_new_issuance) so the two cannot
+        # drift apart -- this guard used to spell the same rule out itself.
+        if not alert.is_new_issuance:
             logger.debug(f"Skipping Google Chat for alert update: {alert.product_id}")
             return False
 

@@ -310,8 +310,8 @@ class AlertParser:
                         alert.significance = AlertSignificance.STATEMENT
 
                 # Special handling for SPS to generate a consistent ID
-                if alert.phenomenon == "SPS" and alert.issued_time and alert.affected_areas:
-                    sps_id = cls._generate_sps_id(alert.affected_areas, alert.issued_time)
+                if alert.phenomenon == "SPS" and alert.affected_areas:
+                    sps_id = cls._generate_sps_id(alert.affected_areas)
                     if sps_id:
                         alert.product_id = sps_id
                         logger.info(f"Generated consistent SPS ID for API alert: {sps_id}")
@@ -423,6 +423,22 @@ class AlertParser:
                 )
                 return None
 
+            # The API delivers one CAP feature per VTEC segment, so a product
+            # that upgrades an advisory in some zones while continuing it in
+            # others arrives as two features sharing an ETN -- and therefore a
+            # product_id. The text path splits the same product into segments
+            # and fills cancelled_areas via _compute_segment_areas; nothing ever
+            # did that here, so the cancelling feature reached add_alert with an
+            # empty cancelled_areas and popped the whole alert. The continuing
+            # feature then re-added it in the same second as a brand new alert,
+            # complete with toast, chime and a regenerated broadcast graphic.
+            #
+            # A cancelling feature's own UGC list is exactly the set it clears,
+            # so hand it over as cancelled_areas. When it names every zone the
+            # alert holds, add_alert still falls through to full removal.
+            if alert.status == AlertStatus.CANCELLED and not alert.cancelled_areas:
+                alert.cancelled_areas = list(alert.affected_areas)
+
             return alert
 
         except Exception as e:
@@ -518,8 +534,8 @@ class AlertParser:
 
             # Generate consistent ID for SPS if no VTEC
             if not alert.vtec and alert.phenomenon == "SPS":
-                if alert.issued_time and alert.affected_areas:
-                    sps_id = cls._generate_sps_id(alert.affected_areas, alert.issued_time)
+                if alert.affected_areas:
+                    sps_id = cls._generate_sps_id(alert.affected_areas)
                     if sps_id:
                         alert.product_id = sps_id
                         logger.info(f"Generated consistent SPS ID for text alert: {sps_id}")
@@ -532,7 +548,13 @@ class AlertParser:
                     watch_number = watch_match.group(2)
                     alert.phenomenon = "TO" if "TORNADO" in watch_type else "SV"
                     alert.significance = AlertSignificance.WATCH
-                    alert.product_id = f"{alert.phenomenon}A.SPC.{watch_number.zfill(4)}"
+                    # Must match VTECParser.build_product_id's watch shape
+                    # ({phenomenon}A.{etn}). This used to insert a ".SPC."
+                    # segment, so a watch that reached this text fallback got a
+                    # different ID from the same watch parsed via VTEC -- two
+                    # cards for one watch, and follow-ups landing on whichever
+                    # half matched.
+                    alert.product_id = f"{alert.phenomenon}A.{watch_number.zfill(4)}"
                 else:
                     alert.product_id = f"nwws_{datetime.now(timezone.utc).timestamp()}"
                     for error in vtec_data.validation_errors:
@@ -663,25 +685,33 @@ class AlertParser:
     # ==========================================================================
 
     @classmethod
-    def _generate_sps_id(
-        cls,
-        ugc_codes: list[str],
-        issued_time: datetime
-    ) -> Optional[str]:
-        """Generate a consistent product ID for non-VTEC Special Weather Statements."""
-        if not all([ugc_codes, issued_time]):
+    def _generate_sps_id(cls, ugc_codes: list[str]) -> Optional[str]:
+        """Generate a consistent product ID for non-VTEC Special Weather Statements.
+
+        Keyed on the zone set alone. The issuance minute used to be in here,
+        which meant an SPS had no stable identity at all: every follow-up
+        statement for the same counties became a separate card with its own
+        "new alert" chime, and the NWWS and API copies of one statement split in
+        two whenever their timestamps disagreed by a minute (NWWS reads the
+        text body's stamp, the API uses `sent`).
+
+        Zone sets are effectively office-scoped -- UGC codes carry the state and
+        zone number -- so this does not merge statements from different WFOs.
+        Two genuinely unrelated statements covering an identical zone set while
+        the first is still valid do merge, and the later one supersedes the
+        earlier, which is the right reading anyway. SPS carries an expiration
+        (or gets the default lifetime), so once it clears, the next statement
+        for those zones opens a fresh entry.
+        """
+        if not ugc_codes:
             return None
 
         # Sort UGC codes to ensure consistent order
         sorted_ugc = sorted(ugc_codes)
         ugc_hash = hashlib.sha1("".join(sorted_ugc).encode()).hexdigest()[:8]
 
-        # Format timestamp to nearest minute to handle small discrepancies
-        # Use UTC to ensure consistency across timezones
-        time_str = issued_time.astimezone(timezone.utc).strftime("%Y%m%d%H%M")
-
         # Using "adhoc" to indicate a non-VTEC, generated ID
-        return f"SPS.adhoc.{time_str}.{ugc_hash}"
+        return f"SPS.adhoc.{ugc_hash}"
 
     @classmethod
     def _parse_geojson_geometry(cls, geometry: dict) -> list[list[float]]:

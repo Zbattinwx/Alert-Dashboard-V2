@@ -408,15 +408,22 @@ class VTECInfo:
     end_time: Optional[datetime] = None
     raw_vtec: str = ""        # Original VTEC string
 
+    # UPG belongs with the cancellations: an upgrade ends this product for the
+    # zones it names (the replacement arrives under its own ETN). This used to
+    # disagree with VTECParser.is_cancellation, which has always counted UPG --
+    # two definitions of "cancelled" in one codebase, and the parser's is the
+    # one that drives AlertStatus.
+    CANCELLING_ACTIONS = (VTECAction.CAN, VTECAction.EXP, VTECAction.UPG)
+
     @property
     def is_cancellation(self) -> bool:
         """Check if this VTEC represents a cancellation."""
-        return self.action in (VTECAction.CAN, VTECAction.EXP)
+        return self.action in self.CANCELLING_ACTIONS
 
     @property
     def is_update(self) -> bool:
         """Check if this VTEC represents an update."""
-        return self.action in (VTECAction.CON, VTECAction.EXT, VTECAction.EXA, VTECAction.EXB, VTECAction.UPG, VTECAction.COR)
+        return self.action in (VTECAction.CON, VTECAction.EXT, VTECAction.EXA, VTECAction.EXB, VTECAction.COR)
 
     @property
     def is_new(self) -> bool:
@@ -608,6 +615,22 @@ class Alert:
             return f"{hours}h {minutes}m"
         return f"{minutes}m"
 
+    @property
+    def is_new_issuance(self) -> bool:
+        """Whether this product is the first issuance of its event.
+
+        Distinct from "new to the alert store". A CON/EXT/EXA/EXB follow-up is
+        routinely the first product we ever see for an event -- the backend
+        restarted mid-event, or the original NEW was missed -- and AlertManager
+        deliberately inserts it so the warning still shows up. Announcing it
+        (toast, chime, chat, broadcast graphic) is what's wrong, and that is
+        what this gates. Products with no VTEC at all have no follow-up concept,
+        so they count as new.
+        """
+        if not self.vtec or not self.vtec.action:
+            return True
+        return self.vtec.action in (VTECAction.NEW, VTECAction.ROU)
+
     def mark_updated(self) -> None:
         """Mark this alert as updated."""
         self.last_updated = datetime.now(timezone.utc)
@@ -654,6 +677,7 @@ class Alert:
             "priority": self.priority.value,
             "is_active": self.is_active,
             "is_high_priority": self.is_high_priority,
+            "is_new_issuance": self.is_new_issuance,
             "time_remaining": self.time_remaining_str,
             "parsed_at": self.parsed_at.isoformat(),
             "last_updated": self.last_updated.isoformat(),
@@ -706,6 +730,7 @@ class Alert:
         # Remove computed fields that aren't in __init__
         data.pop("is_active", None)
         data.pop("is_high_priority", None)
+        data.pop("is_new_issuance", None)
         data.pop("time_remaining", None)
 
         return cls(**data)

@@ -86,6 +86,10 @@ export interface Alert {
   status: AlertStatus;
   is_active: boolean;
   is_high_priority: boolean;
+  // False when this product is a CON/EXT/EXA/EXB/COR follow-up rather than the
+  // event's first issuance -- see Alert.is_new_issuance on the backend model.
+  // Optional so a payload from an older backend degrades to "announce it".
+  is_new_issuance?: boolean;
   time_remaining: string;
   parsed_at: string;
   last_updated: string;

@@ -85,6 +85,18 @@ const Dashboard: React.FC = () => {
   }, []);
 
   const handleNewAlert = useCallback((alert: Alert) => {
+    // "New to the alert store" is not the same as "newly issued". A CON/EXT
+    // follow-up is routinely the first product the backend sees for an event --
+    // it restarted mid-event, or the original NEW never arrived -- and it is
+    // inserted so the warning still shows up. Announcing a warning that has
+    // been running for half an hour as brand new is what we don't want, so the
+    // card lands either way but the toast and the new-alert chime only fire on
+    // a genuine first issuance.
+    if (alert.is_new_issuance === false) {
+      console.log('Alert added from a follow-up product, not announcing as new:', alert.event_name);
+      playForAlert(alert, 'update');
+      return;
+    }
     console.log('New alert received:', alert.event_name);
     setNewAlertToShow(alert);
     playForAlert(alert, 'new');

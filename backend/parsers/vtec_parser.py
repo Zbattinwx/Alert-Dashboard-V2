@@ -302,16 +302,40 @@ class VTECParser:
 
         return result
 
+    # The only watches SPC issues, and so the only ones carrying a single
+    # nationwide ETN. Every other ".A" product is a WFO's own.
+    SPC_WATCH_PHENOMENA = frozenset({"TO", "SV"})
+
     @classmethod
     def build_product_id(cls, vtec_info: VTECInfo) -> str:
         """
         Build a unique product ID from VTEC information.
 
-        For WARNINGS: {phenomenon}.{office}.{etn}
-        For WATCHES:  {phenomenon}A.{etn}  (no office - watches share ETN across offices)
+        For SPC WATCHES: {phenomenon}A.{etn}  (no office - one ETN nationwide)
+        For EVERYTHING ELSE: {phenomenon}.{significance}.{office}.{etn}
 
-        Watches are issued by SPC with a single ETN that all NWS offices use.
-        This allows watch products from different offices to merge automatically.
+        SPC issues tornado and severe thunderstorm watches with a single ETN
+        that every NWS office repeats, so the office is dropped and each
+        office's product merges into one watch.
+
+        That is true only of SPC's two watches. Every other ".A" product --
+        Flood Watch, Winter Storm Watch, Hurricane Watch -- is issued by the
+        local WFO against its own ETN sequence, so dropping the office collided
+        one office's FA.A 0011 with another's onto a single entry.
+
+        Significance is part of the key because the NWS assigns ETNs per
+        (phenomenon, significance) pair, not per phenomenon: a Flood Watch and a
+        Flood Advisory from the same office can both be ETN 0011 and be entirely
+        different events. Without it they collide onto one entry and each one's
+        follow-ups overwrite the other's.
+
+        The VTEC year is deliberately NOT part of the key. ETNs do reset each
+        January, but deriving a year needs a fallback for the "000000T0000Z"
+        open-ended begin times, and every available fallback is the wall clock --
+        which would hand the same event different IDs either side of midnight on
+        Dec 31 and reintroduce exactly the split-identity bug this key exists to
+        prevent. A cross-year ETN collision needs the same office's ETN 0001 of
+        one year to still be running when ETN 0001 of the next is issued.
 
         Args:
             vtec_info: Parsed VTEC information
@@ -321,9 +345,9 @@ class VTECParser:
         """
         phenomenon = vtec_info.phenomenon
 
-        # For watches, append 'A' to phenomenon and omit office
+        # SPC watches only: append 'A' to phenomenon and omit office
         # (ETN is assigned by SPC and shared across all offices)
-        if vtec_info.significance == AlertSignificance.WATCH:
+        if vtec_info.significance == AlertSignificance.WATCH and phenomenon in cls.SPC_WATCH_PHENOMENA:
             return f"{phenomenon}A.{vtec_info.event_tracking_number:04d}"
 
         # For warnings/advisories, include office (ETN is office-specific)
@@ -331,7 +355,13 @@ class VTECParser:
         if office.startswith("K") and len(office) == 4:
             office = office[1:]
 
-        return f"{phenomenon}.{office}.{vtec_info.event_tracking_number:04d}"
+        significance = (
+            vtec_info.significance.value
+            if hasattr(vtec_info.significance, "value")
+            else str(vtec_info.significance)
+        )
+
+        return f"{phenomenon}.{significance}.{office}.{vtec_info.event_tracking_number:04d}"
 
     @classmethod
     def is_cancellation(cls, vtec_info: VTECInfo) -> bool:

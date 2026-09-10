@@ -118,7 +118,59 @@ class TestVTECParser:
 
         product_id = VTECParser.build_product_id(result.vtec_info)
 
-        assert product_id == "TO.CLE.0001"
+        assert product_id == "TO.W.CLE.0001"
+
+    def test_local_watches_keep_their_office(self):
+        """Only SPC's tornado and severe thunderstorm watches carry one ETN
+        nationwide. A Flood Watch is the local WFO's own product against its own
+        ETN sequence, so dropping the office collided two offices' FA.A 0011
+        onto a single entry."""
+        mso = VTECParser.parse("/O.NEW.KMSO.FA.A.0011.250120T1530Z-250120T1630Z/")
+        grr = VTECParser.parse("/O.NEW.KGRR.FA.A.0011.250120T1530Z-250120T1630Z/")
+
+        mso_id = VTECParser.build_product_id(mso.vtec_info)
+        grr_id = VTECParser.build_product_id(grr.vtec_info)
+
+        assert mso_id == "FA.A.MSO.0011"
+        assert grr_id == "FA.A.GRR.0011"
+        assert mso_id != grr_id
+
+    def test_spc_watches_still_merge_across_offices(self):
+        """The flip side: SPC assigns one ETN that every office repeats, so
+        those must keep collapsing onto a single watch."""
+        iln = VTECParser.parse("/O.NEW.KILN.SV.A.0522.250120T1800Z-250121T0000Z/")
+        cle = VTECParser.parse("/O.NEW.KCLE.SV.A.0522.250120T1800Z-250121T0000Z/")
+
+        assert (VTECParser.build_product_id(iln.vtec_info)
+                == VTECParser.build_product_id(cle.vtec_info) == "SVA.0522")
+
+    def test_build_product_id_separates_significance(self):
+        """The NWS assigns ETNs per (phenomenon, significance), so a Flood Watch
+        and a Flood Advisory from one office can share an ETN and still be
+        different events. Without significance in the key they collide onto a
+        single entry and each one's follow-ups overwrite the other's."""
+        watch = VTECParser.parse("/O.NEW.KMSO.FA.A.0011.250120T1530Z-250120T1630Z/")
+        advisory = VTECParser.parse("/O.NEW.KMSO.FA.Y.0011.250120T1530Z-250120T1630Z/")
+
+        watch_id = VTECParser.build_product_id(watch.vtec_info)
+        advisory_id = VTECParser.build_product_id(advisory.vtec_info)
+
+        assert watch_id != advisory_id
+        assert advisory_id == "FA.Y.MSO.0011"
+
+    def test_build_product_id_stable_across_actions(self):
+        """Every follow-up for one event must land on the event's own ID -- this
+        is the whole basis for telling an update apart from a new alert."""
+        vtecs = [
+            "/O.NEW.KCLE.SV.W.0149.250120T1530Z-250120T1630Z/",
+            "/O.CON.KCLE.SV.W.0149.250120T1530Z-250120T1630Z/",
+            "/O.EXT.KCLE.SV.W.0149.250120T1530Z-250120T1700Z/",
+            "/O.COR.KCLE.SV.W.0149.250120T1530Z-250120T1700Z/",
+            "/O.CAN.KCLE.SV.W.0149.250120T1530Z-250120T1700Z/",
+        ]
+        ids = {VTECParser.build_product_id(VTECParser.parse(v).vtec_info) for v in vtecs}
+
+        assert ids == {"SV.W.CLE.0149"}
 
     def test_build_product_id_watch(self):
         """Watch product IDs use the 'A' suffix and OMIT the office — watches

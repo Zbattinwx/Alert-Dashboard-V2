@@ -138,6 +138,9 @@ class AlertManager:
         self._persistence_path = persistence_path
         self._cleanup_task: Optional[asyncio.Task] = None
         self._running = False
+        # Set by _notify_changed, consumed by checkpoint(): persist only when
+        # the store actually moved.
+        self._dirty = False
 
         # Callbacks
         self._on_alert_added: list[Callable[[Alert], None]] = []
@@ -194,6 +197,10 @@ class AlertManager:
 
     def _notify_changed(self):
         """Notify callbacks of any change."""
+        # Single funnel for every mutation (add, merge, partial/full cancel,
+        # expire, reconcile), so it is the one place the checkpoint needs to
+        # learn that the store moved.
+        self._dirty = True
         for cb in self._on_alerts_changed:
             try:
                 cb()
@@ -649,11 +656,19 @@ class AlertManager:
         logger.info("Stopped alert cleanup task")
 
     async def _cleanup_loop(self):
-        """Background task to clean up expired alerts."""
+        """Background task to clean up expired alerts and checkpoint state."""
         while self._running:
             try:
                 await asyncio.sleep(self._cleanup_interval)
                 self.cleanup_expired()
+                # Checkpoint every pass, not just on a graceful shutdown. Only
+                # stop_alert_manager() used to save, so a crash, a kill, or a
+                # dev auto-reload dropped every active warning; on the next
+                # start the API poll re-added them all as brand new alerts,
+                # re-firing the toast, chime and broadcast graphic for warnings
+                # that had been running for half an hour. In the audit log this
+                # is 24% of all ADDs carrying a CON/EXT/EXA/EXB action.
+                await self.checkpoint()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -713,14 +728,23 @@ class AlertManager:
         path = path or self._persistence_path
         if not path:
             return
+        self._write_snapshot(path, list(self._alerts.values()))
 
+    def _write_snapshot(self, path: Path, alerts: list[Alert]) -> None:
+        """Serialize a snapshot of alerts to ``path``.
+
+        Split out from save_to_file so the checkpoint can hand the expensive
+        half to a worker thread. A zone-based alert carries its merged zone
+        geometry, which runs to megabytes on its own, so serializing the whole
+        store is not something to do on the event loop during severe weather.
+        """
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
 
             data = {
                 "saved_at": datetime.now(timezone.utc).isoformat(),
-                "alert_count": len(self._alerts),
-                "alerts": [alert.to_dict() for alert in self._alerts.values()],
+                "alert_count": len(alerts),
+                "alerts": [alert.to_dict() for alert in alerts],
             }
 
             # Write atomically: a crash/kill mid-write must not truncate the live
@@ -730,10 +754,59 @@ class AlertManager:
                 json.dump(data, f, indent=2)
             tmp_path.replace(path)
 
-            logger.info(f"Saved {len(self._alerts)} alerts to {path}")
+            logger.info(f"Saved {len(alerts)} alerts to {path}")
 
         except Exception as e:
             logger.error(f"Failed to save alerts to {path}: {e}")
+
+    async def checkpoint(self) -> bool:
+        """Persist the store if it changed since the last checkpoint.
+
+        Returns True if a write happened.
+        """
+        if not self._persistence_path or not self._dirty:
+            return False
+
+        # Cleared before the write, not after: a mutation that lands while the
+        # snapshot is being serialized must leave the flag set so the next pass
+        # picks it up, rather than being swallowed.
+        self._dirty = False
+        snapshot = list(self._alerts.values())
+        await asyncio.to_thread(self._write_snapshot, self._persistence_path, snapshot)
+        return True
+
+    @staticmethod
+    def _recanonicalize_id(alert: Alert) -> bool:
+        """Rebuild a restored alert's product_id from its VTEC, in place.
+
+        The key format is what tells an update apart from a new alert, so a
+        change to it splits every alert that outlives the restart: the restored
+        copy keeps the old key, the next follow-up computes the new one, and the
+        two never meet. Worse, the restored copy no longer matches anything in
+        the API's active feed, so reconcile_api_alerts reaps it after two polls
+        and the event comes back as a brand new alert -- precisely the failure
+        the key format was changed to fix.
+
+        Rebuilding on load makes a restored file self-healing across any future
+        key change. Alerts without VTEC (SPS) are left alone; they carry short
+        lifetimes and age out on their own.
+
+        Returns True if the ID changed.
+        """
+        if not alert.vtec:
+            return False
+        try:
+            from ..parsers.vtec_parser import VTECParser
+        except ImportError:
+            from backend.parsers.vtec_parser import VTECParser
+
+        canonical = VTECParser.build_product_id(alert.vtec)
+        if not canonical or canonical == alert.product_id:
+            return False
+
+        logger.info(f"Restored alert re-keyed: {alert.product_id} -> {canonical}")
+        alert.product_id = canonical
+        return True
 
     def load_from_file(self, path: Optional[Path] = None) -> int:
         """
@@ -755,12 +828,15 @@ class AlertManager:
 
             alerts_data = data.get("alerts", [])
             loaded = 0
+            rekeyed = 0
 
             for alert_dict in alerts_data:
                 try:
                     alert = Alert.from_dict(alert_dict)
                     # Only load if not expired
                     if not alert.is_expired:
+                        if self._recanonicalize_id(alert):
+                            rekeyed += 1
                         self._alerts[alert.product_id] = alert
                         loaded += 1
                         # Audit log restored alert
@@ -771,6 +847,8 @@ class AlertManager:
                 except Exception as e:
                     logger.warning(f"Failed to load alert: {e}")
 
+            if rekeyed:
+                logger.info(f"Rebuilt {rekeyed} restored alert ID(s) to the current key format")
             logger.info(f"Loaded {loaded} alerts from {path}")
             return loaded
 
