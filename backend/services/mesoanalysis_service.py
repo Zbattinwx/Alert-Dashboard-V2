@@ -826,7 +826,18 @@ class MesoanalysisService:
         except Exception as e:
             logger.debug("meso: MRMS service unavailable (%s)", e)
             return None
-        if svc is None or not svc.available():
+        # `MRMSService.available` is a PROPERTY, not a method. Calling it as
+        # `svc.available()` raises "TypeError: 'bool' object is not callable"
+        # and takes the whole analysis with it -- which is exactly what shipped
+        # in 0.1.34: every mesoanalysis request 500'd wherever MRMS was
+        # running, i.e. on every desktop Hub and on the server. The unit tests
+        # passed because the fake in them defined `available()` as a method,
+        # so the fake was the only thing that had ever been tested.
+        # Tolerating both shapes because a stub is allowed to be either.
+        avail = getattr(svc, "available", False)
+        if callable(avail):
+            avail = avail()
+        if svc is None or not avail:
             return None
 
         try:

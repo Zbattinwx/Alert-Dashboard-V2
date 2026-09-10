@@ -1769,11 +1769,40 @@ class StormTrackingService:
         # storm cell will match across sites with a tiny Δt and a small
         # parallax offset → hundreds of kph.  Below MIN_MOTION_DT_SECONDS,
         # keep the previous motion vector rather than computing a new one.
+        implied_kph = dist_km / dt_hours
         if dt_seconds < MIN_MOTION_DT_SECONDS:
             speed_kph = old.motion_speed_kph
             bearing = old.motion_direction_deg
+        elif implied_kph > MAX_STORM_SPEED_KPH:
+            # AN IMPLAUSIBLE DISPLACEMENT IS NOT A FAST STORM.
+            #
+            # This used to be `min(dist_km / dt_hours, MAX_STORM_SPEED_KPH)`,
+            # which does not reject the jump -- it asserts a 175 kph storm and
+            # then smooths that into the cell's motion for several scans.
+            #
+            # Measured on CELL-79B54DEA, 2026-09-09: eight consecutive scans at
+            # 1-4 km (0-35 mph), then two at 13.9 and 14.0 km -- 122 and 124 mph
+            # -- which the 0.6/0.4 smoothing turned into a reported 93 mph. The
+            # cell's own area was 336 km^2, about 21 km across, so a 14 km
+            # "move" happened INSIDE its own footprint: the reflectivity-
+            # weighted centroid flipped between two cores of one merged cell.
+            # The storm did not accelerate; the label did.
+            #
+            # MAX_MATCH_DISTANCE_KM (20 km) permits this by itself -- at a
+            # 4-minute volume it allows an apparent 240 kph -- so the matcher
+            # will keep producing these associations. What we can refuse to do
+            # is believe the resulting vector. Keep the previous motion, the
+            # same thing this function already does for an implausible dt, and
+            # count it so a tracker that does this constantly is visible.
+            speed_kph = old.motion_speed_kph
+            bearing = old.motion_direction_deg
+            note_failure(
+                "tracking.centroid_jump",
+                "Storm motion is being computed from centroid jumps rather than "
+                "storm movement (displacement implies a speed no storm reaches)",
+            )
         else:
-            speed_kph = min(dist_km / dt_hours, MAX_STORM_SPEED_KPH)
+            speed_kph = implied_kph
 
             # Smooth motion with previous motion
             if old.scan_count > 1 and old.motion_speed_kph > 0:

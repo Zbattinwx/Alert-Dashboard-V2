@@ -86,6 +86,10 @@ class FakeMRMS:
         self.frames = frames            # {ts: packed bytes}
         self.asked = []
 
+    # A PROPERTY, matching MRMSService. It was a method here, which is why the
+    # suite was green while every real request 500'd with
+    # "TypeError: 'bool' object is not callable".
+    @property
     def available(self):
         return True
 
@@ -344,3 +348,24 @@ def test_trigger_is_reported_not_used_to_shrink(svc, monkeypatch):
     use_mrms(monkeypatch, fake)
     gate = svc._initiation(_flat(shape), "2026-09-09T19:00:00+00:00")
     assert gate["conditional"].any(), "no-trigger area stopped being reportable"
+
+
+def test_the_fake_matches_the_real_service_contract():
+    """The fake above is the only MRMS these tests ever see.
+
+    0.1.34 shipped `svc.available()` against a class where `available` is a
+    @property. Every mesoanalysis request 500'd wherever MRMS was running, and
+    the suite stayed green because the fake defined it as a method. A stub that
+    drifts from the thing it stands in for tests nothing but itself.
+    """
+    from backend.services.mrms_service import MRMSService
+    for name in ("available", "latest_binary", "latest_timestamp"):
+        assert isinstance(getattr(MRMSService, name), property), (
+            f"MRMSService.{name} is no longer a property - the gate and this "
+            "fake both assume it is")
+    assert isinstance(FakeMRMS.available, property), (
+        "the fake must expose `available` the same way the real service does")
+    # And these stay ordinary methods on both.
+    for name in ("get_frame_list", "get_frame_binary"):
+        assert callable(getattr(MRMSService, name))
+        assert callable(getattr(FakeMRMS, name))
