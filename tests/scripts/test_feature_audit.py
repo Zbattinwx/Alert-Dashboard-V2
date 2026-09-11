@@ -262,3 +262,57 @@ def test_the_audit_reads_the_vector_the_model_sees():
     for name in DUALPOL_FEATURES:
         assert math.isnan(got[name]), f"{name} should be NaN behind the sentinel"
     assert got["max_dbz"] == 55.0
+
+
+# ── Time buckets must be finer than the step being looked for ──────────────
+
+def test_a_step_inside_one_month_is_caught():
+    """The miss that mattered.
+
+    16,097 rows collected 2026-09-08..10 had FIVE features step 0% -> 88-100%
+    across three days -- every one keyed to which BUILD was running -- and the
+    audit reported two findings, because it bucketed presence by MONTH and all
+    of it happened inside September.
+    """
+    rows = []
+    for day, has in (("08", False), ("09", False), ("10", True)):
+        rows += [row(f"2026-09-{day}T18:{j % 60:02d}:00+00:00",
+                     env_efhl=150.0 if has else None) for j in range(300)]
+    rep = run(rows)
+    f = findings(rep, "env_efhl", "presence_step")
+    assert f, [x["check"] for x in rep["findings"]]
+    assert f[0]["severity"] == "fail"
+    # The width itself is an implementation detail (this span is short enough to
+    # land on hours); what must hold is that it is FINER than a month, or the
+    # step is invisible. Longer prefix = finer bucket.
+    assert rep["bucket_width"] > 7, (
+        f"bucketed at width {rep['bucket_width']} — a month cannot see this step")
+
+
+def test_an_archive_span_still_buckets_by_month():
+    """Finer is not always better: years of archive would be thousands of
+    buckets, most too small to judge."""
+    rows = []
+    for m in range(1, 13):
+        rows += [row(f"2024-{m:02d}-15T18:{j % 60:02d}:00+00:00", env_efhl=150.0)
+                 for j in range(120)]
+    rep = run(rows)
+    assert rep["bucket_width"] == 7, "a year-long span must bucket by month"
+
+
+def test_a_single_session_buckets_by_hour():
+    rows = [row(f"2026-09-10T{h:02d}:{j % 60:02d}:00+00:00", env_efhl=150.0)
+            for h in range(6) for j in range(80)]
+    assert run(rows)["bucket_width"] == 13
+
+
+def test_the_row_denominator_is_per_row_not_per_feature():
+    """It was incremented inside the per-feature loop, making every presence
+    fraction 48x too small -- so nothing ever looked like it stepped."""
+    rows = [row(f"2026-09-10T{h:02d}:00:00+00:00", env_efhl=150.0)
+            for h in range(4) for _ in range(100)]
+    rep = run(rows)
+    assert sum(rep["buckets"].values()) == len(rows), (
+        f"counted {sum(rep['buckets'].values())} rows for {len(rows)} records")
+    # ...and with the denominator right, a fully-present feature reads 100%.
+    assert not findings(rep, "env_efhl", "presence_step")

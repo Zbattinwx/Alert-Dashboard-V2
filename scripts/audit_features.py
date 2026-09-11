@@ -98,8 +98,27 @@ RANGE_CORR_WARN = 0.30
 # moves 5x or more is barely reporting anything else. llsd_max_shear moved ~50x.
 RANGE_MEDIAN_FOLD_FAIL = 5.0
 RANGE_MEDIAN_FOLD_WARN = 2.0
-# Months with too few rows to judge; avoids "0% present" from a month with 3 rows.
-MIN_MONTH_ROWS = 50
+# TIME BUCKETS ARE ADAPTIVE, and that is not a refinement -- a fixed month
+# bucket made this check blind to the thing it exists for.
+#
+# Presence-over-time was bucketed by MONTH. That is right for the archive, which
+# spans years, and useless for LIVE collection, which spans days: on the 16,097
+# rows collected 2026-09-08..10 the audit reported "2 findings" while FIVE
+# features stepped inside that one month --
+#
+#     env_mlcape            0% -> 3% -> 88%
+#     env_efhl              0% -> 3% -> 88%
+#     max_wind_velocity_ms  0% -> 0% -> 52%
+#     downburst_detected    0% -> 22% -> 100%
+#     flash_rate_fpm        0% -> 24% -> 100%
+#
+# every one of them keyed to which BUILD was running that day. Training across
+# that mix teaches the model the deploy schedule. The bucket must be finer than
+# the thing being detected, so it is chosen from the span: months for an archive,
+# days for a few weeks, hours for a single session.
+BUCKET_BY_SPAN = ((90, 7), (3, 10), (0, 13))   # (min span days, ts prefix length)
+# Buckets with too few rows to judge; avoids "0% present" from a bucket of 3.
+MIN_BUCKET_ROWS = 50
 
 
 def _finite(v: Any) -> Optional[float]:
@@ -195,9 +214,14 @@ class Audit:
         self.row_fn = _feature_row()
         self.rows = 0
         self.months: Counter = Counter()
+        self.stamps: list[str] = []
+        self._bucket_len: Optional[int] = None
         # per feature
         self.present: Counter = Counter()
         self.present_by_month: dict[str, Counter] = defaultdict(Counter)
+        # keyed by the FULL ts while collecting; folded to buckets in report()
+        self.present_by_bucket: dict[str, dict] = defaultdict(dict)
+        self.rows_by_bucket: dict = {}
         self.values: dict[str, list[float]] = defaultdict(list)
         self.distinct: dict[str, set] = defaultdict(set)
         self.seen_keys: set[str] = set()
@@ -213,6 +237,13 @@ class Audit:
     def add(self, rec: dict) -> None:
         self.rows += 1
         ts = str(rec.get("ts") or "")
+        # Keep the whole timestamp. The bucket width depends on the SPAN, and
+        # the span is not known until every row has been read.
+        self.stamps.append(ts)
+        # ONCE PER ROW. This lived inside the per-feature loop, which made the
+        # denominator 48x too large and every presence fraction uniformly tiny --
+        # so no feature ever looked like it STEPPED, which is the whole check.
+        self.rows_by_bucket[ts] = self.rows_by_bucket.get(ts, 0) + 1
         month = ts[:7] if len(ts) >= 7 else "unknown"
         self.months[month] += 1
 
@@ -253,7 +284,7 @@ class Audit:
         for name in names:
             raw = feats.get(name, None)
             v = _finite(raw)
-            self.present_by_month[name][month] += 1 if v is not None else 0
+            self.present_by_bucket[name][ts] = self.present_by_bucket[name].get(ts, 0) + (1 if v is not None else 0)
             if v is None:
                 continue
             self.present[name] += 1
@@ -278,12 +309,53 @@ class Audit:
                     self.labels[f"hazard:{k}"][bool(val)] += 1
 
     # ── Reporting ──────────────────────────────────────────────────────────
+    def _bucket_width(self) -> int:
+        """Timestamp prefix length to group by, chosen from the data's span.
+
+        A month bucket cannot see a step that happens inside a month, and live
+        collection produces exactly that. See BUCKET_BY_SPAN.
+        """
+        if self._bucket_len is not None:
+            return self._bucket_len
+        days = [s[:10] for s in self.stamps if len(s) >= 10]
+        span_days = 0
+        if days:
+            lo, hi = min(days), max(days)
+            try:
+                from datetime import date
+                span_days = (date.fromisoformat(hi) - date.fromisoformat(lo)).days
+            except ValueError:
+                span_days = 0
+        for min_span, prefix in BUCKET_BY_SPAN:
+            if span_days >= min_span:
+                self._bucket_len = prefix
+                break
+        else:
+            self._bucket_len = 10
+        return self._bucket_len
+
+    def _buckets(self) -> dict[str, int]:
+        """Row counts per time bucket at the chosen width."""
+        w = self._bucket_width()
+        out: dict[str, int] = {}
+        for ts, n in self.rows_by_bucket.items():
+            key = ts[:w] if len(ts) >= w else "unknown"
+            out[key] = out.get(key, 0) + n
+        return out
+
     def _month_presence(self, name: str) -> list[tuple[str, float]]:
+        """(bucket, fraction present), ascending, over buckets big enough to judge."""
+        w = self._bucket_width()
+        totals = self._buckets()
+        present: dict[str, int] = {}
+        for ts, n in self.present_by_bucket.get(name, {}).items():
+            key = ts[:w] if len(ts) >= w else "unknown"
+            present[key] = present.get(key, 0) + n
         out = []
-        for m, total in sorted(self.months.items()):
-            if m == "unknown" or total < MIN_MONTH_ROWS:
+        for b, total in sorted(totals.items()):
+            if b == "unknown" or total < MIN_BUCKET_ROWS:
                 continue
-            out.append((m, self.present_by_month[name][m] / total))
+            out.append((b, present.get(b, 0) / total))
         return out
 
     def report(self) -> dict:
@@ -434,7 +506,8 @@ class Audit:
 
         return {
             "rows": self.rows,
-            "months": dict(sorted(self.months.items())),
+            "buckets": dict(sorted(self._buckets().items())),
+            "bucket_width": self._bucket_width(),
             "declared_features": len(declared),
             "features_seen": len(self.seen_keys & set(declared)) if self.declared else len(self.seen_keys),
             "rows_without_range": self.no_range_rows,
@@ -449,11 +522,12 @@ def render(rep: dict, quiet: bool = False) -> None:
     print(f"\nrows {rep['rows']:,}   "
           f"features declared {rep['declared_features']}   "
           f"seen in data {rep['features_seen']}")
-    months = rep["months"]
-    if months:
-        keys = [k for k in months if k != "unknown"]
+    buckets = rep.get("buckets") or {}
+    if buckets:
+        keys = [k for k in buckets if k != "unknown"]
+        unit = {7: "months", 10: "days", 13: "hours"}.get(rep.get("bucket_width"), "buckets")
         if keys:
-            print(f"span {min(keys)} .. {max(keys)}   ({len(keys)} months)")
+            print(f"span {min(keys)} .. {max(keys)}   ({len(keys)} {unit})")
     if rep["rows_without_range"]:
         print(f"rows with no usable lat/lon/site (range checks skipped): "
               f"{rep['rows_without_range']:,}")

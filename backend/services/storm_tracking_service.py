@@ -375,6 +375,24 @@ class TrackedStormCell:
     # mean_cc / min_cc / mean_zdr were 0.0 in 100% of collected training rows in
     # every month of the archive, and three of the classifier's 27 features
     # carried no information whatsoever.
+    # WHICH RADAR MEASURED THIS CELL. Declared for the same reason the dual-pol
+    # fields above are: asdict() walks declared fields only.
+    #
+    # Every live-collected training row had site=None, because live_qa reads
+    # `cell.get("site")` and the cell carried no such key -- 16,097 rows with no
+    # way to work out how far the storm was from the radar. Range is not a
+    # cosmetic detail here: the beam widens and rises with it, `audit_features`
+    # checks every feature against it, and `llsd_max_shear` turned out to be
+    # very nearly a measurement of range rather than of rotation. Archive rows
+    # have a site (the backfill knows which one it is replaying), so live and
+    # archive rows could not be audited or merged on the same terms.
+    #
+    # It is the NEAREST radar, not simply whichever volume is being processed:
+    # with more than one radar running, a cell is analysed by the site that owns
+    # it under the same Voronoi rule the detectors use (_is_primary_radar_for_cell)
+    # -- the one with the lowest beam over it, which is the one its measurements
+    # actually came from.
+    site: Optional[str] = None
     mean_cc: Optional[float] = None      # Mean copolar correlation over the cell
     min_cc: Optional[float] = None       # Minimum CC (debris / mixed-phase signal)
     mean_zdr: Optional[float] = None     # Mean differential reflectivity (dB)
@@ -1035,6 +1053,11 @@ class StormTrackingService:
             # Step 7: Generate forecast tracks
             self._generate_forecasts(matched)
 
+            # Last, so every cell this scan produced carries its owning radar
+            # before anything reads it — the training writer, the API payload
+            # and the app all leave through asdict() from here.
+            self._stamp_sites(self.tracked_cells)
+
             # Update previous cells for next scan
             self._previous_cells = raw_cells
 
@@ -1073,6 +1096,34 @@ class StormTrackingService:
             note_failure("nyquist.1", "Nyquist velocity is unavailable; velocity dealiasing may be wrong", _e)
             pass
         return 28.0  # Conservative WSR-88D legacy VCP default
+
+    def _owning_site(self, cell: "TrackedStormCell") -> Optional[str]:
+        """The registered radar nearest this cell, by the same Voronoi rule the
+        detectors use — i.e. the site whose beam actually measured it.
+
+        Returns None when no radar location has been registered yet, which is a
+        real state (the first volume of a session, before `_process_sync` has
+        read a radar's coordinates) and must stay distinguishable from a site.
+        """
+        best: Optional[str] = None
+        best_d = float("inf")
+        for sid, (o_lat, o_lon) in self._radar_locations.items():
+            try:
+                d, _ = self._latlon_to_polar(o_lat, o_lon, cell.lat, cell.lon)
+            except Exception:
+                continue
+            if d < best_d:
+                best, best_d = sid, d
+        return best
+
+    def _stamp_sites(self, cells: list["TrackedStormCell"]) -> None:
+        """Record which radar owns each cell, once per scan."""
+        if not self._radar_locations:
+            return
+        for cell in cells:
+            site = self._owning_site(cell)
+            if site:
+                cell.site = site
 
     def _is_primary_radar_for_cell(
         self, rad_lat: float, rad_lon: float, cell: "TrackedStormCell"
