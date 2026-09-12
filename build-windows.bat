@@ -44,6 +44,15 @@ if not exist "frontend\dist\index.html" (
 )
 
 echo.
+REM The models are pickled sklearn estimators. PyInstaller cannot see that import
+REM through a pickle, so sklearn/joblib/threadpoolctl are collected explicitly or
+REM the exe drops to physics-only; scripts\ carries FEATURE_NAMES, which the
+REM tracker imports at runtime.
+REM
+REM THIS SCRIPT USED TO ADD ONLY backend\data, WHICH IS EMPTY -- the models live
+REM at repo-root data\ -- so it could never ship a classifier. On 2026-09-11 a
+REM bundle built this way reached production with every storm-cell probability
+REM column blank, and nothing said so: same exe, same layout, 4 MB lighter of 45.
 echo [2/4] Freezing backend EXE with PyInstaller (this takes a few minutes)...
 .venv-build\Scripts\pyinstaller.exe --noconfirm --clean --onedir --name dashboard-backend ^
   --distpath packaging\dist --workpath packaging\build --specpath packaging ^
@@ -54,6 +63,12 @@ echo [2/4] Freezing backend EXE with PyInstaller (this takes a few minutes)...
   --collect-all cmweather --collect-all open_radar_data --collect-all xarray ^
   --collect-all eccodes --collect-all findlibs ^
   --collect-submodules backend ^
+  --collect-all sklearn --collect-all joblib --collect-all threadpoolctl ^
+  --collect-submodules scripts ^
+  --add-data "%CD%\scripts;scripts" ^
+  --add-data "%CD%\data\rotation_model.joblib;data" ^
+  --add-data "%CD%\data\severe_model.joblib;data" ^
+  --add-data "%CD%\data\hail_1in_model.joblib;data" ^
   --add-data "%CD%\backend\data;backend\data" ^
   --add-data "%CD%\frontend\dist;frontend\dist" ^
   --add-data "%CD%\widgets;widgets" ^
@@ -61,6 +76,16 @@ echo [2/4] Freezing backend EXE with PyInstaller (this takes a few minutes)...
   packaging\run_backend.py
 if not exist "packaging\dist\dashboard-backend\dashboard-backend.exe" (
     echo [ERROR] PyInstaller build failed.
+    pause
+    exit /b 1
+)
+
+REM Verify the OUTPUT, not just that an exe appeared. "The exe exists" was the
+REM only post-condition this script had, and a freeze that writes the exe and
+REM then collects nothing satisfies it.
+python packaging\verify_freeze.py "packaging\dist\dashboard-backend" --base %VITE_BASE_PATH%
+if errorlevel 1 (
+    echo [ERROR] The freeze is incomplete - see above. Refusing to build a bundle from it.
     pause
     exit /b 1
 )

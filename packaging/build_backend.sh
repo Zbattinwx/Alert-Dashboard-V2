@@ -21,6 +21,17 @@ PYI="$VENVPY -m PyInstaller"
 
 cd "$ROOT"
 
+# Keep the build OFF the system drive. PyInstaller stages tens of thousands of
+# small files through TEMP, and C: here runs near full -- a 3.2 GB staging
+# directory from these freezes was a large part of it. Both the source and the
+# output already live on F:; only the scratch was crossing over.
+if [ -z "${TBF_BUILD_TMP:-}" ]; then
+  TBF_BUILD_TMP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/packaging/.buildtmp"
+fi
+mkdir -p "$TBF_BUILD_TMP"
+export TMPDIR="$TBF_BUILD_TMP" TEMP="$TBF_BUILD_TMP" TMP="$TBF_BUILD_TMP"
+echo "build scratch: $TBF_BUILD_TMP"
+
 # Fail fast and legibly if the model seeds are missing: --add-data on a path
 # that does not exist fails deep inside PyInstaller with a much worse message.
 "$VENVPY" -c "import sklearn, joblib" 2>/dev/null || {
@@ -118,5 +129,20 @@ $PYI --noconfirm --clean --onedir --name dashboard-backend \
   --add-data "$ROOT_WIN/widgets;widgets" \
   --add-data "$ROOT_WIN/config/brands;config/brands" \
   packaging/run_backend.py
+
+# VERIFY THE OUTPUT, not just the inputs. The check above confirms the model
+# files exist in the repo; it says nothing about whether PyInstaller actually
+# put them in the bundle. On 2026-09-11 a build shipped with no models at all --
+# same exe, same layout, 4 MB lighter -- and ran in production for hours with
+# every probability column blank. See packaging/verify_freeze.py.
+# MSYS_NO_PATHCONV IS LOAD-BEARING. Git Bash rewrites a leading-slash argument
+# into a Windows path -- "/dash/" arrives as "C:/Program Files/Git/dash/" --
+# which is the very mangling this check exists to catch, and it caught its own
+# invocation the first time it ran. Measured: plain arg mangles, the env var
+# mangles too, MSYS_NO_PATHCONV=1 survives.
+MSYS_NO_PATHCONV=1 python packaging/verify_freeze.py "packaging/dist/dashboard-backend"   ${VITE_BASE_PATH:+--base "$VITE_BASE_PATH"} || {
+  echo "ERROR: the freeze is incomplete - see above. Not shipping this."
+  exit 1
+}
 
 echo "Built: packaging/dist/dashboard-backend/"
